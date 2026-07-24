@@ -1,6 +1,10 @@
 # gpui_video
 
-`gpui_video` is a reusable GPUI video component backed by GStreamer. It keeps playback, decoding and frame extraction separate from player chrome so applications can build different interfaces on top of the same core.
+`gpui_video` is a reusable GPUI video component with pluggable playback
+backends. GStreamer is enabled by default, while applications can compile
+another built-in backend or inject their own implementation. Playback,
+decoding and frame extraction remain separate from player chrome so
+applications can build different interfaces on top of the same core.
 
 ## Public capabilities
 
@@ -18,6 +22,59 @@
 - CPU, macOS CoreVideo/VideoToolbox and Linux DMA-BUF frame transport
 - HTTP request headers, authentication, proxy, timeout and source retry options
 - network buffering progress and an explicit host-controlled reload operation
+
+## Select a playback backend
+
+The default Cargo feature enables the built-in GStreamer backend:
+
+```toml
+gpui_video = { path = ".../gpui_video" }
+```
+
+Applications that provide their own backend can omit GStreamer entirely:
+
+```toml
+gpui_video = {
+    path = ".../gpui_video",
+    default-features = false,
+}
+```
+
+Implement `VideoBackend` to open a `PlaybackSession` and, optionally, a
+`FrameExtractionSession`. The backend publishes timestamped `VideoFrame`
+values and playback events through `PlaybackOutputSink`; `gpui_video` owns the
+bounded latest-frame queue and common frame statistics.
+
+```rust
+let backend: Arc<dyn VideoBackend> = Arc::new(MyBackend::new());
+let player_source = source.clone();
+let player_backend = backend.clone();
+
+let player = cx.new(move |cx| {
+    VideoPlayer::new_in_window_with_backend(
+        player_source,
+        VideoPlayerOptions::default(),
+        player_backend,
+        window,
+        cx,
+    )
+    .expect("failed to create video player")
+});
+
+let extractor =
+    VideoFrameExtractor::new_with_backend(source.clone(), backend)?;
+```
+
+The builder provides the same selection:
+
+```rust
+let player = VideoPlayer::builder(source)
+    .backend(MyBackend::new())
+    .build_in_window(window, cx)?;
+```
+
+Cargo features determine which built-in backends are available; the backend is
+selected per player at runtime. Multiple compiled backends may coexist.
 
 ## Create a player entity
 
@@ -202,7 +259,9 @@ player.update(cx, |player, cx| {
 })?;
 ```
 
-Forward stepping uses GStreamer's frame-step event. Backward stepping performs an accurate seek using the current frame duration because compressed video cannot generally decode backward.
+Forward stepping is delegated to the active backend. Backward stepping performs
+an accurate seek using the current frame duration because compressed video
+cannot generally decode backward.
 
 ## Subscribe to events
 
@@ -289,7 +348,9 @@ For non-async workers:
 let frame = extractor.frame_at_blocking(Duration::from_secs(30))?;
 ```
 
-An extractor owns one paused GStreamer pipeline and serializes requests on a worker thread. Reuse it for thumbnail strips or hover previews instead of creating one extractor per frame.
+An extractor owns one backend extraction session and serializes requests on a
+worker thread. Reuse it for thumbnail strips or hover previews instead of
+creating one extractor per frame.
 
 Remote frame extraction requires a seekable server response, normally HTTP
 byte-range support. This does not restrict ordinary sequential playback, but a
@@ -298,7 +359,9 @@ frames efficiently; the extractor reports that seek failure to the host.
 
 The exact-request queue is bounded to two requests by default, so request producers receive backpressure instead of growing the worker queue without limit. Configure `VideoFrameExtractorOptions::request_queue_capacity` when a different amount of backpressure is needed. Latest-only requests use a separate one-slot mailbox and never discard exact thumbnail requests.
 
-Dropping the final extractor handle does not wait for an in-flight GStreamer seek timeout on the calling thread. The worker is notified to stop and releases its pipeline after the active request returns.
+Dropping the final extractor handle does not wait for an in-flight backend seek
+timeout on the calling thread. The worker is notified to stop and releases its
+session after the active request returns.
 
 Requests beyond the video stream duration return the closest available frame before the end. `SeekMode::Accurate` is the default; use `frame_at_with_mode` or `frame_at_blocking_with_mode` when keyframe speed is preferred.
 

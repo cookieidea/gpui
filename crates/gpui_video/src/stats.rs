@@ -12,7 +12,7 @@ pub struct VideoPlaybackStats {
 }
 
 impl VideoPlaybackStats {
-    /// Frames successfully converted from GStreamer samples.
+    /// Frames successfully published by the active decoding backend.
     pub fn decoded_frames(self) -> u64 {
         self.decoded_frames
     }

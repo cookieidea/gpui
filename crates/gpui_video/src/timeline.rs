@@ -19,7 +19,7 @@ pub struct PlaybackTimeline {
 }
 
 impl PlaybackTimeline {
-    pub(crate) fn new(position: Duration, duration: Option<Duration>, seekable: bool) -> Self {
+    pub fn new(position: Duration, duration: Option<Duration>, seekable: bool) -> Self {
         Self {
             position: duration.map_or(position, |duration| position.min(duration)),
             duration,

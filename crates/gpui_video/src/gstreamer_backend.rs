@@ -17,25 +17,30 @@ use gpui::{
 use gst::prelude::*;
 
 use crate::{
-    MediaSource, PlaybackTimeline, SeekMode, VideoFrame, VideoPlaybackStats,
-    network::configure_playbin_network, stats::PlaybackCounters,
+    BackendCapabilities, BackendEvent, FrameExtractionSession, FrameExtractorBackendRequest,
+    FrameTransportPreference, MediaSource, PlaybackBackendRequest, PlaybackOutputSink,
+    PlaybackSession, PlaybackTimeline, SeekMode, TransportChange, VideoBackend, VideoFrame,
+    network::configure_playbin_network,
 };
 
 #[cfg(target_os = "macos")]
 mod core_video;
 #[cfg(target_os = "linux")]
 mod dma_buf;
+mod frame_extractor;
 
-pub(crate) struct PlaybackOutput {
-    pub frames: async_channel::Receiver<Arc<VideoFrame>>,
-    pub events: async_channel::Receiver<BackendEvent>,
+/// Built-in GStreamer playback backend.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GstreamerBackend;
+
+pub(crate) fn initialize() -> Result<()> {
+    gst::init().map_err(|error| anyhow!("failed to initialize GStreamer: {error}"))
 }
 
-#[derive(Debug)]
-pub(crate) enum BackendEvent {
-    Buffering(u8),
-    Ended,
-    Error(String),
+impl GstreamerBackend {
+    pub fn initialize() -> Result<()> {
+        initialize()
+    }
 }
 
 pub(crate) struct GstreamerPlayback {
@@ -44,7 +49,6 @@ pub(crate) struct GstreamerPlayback {
     appsink: gst_app::AppSink,
     bus: gst::Bus,
     bus_thread: Option<JoinHandle<()>>,
-    counters: Arc<PlaybackCounters>,
     #[cfg(target_os = "linux")]
     using_cpu_fallback: AtomicBool,
 }
@@ -53,8 +57,9 @@ impl GstreamerPlayback {
     pub fn new(
         source: &MediaSource,
         gpu_specs: Option<&GpuSpecs>,
-    ) -> Result<(Self, PlaybackOutput)> {
-        crate::init()?;
+        output: PlaybackOutputSink,
+    ) -> Result<Self> {
+        initialize()?;
 
         let caps = appsink_caps(gpu_specs)?;
         let appsink = gst_app::AppSink::builder()
@@ -65,10 +70,7 @@ impl GstreamerPlayback {
             .sync(true)
             .build();
 
-        let (frame_tx, frame_rx) = async_channel::bounded(1);
-        let frame_drop_rx = frame_rx.clone();
-        let counters = Arc::new(PlaybackCounters::default());
-        let counters_for_samples = counters.clone();
+        let output_for_samples = output.clone();
         let sequence = Arc::new(AtomicU64::new(1));
         let surface_handle = SurfaceHandle::new();
         #[cfg(target_os = "linux")]
@@ -100,10 +102,7 @@ impl GstreamerPlayback {
                         gst::FlowError::Error
                     })?;
 
-                    counters_for_samples.record_decoded_frame();
-                    if publish_latest(&frame_tx, &frame_drop_rx, frame) {
-                        counters_for_samples.record_dropped_frame();
-                    }
+                    output_for_samples.publish_frame(frame);
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -122,7 +121,7 @@ impl GstreamerPlayback {
         let bus_for_thread = bus.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_bus = producer_drm_device;
-        let (event_tx, event_rx) = async_channel::unbounded();
+        let output_for_bus = output;
         let bus_thread = std::thread::Builder::new()
             .name("gpui-video-gstreamer-bus".into())
             .spawn(move || {
@@ -146,13 +145,13 @@ impl GstreamerPlayback {
                                 message.push_str(": ");
                                 message.push_str(&debug);
                             }
-                            Some(BackendEvent::Error(message))
+                            Some(BackendEvent::Error(message.into()))
                         }
                         _ => None,
                     };
 
                     if let Some(event) = event
-                        && event_tx.send_blocking(event).is_err()
+                        && !output_for_bus.emit(event)
                     {
                         break;
                     }
@@ -160,22 +159,15 @@ impl GstreamerPlayback {
             })
             .context("failed to start GStreamer bus thread")?;
 
-        Ok((
-            Self {
-                playbin,
-                #[cfg(target_os = "linux")]
-                appsink,
-                bus,
-                bus_thread: Some(bus_thread),
-                counters,
-                #[cfg(target_os = "linux")]
-                using_cpu_fallback: AtomicBool::new(false),
-            },
-            PlaybackOutput {
-                frames: frame_rx,
-                events: event_rx,
-            },
-        ))
+        Ok(Self {
+            playbin,
+            #[cfg(target_os = "linux")]
+            appsink,
+            bus,
+            bus_thread: Some(bus_thread),
+            #[cfg(target_os = "linux")]
+            using_cpu_fallback: AtomicBool::new(false),
+        })
     }
 
     pub fn play(&self) -> Result<()> {
@@ -190,11 +182,6 @@ impl GstreamerPlayback {
             .set_state(gst::State::Paused)
             .map(|_| ())
             .map_err(|error| anyhow!("failed to pause playback: {error:?}"))
-    }
-
-    pub fn restart(&self) -> Result<()> {
-        self.seek_to(Duration::ZERO, SeekMode::KeyFrame)?;
-        self.play()
     }
 
     pub fn reload(&self, autoplay: bool) -> Result<()> {
@@ -280,10 +267,6 @@ impl GstreamerPlayback {
         self.playbin.set_property("mute", muted);
     }
 
-    pub fn stats(&self, delivered_frames: u64) -> VideoPlaybackStats {
-        self.counters.snapshot(delivered_frames)
-    }
-
     #[cfg(target_os = "linux")]
     pub fn switch_to_cpu_fallback(&self) -> Result<bool> {
         if self
@@ -319,6 +302,114 @@ impl GstreamerPlayback {
     }
 }
 
+impl VideoBackend for GstreamerBackend {
+    fn name(&self) -> &'static str {
+        "gstreamer"
+    }
+
+    fn open_playback(
+        &self,
+        request: PlaybackBackendRequest,
+        output: PlaybackOutputSink,
+    ) -> Result<Box<dyn PlaybackSession>> {
+        Ok(Box::new(GstreamerPlayback::new(
+            &request.source,
+            request.gpu_specs.as_ref(),
+            output,
+        )?))
+    }
+
+    fn open_frame_extractor(
+        &self,
+        request: FrameExtractorBackendRequest,
+    ) -> Result<Box<dyn FrameExtractionSession>> {
+        Ok(Box::new(
+            frame_extractor::GstreamerFrameExtractionSession::new(
+                &request.source,
+                request.timeout,
+            )?,
+        ))
+    }
+}
+
+impl PlaybackSession for GstreamerPlayback {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            audio: true,
+            seeking: true,
+            accurate_seeking: true,
+            playback_rate: true,
+            frame_stepping: true,
+            frame_extraction: true,
+            transport_switching: cfg!(target_os = "linux"),
+        }
+    }
+
+    fn play(&mut self) -> Result<()> {
+        GstreamerPlayback::play(self)
+    }
+
+    fn pause(&mut self) -> Result<()> {
+        GstreamerPlayback::pause(self)
+    }
+
+    fn reload(&mut self, autoplay: bool) -> Result<()> {
+        GstreamerPlayback::reload(self, autoplay)
+    }
+
+    fn timeline(&self) -> PlaybackTimeline {
+        GstreamerPlayback::timeline(self)
+    }
+
+    fn seek_to(&mut self, position: Duration, mode: SeekMode) -> Result<()> {
+        GstreamerPlayback::seek_to(self, position, mode)
+    }
+
+    fn step_forward(&mut self, frames: u64) -> Result<()> {
+        GstreamerPlayback::step_forward(self, frames)
+    }
+
+    fn set_playback_rate(&mut self, rate: f64) -> Result<()> {
+        GstreamerPlayback::set_playback_rate(self, rate)
+    }
+
+    fn set_volume(&mut self, volume: f64) {
+        GstreamerPlayback::set_volume(self, volume);
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        GstreamerPlayback::set_muted(self, muted);
+    }
+
+    fn set_frame_transport_preference(
+        &mut self,
+        preference: FrameTransportPreference,
+    ) -> Result<TransportChange> {
+        match preference {
+            FrameTransportPreference::Auto | FrameTransportPreference::PreferNative => {
+                Ok(TransportChange::Unchanged)
+            }
+            FrameTransportPreference::CpuOnly => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.switch_to_cpu_fallback().map(|changed| {
+                        if changed {
+                            TransportChange::Reconfigured
+                        } else {
+                            TransportChange::Unchanged
+                        }
+                    })
+                }
+
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Ok(TransportChange::Unchanged)
+                }
+            }
+        }
+    }
+}
+
 fn buffering_percent(percent: i32) -> u8 {
     percent.clamp(0, 100) as u8
 }
@@ -339,21 +430,6 @@ pub(crate) fn add_required_allocation_metas(query: &mut gst::query::Allocation) 
         .is_none()
     {
         query.add_allocation_meta::<gst_video::VideoMeta>(None);
-    }
-}
-
-fn publish_latest<T>(
-    sender: &async_channel::Sender<T>,
-    drain: &async_channel::Receiver<T>,
-    value: T,
-) -> bool {
-    match sender.try_send(value) {
-        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => false,
-        Err(async_channel::TrySendError::Full(value)) => {
-            let dropped = drain.try_recv().is_ok();
-            let _ = sender.try_send(value);
-            dropped
-        }
     }
 }
 
@@ -612,8 +688,8 @@ mod tests {
     use gpui::{SurfaceFrameBacking, SurfaceHandle};
 
     use super::{
-        add_required_allocation_metas, appsink_caps, buffering_percent, publish_latest,
-        sample_to_surface_frame, video_frame_geometry,
+        add_required_allocation_metas, appsink_caps, buffering_percent, sample_to_surface_frame,
+        video_frame_geometry,
     };
 
     #[test]
@@ -621,15 +697,6 @@ mod tests {
         assert_eq!(buffering_percent(-1), 0);
         assert_eq!(buffering_percent(42), 42);
         assert_eq!(buffering_percent(101), 100);
-    }
-
-    #[test]
-    fn latest_frame_queue_replaces_stale_value() {
-        let (sender, receiver) = async_channel::bounded(1);
-
-        assert!(!publish_latest(&sender, &receiver, 1));
-        assert!(publish_latest(&sender, &receiver, 2));
-        assert_eq!(receiver.try_recv(), Ok(2));
     }
 
     #[test]

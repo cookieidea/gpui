@@ -15,10 +15,10 @@ pub struct MediaSource {
     network: NetworkSourceOptions,
 }
 
-/// HTTP-oriented options applied to network elements created by GStreamer.
+/// HTTP-oriented options available to playback backends.
 ///
-/// Unsupported properties are ignored for non-HTTP URI source elements, so a
-/// configured source can still be passed to custom GStreamer protocol plugins.
+/// The built-in GStreamer backend applies supported properties to its URI
+/// source elements. Custom backends may interpret the same options.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct NetworkSourceOptions {
     headers: BTreeMap<String, String>,
@@ -63,8 +63,8 @@ impl NetworkSourceOptions {
         self.with_header("Authorization", format!("Bearer {}", token.as_ref()))
     }
 
-    /// Configures HTTP Basic/Digest credentials on compatible GStreamer URI
-    /// sources without embedding them in the media URI.
+    /// Configures HTTP Basic/Digest credentials without embedding them in the
+    /// media URI.
     pub fn with_basic_auth(
         mut self,
         username: impl Into<String>,
@@ -143,10 +143,12 @@ impl NetworkSourceOptions {
         self.user_agent.as_deref()
     }
 
+    #[cfg(feature = "backend-gstreamer")]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
 
+    #[cfg(feature = "backend-gstreamer")]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
     }

@@ -21,7 +21,7 @@ pub struct VideoFrame {
 }
 
 impl VideoFrame {
-    pub(crate) fn new(
+    pub fn new(
         surface: Arc<SurfaceFrame>,
         timestamp: Option<Duration>,
         duration: Option<Duration>,

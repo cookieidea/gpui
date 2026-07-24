@@ -4,22 +4,33 @@ version = "0.1.0"
 publish.workspace = true
 edition.workspace = true
 
+[features]
+default = ["backend-gstreamer"]
+backend-gstreamer = [
+    "dep:gst",
+    "dep:gst-app",
+    "dep:gst-video",
+    "dep:gst-allocators",
+    "dep:core-foundation",
+    "dep:core-video",
+]
+
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
 gpui.workspace = true
-gst = { package = "gstreamer", version = "0.25" }
-gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"] }
-gst-video = { package = "gstreamer-video", version = "0.25", features = ["v1_24"] }
+gst = { package = "gstreamer", version = "0.25", optional = true }
+gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"], optional = true }
+gst-video = { package = "gstreamer-video", version = "0.25", features = ["v1_24"], optional = true }
 log.workspace = true
 url.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gst-allocators = { package = "gstreamer-allocators", version = "0.25" }
+gst-allocators = { package = "gstreamer-allocators", version = "0.25", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation.workspace = true
-core-video.workspace = true
+core-foundation = { workspace = true, optional = true }
+core-video = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

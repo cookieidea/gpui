@@ -1,0 +1,234 @@
+use std::{sync::Arc, time::Duration};
+
+use anyhow::{Context as _, Result, anyhow};
+use gpui::SurfaceHandle;
+use gst::prelude::*;
+
+use crate::{FrameExtractionSession, MediaSource, SeekMode, VideoFrame};
+
+use super::{
+    add_required_allocation_metas, appsink_caps, clock_time, sample_to_video_frame, seek_flags,
+};
+use crate::network::configure_playbin_network;
+
+pub(super) struct GstreamerFrameExtractionSession {
+    playbin: gst::Element,
+    appsink: gst_app::AppSink,
+    surface_handle: SurfaceHandle,
+    sequence: u64,
+    timeout: Duration,
+    initial_frame: Option<Arc<VideoFrame>>,
+    end_guard: Duration,
+}
+
+impl GstreamerFrameExtractionSession {
+    pub(super) fn new(source: &MediaSource, timeout: Duration) -> Result<Self> {
+        super::initialize()?;
+        let caps = appsink_caps(None)?;
+        let appsink = gst_app::AppSink::builder()
+            .caps(&caps)
+            .max_buffers(1)
+            .drop(true)
+            .wait_on_eos(false)
+            .sync(false)
+            .build();
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .propose_allocation(|_, query| {
+                    add_required_allocation_metas(query);
+                    true
+                })
+                .build(),
+        );
+
+        let audio_sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .context("GStreamer element 'fakesink' is not installed")?;
+        let playbin = gst::ElementFactory::make("playbin3")
+            .build()
+            .context("GStreamer element 'playbin3' is not installed")?;
+        configure_playbin_network(&playbin, source.network_options());
+        playbin.set_property("uri", source.uri());
+        playbin.set_property("video-sink", &appsink);
+        playbin.set_property("audio-sink", &audio_sink);
+
+        Ok(Self {
+            playbin,
+            appsink,
+            surface_handle: SurfaceHandle::new(),
+            sequence: 1,
+            timeout,
+            initial_frame: None,
+            end_guard: Duration::from_millis(1),
+        })
+    }
+
+    fn extract_frame(
+        &mut self,
+        requested: Duration,
+        seek_mode: SeekMode,
+    ) -> Result<Arc<VideoFrame>> {
+        let initial_frame = self.preroll_initial_frame()?;
+        if requested.is_zero() {
+            return Ok(initial_frame);
+        }
+
+        let duration = self
+            .appsink
+            .query_duration::<gst::ClockTime>()
+            .map(Duration::from);
+        let position = clamp_extraction_position(requested, duration, self.end_guard);
+        for candidate in extraction_candidates(position) {
+            self.playbin
+                .seek_simple(seek_flags(seek_mode), clock_time(candidate)?)
+                .with_context(|| format!("failed to seek frame extractor to {candidate:?}"))?;
+
+            if let Some(sample) = self.appsink.try_pull_preroll(clock_time(self.timeout)?) {
+                let frame = sample_to_video_frame(
+                    &sample,
+                    self.surface_handle.clone(),
+                    self.sequence,
+                    #[cfg(target_os = "linux")]
+                    None,
+                )?;
+                self.sequence = self.sequence.wrapping_add(1).max(1);
+                return Ok(frame);
+            }
+        }
+
+        Err(anyhow!(
+            "failed to extract a video frame at or before {position:?}"
+        ))
+    }
+
+    fn preroll_initial_frame(&mut self) -> Result<Arc<VideoFrame>> {
+        if let Some(frame) = &self.initial_frame {
+            return Ok(frame.clone());
+        }
+
+        self.playbin
+            .set_state(gst::State::Paused)
+            .map_err(|error| anyhow!("failed to prepare frame extraction: {error:?}"))?;
+        let timeout = clock_time(self.timeout)?;
+        self.playbin
+            .state(timeout)
+            .0
+            .map_err(|error| anyhow!("frame extraction preroll failed: {error:?}"))?;
+        let sample = self
+            .appsink
+            .try_pull_preroll(timeout)
+            .context("timed out waiting for the initial video frame")?;
+        self.end_guard = estimated_frame_duration(&sample)
+            .unwrap_or(self.end_guard)
+            .max(Duration::from_millis(1));
+        let frame = sample_to_video_frame(
+            &sample,
+            self.surface_handle.clone(),
+            self.sequence,
+            #[cfg(target_os = "linux")]
+            None,
+        )?;
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        self.initial_frame = Some(frame.clone());
+        Ok(frame)
+    }
+}
+
+impl FrameExtractionSession for GstreamerFrameExtractionSession {
+    fn initial_frame(&mut self) -> Result<Arc<VideoFrame>> {
+        self.preroll_initial_frame()
+    }
+
+    fn frame_at(&mut self, position: Duration, seek_mode: SeekMode) -> Result<Arc<VideoFrame>> {
+        self.extract_frame(position, seek_mode)
+    }
+}
+
+impl Drop for GstreamerFrameExtractionSession {
+    fn drop(&mut self) {
+        let _ = self.playbin.set_state(gst::State::Null);
+    }
+}
+
+fn estimated_frame_duration(sample: &gst::Sample) -> Option<Duration> {
+    let buffer_duration = sample
+        .buffer()
+        .and_then(gst::BufferRef::duration)
+        .map(Duration::from);
+    let nominal_duration = sample
+        .caps()
+        .and_then(|caps| gst_video::VideoInfo::from_caps(caps).ok())
+        .and_then(|info| {
+            let rate = info.fps();
+            (rate.numer() > 0 && rate.denom() > 0)
+                .then(|| Duration::from_secs_f64(f64::from(rate.denom()) / f64::from(rate.numer())))
+        });
+
+    match (buffer_duration, nominal_duration) {
+        (Some(buffer), Some(nominal)) => Some(buffer.max(nominal)),
+        (Some(duration), None) | (None, Some(duration)) => Some(duration),
+        (None, None) => None,
+    }
+}
+
+fn clamp_extraction_position(
+    requested: Duration,
+    duration: Option<Duration>,
+    end_guard: Duration,
+) -> Duration {
+    let Some(duration) = duration else {
+        return requested;
+    };
+    if duration.is_zero() {
+        return Duration::ZERO;
+    }
+    requested.min(duration.saturating_sub(end_guard))
+}
+
+fn extraction_candidates(position: Duration) -> impl Iterator<Item = Duration> {
+    const BACKOFFS: [Duration; 9] = [
+        Duration::ZERO,
+        Duration::from_millis(25),
+        Duration::from_millis(50),
+        Duration::from_millis(75),
+        Duration::from_millis(100),
+        Duration::from_millis(250),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    ];
+
+    BACKOFFS
+        .into_iter()
+        .map(move |backoff| position.saturating_sub(backoff))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{clamp_extraction_position, extraction_candidates};
+
+    #[test]
+    fn extraction_position_stays_before_eos() {
+        assert_eq!(
+            clamp_extraction_position(
+                Duration::from_secs(20),
+                Some(Duration::from_secs(10)),
+                Duration::from_millis(40),
+            ),
+            Duration::from_secs(10) - Duration::from_millis(40)
+        );
+    }
+
+    #[test]
+    fn extraction_candidates_back_off_from_stream_tail() {
+        let candidates = extraction_candidates(Duration::from_millis(60)).collect::<Vec<_>>();
+
+        assert_eq!(candidates[0], Duration::from_millis(60));
+        assert_eq!(candidates[1], Duration::from_millis(35));
+        assert_eq!(candidates[3], Duration::ZERO);
+        assert_eq!(candidates.last(), Some(&Duration::ZERO));
+    }
+}

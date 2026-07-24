@@ -9,9 +9,10 @@ use gpui::{
 use gpui::{DmaBufImportStatus, SurfaceFrameBacking};
 
 use crate::{
-    FrameTransport, MediaSource, PlaybackTimeline, SeekMode, VideoFrame, VideoFrameExtractor,
-    VideoPlaybackStats,
-    gstreamer_backend::{BackendEvent, GstreamerPlayback},
+    BackendCapabilities, BackendEvent, FrameTransport, FrameTransportPreference, MediaSource,
+    PlaybackBackendRequest, PlaybackOutputSink, PlaybackSession, PlaybackTimeline, SeekMode,
+    TransportChange, VideoBackend, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
+    backend::default_backend, stats::PlaybackCounters,
 };
 
 /// Initial behavior for a [`VideoPlayer`].
@@ -21,6 +22,50 @@ pub struct VideoPlayerOptions {
     pub volume: f64,
     pub muted: bool,
     pub timeline_update_interval: Duration,
+}
+
+/// Configures a [`VideoPlayer`] before opening its backend session.
+pub struct VideoPlayerBuilder {
+    source: MediaSource,
+    options: VideoPlayerOptions,
+    backend: Option<Arc<dyn VideoBackend>>,
+}
+
+impl VideoPlayerBuilder {
+    pub fn options(mut self, options: VideoPlayerOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn backend(mut self, backend: impl VideoBackend) -> Self {
+        self.backend = Some(Arc::new(backend));
+        self
+    }
+
+    pub fn shared_backend(mut self, backend: Arc<dyn VideoBackend>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    pub fn build(self, cx: &mut Context<VideoPlayer>) -> Result<VideoPlayer> {
+        let backend = match self.backend {
+            Some(backend) => backend,
+            None => default_backend()?,
+        };
+        VideoPlayer::new_with_backend(self.source, self.options, backend, cx)
+    }
+
+    pub fn build_in_window(
+        self,
+        window: &Window,
+        cx: &mut Context<VideoPlayer>,
+    ) -> Result<VideoPlayer> {
+        let backend = match self.backend {
+            Some(backend) => backend,
+            None => default_backend()?,
+        };
+        VideoPlayer::new_in_window_with_backend(self.source, self.options, backend, window, cx)
+    }
 }
 
 impl Default for VideoPlayerOptions {
@@ -60,13 +105,16 @@ pub enum VideoPlayerEvent {
 
 /// A reusable GPUI video playback component.
 ///
-/// The component owns demuxing, decoding, audio output and clock integration,
-/// while exposing control and observation APIs for custom player interfaces.
-/// Its [`Render`] implementation is intentionally limited to the current video
-/// frame and has no built-in interaction or player chrome.
+/// The selected backend owns demuxing, decoding, audio output and clock
+/// integration. The component exposes backend-independent control and
+/// observation APIs for custom player interfaces. Its [`Render`]
+/// implementation is intentionally limited to the current video frame and has
+/// no built-in interaction or player chrome.
 pub struct VideoPlayer {
     source: MediaSource,
-    playback: GstreamerPlayback,
+    backend: Arc<dyn VideoBackend>,
+    playback: Box<dyn PlaybackSession>,
+    counters: Arc<PlaybackCounters>,
     frame: Option<Arc<VideoFrame>>,
     frame_transport: Option<FrameTransport>,
     state: PlaybackState,
@@ -81,12 +129,20 @@ pub struct VideoPlayer {
 }
 
 impl VideoPlayer {
+    pub fn builder(source: MediaSource) -> VideoPlayerBuilder {
+        VideoPlayerBuilder {
+            source,
+            options: VideoPlayerOptions::default(),
+            backend: None,
+        }
+    }
+
     pub fn new(
         source: MediaSource,
         options: VideoPlayerOptions,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        Self::new_with_gpu_specs(source, options, None, cx)
+        Self::new_with_backend_and_gpu_specs(source, options, default_backend()?, None, cx)
     }
 
     /// Creates a player configured for the renderer backing `window`.
@@ -100,22 +156,59 @@ impl VideoPlayer {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        Self::new_with_gpu_specs(source, options, window.gpu_specs(), cx)
+        Self::new_with_backend_and_gpu_specs(
+            source,
+            options,
+            default_backend()?,
+            window.gpu_specs(),
+            cx,
+        )
     }
 
-    fn new_with_gpu_specs(
+    /// Creates a player using an application-provided backend.
+    pub fn new_with_backend(
         source: MediaSource,
         options: VideoPlayerOptions,
+        backend: Arc<dyn VideoBackend>,
+        cx: &mut Context<Self>,
+    ) -> Result<Self> {
+        Self::new_with_backend_and_gpu_specs(source, options, backend, None, cx)
+    }
+
+    /// Creates a player using an application-provided backend and the active
+    /// renderer's native-frame capabilities.
+    pub fn new_in_window_with_backend(
+        source: MediaSource,
+        options: VideoPlayerOptions,
+        backend: Arc<dyn VideoBackend>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Self> {
+        Self::new_with_backend_and_gpu_specs(source, options, backend, window.gpu_specs(), cx)
+    }
+
+    fn new_with_backend_and_gpu_specs(
+        source: MediaSource,
+        options: VideoPlayerOptions,
+        backend: Arc<dyn VideoBackend>,
         gpu_specs: Option<GpuSpecs>,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let (playback, output) = GstreamerPlayback::new(&source, gpu_specs.as_ref())?;
+        let (output_sink, output) = PlaybackOutputSink::channel();
+        let mut playback = backend.open_playback(
+            PlaybackBackendRequest {
+                source: source.clone(),
+                gpu_specs,
+            },
+            output_sink,
+        )?;
         let initial_volume = normalize_volume(options.volume);
         playback.set_volume(initial_volume);
         playback.set_muted(options.muted);
 
+        let frames = output.frames;
         cx.spawn(async move |this, cx| {
-            while let Ok(frame) = output.frames.recv().await {
+            while let Ok(frame) = frames.recv().await {
                 let Some(this) = this.upgrade() else {
                     break;
                 };
@@ -157,8 +250,9 @@ impl VideoPlayer {
         })
         .detach();
 
+        let events = output.events;
         cx.spawn(async move |this, cx| {
-            while let Ok(event) = output.events.recv().await {
+            while let Ok(event) = events.recv().await {
                 let Some(this) = this.upgrade() else {
                     break;
                 };
@@ -205,7 +299,7 @@ impl VideoPlayer {
                         player.set_state(PlaybackState::Ended, cx);
                     }
                     BackendEvent::Error(error) => {
-                        player.set_state(PlaybackState::Error(error.into()), cx);
+                        player.set_state(PlaybackState::Error(error.to_string().into()), cx);
                     }
                 });
             }
@@ -233,9 +327,11 @@ impl VideoPlayer {
         })
         .detach();
 
-        let player = Self {
+        let mut player = Self {
             source,
+            backend,
             playback,
+            counters: output.counters,
             frame: None,
             frame_transport: None,
             state: if options.autoplay {
@@ -262,6 +358,18 @@ impl VideoPlayer {
 
     pub fn source(&self) -> &MediaSource {
         &self.source
+    }
+
+    pub fn backend(&self) -> &Arc<dyn VideoBackend> {
+        &self.backend
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
+    pub fn backend_capabilities(&self) -> BackendCapabilities {
+        self.playback.capabilities()
     }
 
     pub fn state(&self) -> &PlaybackState {
@@ -304,7 +412,7 @@ impl VideoPlayer {
     /// Creates an independent extractor for thumbnails, previews and scrubbing.
     /// Reuse the returned extractor for multiple frame requests.
     pub fn frame_extractor(&self) -> Result<VideoFrameExtractor> {
-        VideoFrameExtractor::new(self.source.clone())
+        VideoFrameExtractor::new_with_backend(self.source.clone(), self.backend.clone())
     }
 
     pub fn frame_transport(&self) -> Option<FrameTransport> {
@@ -317,7 +425,7 @@ impl VideoPlayer {
 
     /// Returns cumulative frame-delivery statistics for this player.
     pub fn stats(&self) -> VideoPlaybackStats {
-        self.playback.stats(self.delivered_frames)
+        self.counters.snapshot(self.delivered_frames)
     }
 
     pub fn volume(&self) -> f64 {
@@ -380,7 +488,7 @@ impl VideoPlayer {
         }
     }
 
-    /// Recreates the active GStreamer pipeline for the same media source.
+    /// Recreates the active backend pipeline for the same media source.
     ///
     /// This is useful after a network or decoder error. The host decides when
     /// and how often to retry; the player only performs one explicit reload.
@@ -484,6 +592,13 @@ impl VideoPlayer {
         Ok(())
     }
 
+    pub fn set_frame_transport_preference(
+        &mut self,
+        preference: FrameTransportPreference,
+    ) -> Result<TransportChange> {
+        self.playback.set_frame_transport_preference(preference)
+    }
+
     pub fn set_volume(&mut self, volume: f64, cx: &mut Context<Self>) {
         self.volume = normalize_volume(volume);
         self.playback.set_volume(self.volume);
@@ -522,7 +637,9 @@ impl VideoPlayer {
             return Ok(());
         };
 
-        if self.playback.switch_to_cpu_fallback()? {
+        if self.set_frame_transport_preference(FrameTransportPreference::CpuOnly)?
+            == TransportChange::Reconfigured
+        {
             cx.emit(VideoPlayerEvent::DmaBufImportFailed(
                 reason.to_string().into(),
             ));
