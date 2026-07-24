@@ -1,9 +1,7 @@
-#[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicBool;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -48,6 +46,7 @@ pub(crate) struct GstreamerPlayback {
     #[cfg(target_os = "linux")]
     appsink: gst_app::AppSink,
     bus: gst::Bus,
+    bus_shutdown: Arc<AtomicBool>,
     bus_thread: Option<JoinHandle<()>>,
     #[cfg(target_os = "linux")]
     using_cpu_fallback: AtomicBool,
@@ -119,13 +118,23 @@ impl GstreamerPlayback {
             .bus()
             .context("playbin3 did not provide a message bus")?;
         let bus_for_thread = bus.clone();
+        let bus_shutdown = Arc::new(AtomicBool::new(false));
+        let bus_shutdown_for_thread = bus_shutdown.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_bus = producer_drm_device;
         let output_for_bus = output;
         let bus_thread = std::thread::Builder::new()
             .name("gpui-video-gstreamer-bus".into())
             .spawn(move || {
-                for message in bus_for_thread.iter_timed(gst::ClockTime::NONE) {
+                while !bus_shutdown_for_thread.load(Ordering::Acquire)
+                    && !output_for_bus.is_closed()
+                {
+                    let Some(message) =
+                        bus_for_thread.timed_pop(gst::ClockTime::from_mseconds(100))
+                    else {
+                        continue;
+                    };
+
                     #[cfg(target_os = "linux")]
                     if let gst::MessageView::HaveContext(have_context) = message.view()
                         && let Some(device) = drm_device_from_context(&have_context.context())
@@ -164,6 +173,7 @@ impl GstreamerPlayback {
             #[cfg(target_os = "linux")]
             appsink,
             bus,
+            bus_shutdown,
             bus_thread: Some(bus_thread),
             #[cfg(target_os = "linux")]
             using_cpu_fallback: AtomicBool::new(false),
@@ -416,8 +426,9 @@ fn buffering_percent(percent: i32) -> u8 {
 
 impl Drop for GstreamerPlayback {
     fn drop(&mut self) {
-        let _ = self.playbin.set_state(gst::State::Null);
+        self.bus_shutdown.store(true, Ordering::Release);
         self.bus.set_flushing(true);
+        let _ = self.playbin.set_state(gst::State::Null);
         if let Some(thread) = self.bus_thread.take() {
             let _ = thread.join();
         }
