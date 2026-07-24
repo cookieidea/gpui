@@ -213,7 +213,7 @@ pub(crate) fn default_backend() -> Result<Arc<dyn VideoBackend>> {
 
     #[cfg(all(not(feature = "backend-gstreamer"), feature = "backend-decv"))]
     {
-        return Ok(Arc::new(crate::decv_backend::DecvBackend));
+        return Ok(Arc::new(crate::decv_backend::DecvBackend::default()));
     }
 
     #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]

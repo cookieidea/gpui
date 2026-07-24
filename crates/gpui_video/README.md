@@ -53,11 +53,21 @@ gpui_video = {
 }
 ```
 
+Parallelism is selected per backend instance without exposing `decv_h264`
+types through the public API. `Auto` remains the default:
+
+```rust
+use gpui_video::{DecvBackend, DecvParallelism};
+
+let backend = DecvBackend::new().parallelism(DecvParallelism::Serial);
+```
+
 Run the dedicated comparison example with:
 
 ```sh
 cargo run -p gpui_video --no-default-features \
-  --features backend-decv --example decv_play -- /path/to/video.mp4
+  --features backend-decv --example decv_play -- \
+  --parallelism serial /path/to/video.mp4
 ```
 
 Implement `VideoBackend` to open a `PlaybackSession` and, optionally, a

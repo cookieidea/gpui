@@ -1,19 +1,14 @@
-use std::time::Instant;
+use std::{num::NonZeroUsize, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_video::{
-    DecvBackend, MediaSource, PlaybackState, VideoPlayer, VideoPlayerEvent, VideoPlayerOptions,
+    DecvBackend, DecvParallelism, MediaSource, PlaybackState, VideoPlayer, VideoPlayerEvent,
+    VideoPlayerOptions,
 };
 
 fn main() -> Result<()> {
-    let input = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!(
-            "Usage: cargo run -p gpui_video --no-default-features \
-             --features backend-decv --example decv_play -- <local MP4>"
-        );
-        std::process::exit(2);
-    });
+    let (input, parallelism) = parse_arguments()?;
     let source = MediaSource::from_path(input)?;
     let title = format!("gpui_video · decv · {}", source.display_name());
 
@@ -29,7 +24,7 @@ fn main() -> Result<()> {
                 let player = cx.new(|cx| {
                     VideoPlayer::builder(source)
                         .options(VideoPlayerOptions::default())
-                        .backend(DecvBackend)
+                        .backend(DecvBackend::new().parallelism(parallelism))
                         .build_in_window(window, cx)
                         .expect("failed to create decv video player")
                 });
@@ -75,4 +70,46 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+fn parse_arguments() -> Result<(String, DecvParallelism)> {
+    let mut arguments = std::env::args().skip(1);
+    let mut input = None;
+    let mut parallelism = DecvParallelism::Auto;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--parallelism" => {
+                let value = arguments.next().ok_or_else(|| {
+                    anyhow!("--parallelism requires auto, serial, or a thread count")
+                })?;
+                parallelism = match value.as_str() {
+                    "auto" => DecvParallelism::Auto,
+                    "serial" => DecvParallelism::Serial,
+                    value => DecvParallelism::Threads(
+                        value
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(NonZeroUsize::new)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "--parallelism must be auto, serial, or a positive thread count"
+                                )
+                            })?,
+                    ),
+                };
+            }
+            value if value.starts_with('-') => bail!("unknown option {value:?}"),
+            value if input.is_none() => input = Some(value.to_owned()),
+            value => bail!("unexpected argument {value:?}"),
+        }
+    }
+
+    let input = input.ok_or_else(|| {
+        anyhow!(
+            "Usage: cargo run -p gpui_video --no-default-features \
+             --features backend-decv --example decv_play -- \
+             [--parallelism auto|serial|THREADS] <local MP4>"
+        )
+    })?;
+    Ok((input, parallelism))
 }

@@ -29,7 +29,7 @@ pub use backend::{
 };
 pub use container::{VideoContainer, video_container};
 #[cfg(feature = "backend-decv")]
-pub use decv_backend::DecvBackend;
+pub use decv_backend::{DecvBackend, DecvBackendOptions, DecvParallelism};
 pub use frame::{FrameTransport, VideoFrame};
 pub use frame_extractor::{
     FrameExtractionSuperseded, VideoFrameExtractor, VideoFrameExtractorOptions,

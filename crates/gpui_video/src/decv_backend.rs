@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
@@ -11,7 +12,7 @@ use decv_core::{
     ColorMatrix as DecvColorMatrix, ColorRange as DecvColorRange, DecodeInputStatus, DecodeOutput,
     DecodedVideoFrame, EncodedVideoPacket, FrameStorage, MediaTime, PixelFormat, VideoDecoder,
 };
-use decv_h264::H264Decoder;
+use decv_h264::{H264Decoder, H264Parallelism};
 use decv_mp4::{FourCc, Mp4Demuxer, PacketCursor};
 use gpui::{
     Bounds, ColorRange, DevicePixels, SurfaceColorInfo, SurfaceFormat, SurfaceFrame, SurfaceHandle,
@@ -26,13 +27,78 @@ use crate::{
 const VIDEO_HANDLER: FourCc = FourCc::new(*b"vide");
 const MEDIA_TIME_SCALE: u32 = 1_000_000_000;
 
+/// Reconstruction parallelism used by the built-in `decv` H.264 decoder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecvParallelism {
+    /// Decode and reconstruct on the playback worker thread.
+    Serial,
+    /// Let `decv` select a conservative worker count for the coded size.
+    #[default]
+    Auto,
+    /// Use exactly this many reconstruction threads.
+    Threads(NonZeroUsize),
+}
+
+impl From<DecvParallelism> for H264Parallelism {
+    fn from(value: DecvParallelism) -> Self {
+        match value {
+            DecvParallelism::Serial => Self::Serial,
+            DecvParallelism::Auto => Self::Auto,
+            DecvParallelism::Threads(threads) => Self::Threads(threads),
+        }
+    }
+}
+
+/// Options applied when a [`DecvBackend`] opens a playback session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecvBackendOptions {
+    parallelism: DecvParallelism,
+}
+
+impl DecvBackendOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn parallelism(mut self, parallelism: DecvParallelism) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
+    pub fn selected_parallelism(self) -> DecvParallelism {
+        self.parallelism
+    }
+}
+
 /// Pure-Rust MP4/H.264 playback backed by `decv`.
 ///
 /// This backend is intentionally opt-in while `decv` is pre-1.0. Its types
 /// remain confined to this module so applications depend only on
 /// `gpui_video`'s stable backend boundary.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct DecvBackend;
+pub struct DecvBackend {
+    options: DecvBackendOptions,
+}
+
+impl DecvBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_options(options: DecvBackendOptions) -> Self {
+        Self { options }
+    }
+
+    pub fn parallelism(mut self, parallelism: DecvParallelism) -> Self {
+        self.options = self.options.parallelism(parallelism);
+        self
+    }
+
+    pub fn options(&self) -> DecvBackendOptions {
+        self.options
+    }
+}
 
 impl VideoBackend for DecvBackend {
     fn name(&self) -> &'static str {
@@ -44,7 +110,11 @@ impl VideoBackend for DecvBackend {
         request: PlaybackBackendRequest,
         output: PlaybackOutputSink,
     ) -> Result<Box<dyn PlaybackSession>> {
-        Ok(Box::new(DecvSession::open(request.source, output)?))
+        Ok(Box::new(DecvSession::open(
+            request.source,
+            output,
+            self.options,
+        )?))
     }
 }
 
@@ -55,7 +125,11 @@ struct DecvSession {
 }
 
 impl DecvSession {
-    fn open(source: MediaSource, output: PlaybackOutputSink) -> Result<Self> {
+    fn open(
+        source: MediaSource,
+        output: PlaybackOutputSink,
+        options: DecvBackendOptions,
+    ) -> Result<Self> {
         let path = local_path(&source)?;
         let probe = probe_mp4(&path)?;
         let timeline = Arc::new(Mutex::new(TimelineState::new(probe.duration)));
@@ -71,6 +145,7 @@ impl DecvSession {
                     receiver,
                     &worker_timeline,
                     &output,
+                    options.parallelism,
                 ) {
                     log::error!(
                         "decv playback failed for {}: {error:#}",
@@ -191,6 +266,7 @@ fn playback_worker(
     commands: mpsc::Receiver<Command>,
     shared_timeline: &Mutex<TimelineState>,
     output: &PlaybackOutputSink,
+    parallelism: DecvParallelism,
 ) -> Result<()> {
     let demuxer = Mp4Demuxer::open(
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
@@ -210,6 +286,9 @@ fn playback_worker(
         .description_index();
 
     let mut decoder = H264Decoder::new();
+    decoder
+        .set_parallelism(parallelism.into())
+        .context("failed to configure decv H.264 parallelism")?;
     decoder
         .configure(decoder_config)
         .context("failed to configure decv H.264 decoder")?;
@@ -487,8 +566,10 @@ fn decode_next_frame(
                     DecodeInputStatus::NeedOutput(unconsumed) => {
                         *pending_packet = Some(unconsumed);
                     }
+                    status => bail!("decv returned an unsupported input status: {status:?}"),
                 }
             }
+            output => bail!("decv returned an unsupported decoder output: {output:?}"),
         }
     }
 }
@@ -733,5 +814,35 @@ trait MutexExt<T> {
 impl<T> MutexExt<T> for Mutex<T> {
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DecvBackend, DecvBackendOptions, DecvParallelism};
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn backend_parallelism_defaults_to_auto_and_is_configurable() {
+        assert_eq!(
+            DecvBackend::default().options().selected_parallelism(),
+            DecvParallelism::Auto
+        );
+        assert_eq!(
+            DecvBackend::new()
+                .parallelism(DecvParallelism::Serial)
+                .options()
+                .selected_parallelism(),
+            DecvParallelism::Serial
+        );
+
+        let threads = NonZeroUsize::new(3).unwrap();
+        let options = DecvBackendOptions::new().parallelism(DecvParallelism::Threads(threads));
+        assert_eq!(
+            DecvBackend::with_options(options)
+                .options()
+                .selected_parallelism(),
+            DecvParallelism::Threads(threads)
+        );
     }
 }

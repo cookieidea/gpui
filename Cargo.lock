@@ -741,7 +741,7 @@ dependencies = [
 [[package]]
 name = "bit-readers"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+source = "git+https://github.com/cradiy/decv?rev=57ad80f0213a6a68816a99ebb1f25d651ffa9258#57ad80f0213a6a68816a99ebb1f25d651ffa9258"
 
 [[package]]
 name = "bit-set"
@@ -1674,12 +1674,12 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "decv-core"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+source = "git+https://github.com/cradiy/decv?rev=57ad80f0213a6a68816a99ebb1f25d651ffa9258#57ad80f0213a6a68816a99ebb1f25d651ffa9258"
 
 [[package]]
 name = "decv-h264"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+source = "git+https://github.com/cradiy/decv?rev=57ad80f0213a6a68816a99ebb1f25d651ffa9258#57ad80f0213a6a68816a99ebb1f25d651ffa9258"
 dependencies = [
  "bit-readers",
  "decv-core",
@@ -1690,7 +1690,7 @@ dependencies = [
 [[package]]
 name = "decv-mp4"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+source = "git+https://github.com/cradiy/decv?rev=57ad80f0213a6a68816a99ebb1f25d651ffa9258#57ad80f0213a6a68816a99ebb1f25d651ffa9258"
 dependencies = [
  "decv-core",
 ]
