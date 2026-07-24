@@ -669,6 +669,7 @@ pub struct SurfaceColorInfo {
 #[derive(Clone)]
 pub struct SurfacePlane {
     bytes: Arc<[u8]>,
+    offset: usize,
     stride: u32,
 }
 
@@ -736,6 +737,19 @@ impl SurfacePlane {
     pub fn new(bytes: impl Into<Arc<[u8]>>, stride: u32) -> Self {
         Self {
             bytes: bytes.into(),
+            offset: 0,
+            stride,
+        }
+    }
+
+    /// Creates a plane whose first row starts at `offset` in the shared allocation.
+    ///
+    /// This preserves decoder-owned planar allocations without copying each
+    /// plane into a separate tightly based buffer.
+    pub fn with_offset(bytes: impl Into<Arc<[u8]>>, offset: usize, stride: u32) -> Self {
+        Self {
+            bytes: bytes.into(),
+            offset,
             stride,
         }
     }
@@ -743,6 +757,11 @@ impl SurfacePlane {
     /// Returns the plane bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the byte offset of the first row in the shared allocation.
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 
     /// Returns the number of bytes between adjacent rows.
@@ -755,6 +774,7 @@ impl fmt::Debug for SurfacePlane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SurfacePlane")
             .field("len", &self.bytes.len())
+            .field("offset", &self.offset)
             .field("stride", &self.stride)
             .finish()
     }
@@ -1287,6 +1307,7 @@ fn validate_frame(
         let minimum_len = (rows.saturating_sub(1) as usize)
             .checked_mul(plane.stride as usize)
             .and_then(|preceding_rows| preceding_rows.checked_add(minimum_stride as usize))
+            .and_then(|plane_len| plane.offset.checked_add(plane_len))
             .ok_or(SurfaceFrameError::PlaneLayoutOverflow)?;
         if plane.bytes.len() < minimum_len {
             return Err(SurfaceFrameError::PlaneTooShort {
@@ -1703,6 +1724,53 @@ mod tests {
         assert_eq!(frame.sequence(), 7);
         assert_eq!(frame.format(), SurfaceFormat::Nv12);
         assert_eq!(frame.cpu_planes().unwrap()[1].stride(), 8);
+    }
+
+    #[test]
+    fn accepts_planes_with_offsets_in_shared_allocations() {
+        let coded_size = size(DevicePixels(4), DevicePixels(4));
+        let allocation: Arc<[u8]> = vec![0; 48].into();
+        let frame = SurfaceFrame::new(
+            SurfaceHandle::new(),
+            8,
+            coded_size,
+            bounds(Default::default(), coded_size),
+            coded_size,
+            SurfaceFormat::Nv12,
+            [
+                SurfacePlane::with_offset(allocation.clone(), 0, 8),
+                SurfacePlane::with_offset(allocation, 32, 8),
+            ],
+            SurfaceColorInfo::default(),
+        )
+        .unwrap();
+
+        let planes = frame.cpu_planes().unwrap();
+        assert_eq!(planes[0].offset(), 0);
+        assert_eq!(planes[1].offset(), 32);
+    }
+
+    #[test]
+    fn rejects_plane_offsets_beyond_the_shared_allocation() {
+        let coded_size = size(DevicePixels(4), DevicePixels(4));
+        let result = SurfaceFrame::new(
+            SurfaceHandle::new(),
+            8,
+            coded_size,
+            bounds(Default::default(), coded_size),
+            coded_size,
+            SurfaceFormat::Nv12,
+            [
+                SurfacePlane::with_offset(vec![0; 48], 0, 8),
+                SurfacePlane::with_offset(vec![0; 48], 40, 8),
+            ],
+            SurfaceColorInfo::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(SurfaceFrameError::PlaneTooShort { plane: 1, .. })
+        ));
     }
 
     #[test]

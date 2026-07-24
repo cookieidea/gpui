@@ -2578,7 +2578,7 @@ impl WgpuRenderer {
                     },
                     plane.bytes(),
                     wgpu::TexelCopyBufferLayout {
-                        offset: 0,
+                        offset: plane.offset() as u64,
                         bytes_per_row: Some(plane.stride()),
                         rows_per_image: None,
                     },

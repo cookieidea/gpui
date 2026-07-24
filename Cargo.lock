@@ -739,6 +739,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-readers"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1665,6 +1670,30 @@ name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
+name = "decv-core"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+
+[[package]]
+name = "decv-h264"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+dependencies = [
+ "bit-readers",
+ "decv-core",
+ "rayon",
+ "smallvec",
+]
+
+[[package]]
+name = "decv-mp4"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=f5bcdd9f2e092fe48616498e0d534a59c99db387#f5bcdd9f2e092fe48616498e0d534a59c99db387"
+dependencies = [
+ "decv-core",
+]
 
 [[package]]
 name = "deflate64"
@@ -2857,6 +2886,9 @@ dependencies = [
  "async-channel 2.5.0",
  "core-foundation 0.10.0",
  "core-video",
+ "decv-core",
+ "decv-h264",
+ "decv-mp4",
  "gpui",
  "gpui_platform",
  "gstreamer",
@@ -5597,9 +5629,9 @@ dependencies = [
 
 [[package]]
 name = "rayon"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
 dependencies = [
  "either",
  "rayon-core",

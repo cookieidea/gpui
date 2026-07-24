@@ -211,10 +211,15 @@ pub(crate) fn default_backend() -> Result<Arc<dyn VideoBackend>> {
         return Ok(Arc::new(crate::gstreamer_backend::GstreamerBackend));
     }
 
-    #[cfg(not(feature = "backend-gstreamer"))]
+    #[cfg(all(not(feature = "backend-gstreamer"), feature = "backend-decv"))]
+    {
+        return Ok(Arc::new(crate::decv_backend::DecvBackend));
+    }
+
+    #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]
     {
         bail!(
-            "gpui_video has no built-in backend; enable `backend-gstreamer` or pass a custom backend"
+            "gpui_video has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend"
         )
     }
 }

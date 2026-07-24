@@ -2122,10 +2122,11 @@ fn upload_surface(textures: &CachedSurfaceTextures, frame: &SurfaceFrame) {
         .expect("CPU surface upload requires CPU planes");
     let upload =
         |texture: &metal::TextureRef, plane: &gpui::SurfacePlane, width: u64, height: u64| {
+            let bytes = unsafe { plane.bytes().as_ptr().add(plane.offset()) };
             texture.replace_region(
                 metal::MTLRegion::new_2d(0, 0, width, height),
                 0,
-                plane.bytes().as_ptr() as *const _,
+                bytes as *const _,
                 u64::from(plane.stride()),
             );
         };

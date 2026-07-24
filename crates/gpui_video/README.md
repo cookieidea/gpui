@@ -40,6 +40,26 @@ gpui_video = {
 }
 ```
 
+The opt-in pure-Rust `decv` prototype currently supports local MP4 files with
+H.264 video and CPU-backed NV12 output. It has no audio or network transport
+yet. The dependency is pinned to one pre-1.0 commit and kept behind an internal
+adapter:
+
+```toml
+gpui_video = {
+    path = ".../gpui_video",
+    default-features = false,
+    features = ["backend-decv"],
+}
+```
+
+Run the dedicated comparison example with:
+
+```sh
+cargo run -p gpui_video --no-default-features \
+  --features backend-decv --example decv_play -- /path/to/video.mp4
+```
+
 Implement `VideoBackend` to open a `PlaybackSession` and, optionally, a
 `FrameExtractionSession`. The backend publishes timestamped `VideoFrame`
 values and playback events through `PlaybackOutputSink`; `gpui_video` owns the
