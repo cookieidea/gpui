@@ -1,9 +1,10 @@
-# gpui_video
+# gpui_media
 
-`gpui_video` is a reusable GPUI video component with pluggable playback
-backends. GStreamer is enabled by default, while applications can compile
-another built-in backend or inject their own implementation. Playback,
-decoding and frame extraction remain separate from player chrome so
+`gpui_media` is a reusable GPUI media playback core with pluggable backends.
+One media session owns demuxing, video/audio decoding, audio output and the
+shared playback clock. GStreamer is enabled by default, while applications can
+compile another built-in backend or inject their own implementation. Video
+frame rendering and extraction remain separate from player chrome so
 applications can build different interfaces on top of the same core.
 
 ## Public capabilities
@@ -14,6 +15,7 @@ applications can build different interfaces on top of the same core.
 - skip forward and backward
 - step forward and backward by decoded frames
 - playback rate, volume and mute controls
+- unified audio/video lifecycle, timeline and playback clock
 - timestamped current-frame access
 - independent frame extraction for thumbnails and scrubbing
 - state, timeline, buffering, frame, transport, rate and volume events
@@ -28,14 +30,14 @@ applications can build different interfaces on top of the same core.
 The default Cargo feature enables the built-in GStreamer backend:
 
 ```toml
-gpui_video = { path = ".../gpui_video" }
+gpui_media = { path = ".../gpui_media" }
 ```
 
 Applications that provide their own backend can omit GStreamer entirely:
 
 ```toml
-gpui_video = {
-    path = ".../gpui_video",
+gpui_media = {
+    path = ".../gpui_media",
     default-features = false,
 }
 ```
@@ -46,8 +48,8 @@ yet. The dependency is pinned to one pre-1.0 commit and kept behind an internal
 adapter:
 
 ```toml
-gpui_video = {
-    path = ".../gpui_video",
+gpui_media = {
+    path = ".../gpui_media",
     default-features = false,
     features = ["backend-decv"],
 }
@@ -57,7 +59,7 @@ Parallelism is selected per backend instance without exposing `decv_h264`
 types through the public API. `Auto` remains the default:
 
 ```rust
-use gpui_video::{DecvBackend, DecvParallelism};
+use gpui_media::{DecvBackend, DecvParallelism};
 
 let backend = DecvBackend::new().parallelism(DecvParallelism::Serial);
 ```
@@ -65,18 +67,19 @@ let backend = DecvBackend::new().parallelism(DecvParallelism::Serial);
 Run the dedicated comparison example with:
 
 ```sh
-cargo run -p gpui_video --no-default-features \
+cargo run -p gpui_media --no-default-features \
   --features backend-decv --example decv_play -- \
   --parallelism serial /path/to/video.mp4
 ```
 
-Implement `VideoBackend` to open a `PlaybackSession` and, optionally, a
-`FrameExtractionSession`. The backend publishes timestamped `VideoFrame`
-values and playback events through `PlaybackOutputSink`; `gpui_video` owns the
-bounded latest-frame queue and common frame statistics.
+Implement `MediaBackend` to open a unified `MediaPlaybackSession` and,
+optionally, a `FrameExtractionSession`. The session owns audio output and A/V
+synchronization. It publishes timestamped `VideoFrame` values and playback
+events through `MediaOutputSink`; `gpui_media` owns the bounded latest-video
+queue and common frame statistics.
 
 ```rust
-let backend: Arc<dyn VideoBackend> = Arc::new(MyBackend::new());
+let backend: Arc<dyn MediaBackend> = Arc::new(MyBackend::new());
 let player_source = source.clone();
 let player_backend = backend.clone();
 
@@ -105,6 +108,20 @@ let player = VideoPlayer::builder(source)
 
 Cargo features determine which built-in backends are available; the backend is
 selected per player at runtime. Multiple compiled backends may coexist.
+
+## Media session boundary
+
+`MediaPlaybackSession` owns all selected streams from one source. Audio and
+video are intentionally not opened as independent playback sessions: play,
+pause, seek, buffering, playback rate, EOS and clock synchronization must
+remain atomic across the complete media timeline. The backend also owns audio
+output; `MediaOutputSink` receives only decoded video frames and common media
+events.
+
+Backends emit `MediaBackendEvent::Ready` after initial preroll and after an
+asynchronous seek completes. This lets an audio-only source leave
+`PlaybackState::Loading` or `PlaybackState::Seeking` without waiting for a
+video frame that will never exist.
 
 ## Create a player entity
 
@@ -199,7 +216,7 @@ probed.
 Run the custom play/pause and timeline example with:
 
 ```sh
-cargo run -p gpui_video --example overlay_controls -- /path/to/video.mp4
+cargo run -p gpui_media --example overlay_controls -- /path/to/video.mp4
 ```
 
 ## Read the timeline
@@ -249,9 +266,9 @@ Run the dedicated WebDAV example with credentials supplied outside the command
 line:
 
 ```sh
-GPUI_VIDEO_WEBDAV_USERNAME='user' \
-GPUI_VIDEO_WEBDAV_PASSWORD='password' \
-cargo run -p gpui_video --example webdav -- \
+GPUI_MEDIA_WEBDAV_USERNAME='user' \
+GPUI_MEDIA_WEBDAV_PASSWORD='password' \
+cargo run -p gpui_media --example webdav -- \
   'https://dav.example.com/remote.php/dav/files/user/video.mp4'
 ```
 
@@ -397,6 +414,6 @@ Requests beyond the video stream duration return the closest available frame bef
 
 ## DMA-BUF status
 
-Use `VideoPlayer::new_in_window` to pass the active renderer's `GpuSpecs` into the decoder setup. `gpui_video` advertises only native NV12 modifiers that GPUI reports as sampleable with two memory planes. It preserves the GStreamer DMA-BUF object identity and maps both NV12 image planes to the same object when appropriate.
+Use `VideoPlayer::new_in_window` to pass the active renderer's `GpuSpecs` into the decoder setup. `gpui_media` advertises only native NV12 modifiers that GPUI reports as sampleable with two memory planes. It preserves the GStreamer DMA-BUF object identity and maps both NV12 image planes to the same object when appropriate.
 
 If GPUI reports `DmaBufImportStatus::Failed` after presentation, the player automatically restricts the appsink to CPU frames and seeks to the current position to force renegotiation. Linear NV12/BGRA/RGBA DMA-BUF remains available when native import is not supported.

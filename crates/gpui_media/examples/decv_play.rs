@@ -2,7 +2,7 @@ use std::{num::NonZeroUsize, time::Instant};
 
 use anyhow::{Result, anyhow, bail};
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_video::{
+use gpui_media::{
     DecvBackend, DecvParallelism, MediaSource, PlaybackState, VideoPlayer, VideoPlayerEvent,
     VideoPlayerOptions,
 };
@@ -10,7 +10,7 @@ use gpui_video::{
 fn main() -> Result<()> {
     let (input, parallelism) = parse_arguments()?;
     let source = MediaSource::from_path(input)?;
-    let title = format!("gpui_video · decv · {}", source.display_name());
+    let title = format!("gpui_media · decv · {}", source.display_name());
 
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(680.0)), cx);
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
             },
         );
         if let Err(error) = result {
-            eprintln!("gpui_video decv example: failed to open window: {error:#}");
+            eprintln!("gpui_media decv example: failed to open window: {error:#}");
             cx.quit();
             return;
         }
@@ -106,7 +106,7 @@ fn parse_arguments() -> Result<(String, DecvParallelism)> {
 
     let input = input.ok_or_else(|| {
         anyhow!(
-            "Usage: cargo run -p gpui_video --no-default-features \
+            "Usage: cargo run -p gpui_media --no-default-features \
              --features backend-decv --example decv_play -- \
              [--parallelism auto|serial|THREADS] <local MP4>"
         )

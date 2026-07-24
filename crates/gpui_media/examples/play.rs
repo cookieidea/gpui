@@ -1,16 +1,16 @@
 use anyhow::Result;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_video::{MediaSource, VideoPlayer, VideoPlayerEvent, VideoPlayerOptions};
+use gpui_media::{MediaSource, VideoPlayer, VideoPlayerEvent, VideoPlayerOptions};
 
 fn main() -> Result<()> {
     let input = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("Usage: cargo run -p gpui_video --example play -- <video file or URI>");
+        eprintln!("Usage: cargo run -p gpui_media --example play -- <video file or URI>");
         std::process::exit(2);
     });
     let source = MediaSource::parse(&input)?;
-    let title = format!("gpui_video · {}", source.display_name());
+    let title = format!("gpui_media · {}", source.display_name());
 
-    gpui_video::init()?;
+    gpui_media::init()?;
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(680.0)), cx);
         let result = cx.open_window(
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "linux")]
                 if let Some(gpu) = window.gpu_specs() {
                     eprintln!(
-                        "gpui_video: renderer={} drm_device={:?} native_nv12={} modifiers={:?}",
+                        "gpui_media: renderer={} drm_device={:?} native_nv12={} modifiers={:?}",
                         gpu.device_name,
                         gpu.drm_render_device,
                         gpu.supports_native_nv12_dma_buf_import,
@@ -39,7 +39,7 @@ fn main() -> Result<()> {
                 let mut reported_frame_layout = false;
                 cx.subscribe(&player, move |_, event, _| match event {
                     VideoPlayerEvent::FrameTransportChanged(transport) => {
-                        eprintln!("gpui_video: frame transport changed to {transport:?}");
+                        eprintln!("gpui_media: frame transport changed to {transport:?}");
                     }
                     #[cfg(target_os = "linux")]
                     VideoPlayerEvent::FrameReady(frame) if !reported_frame_layout => {
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
                             frame.surface().backing()
                         {
                             eprintln!(
-                                "gpui_video: DMA-BUF modifier={:#018x} native_image={} objects={} planes={} producer_device={:?}",
+                                "gpui_media: DMA-BUF modifier={:#018x} native_image={} objects={} planes={} producer_device={:?}",
                                 dma_buf.drm_modifier(),
                                 dma_buf.image().is_some(),
                                 dma_buf.image().map_or(0, |image| image.objects().len()),
@@ -61,7 +61,7 @@ fn main() -> Result<()> {
                         }
                     }
                     VideoPlayerEvent::DmaBufImportFailed(reason) => {
-                        eprintln!("gpui_video: DMA-BUF import failed, switching to CPU output: {reason}");
+                        eprintln!("gpui_media: DMA-BUF import failed, switching to CPU output: {reason}");
                     }
                     _ => {}
                 })
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
             },
         );
         if let Err(error) = result {
-            eprintln!("gpui_video: failed to open window: {error}");
+            eprintln!("gpui_media: failed to open window: {error}");
             cx.quit();
             return;
         }

@@ -1,5 +1,5 @@
 [package]
-name = "gpui_video"
+name = "gpui_media"
 version = "0.1.0"
 publish.workspace = true
 edition.workspace = true

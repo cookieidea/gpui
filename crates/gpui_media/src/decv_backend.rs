@@ -20,8 +20,8 @@ use gpui::{
 };
 
 use crate::{
-    BackendCapabilities, BackendEvent, MediaSource, PlaybackBackendRequest, PlaybackOutputSink,
-    PlaybackSession, PlaybackTimeline, SeekMode, VideoBackend, VideoFrame,
+    MediaBackend, MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
+    MediaPlaybackSession, MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
 };
 
 const VIDEO_HANDLER: FourCc = FourCc::new(*b"vide");
@@ -75,7 +75,7 @@ impl DecvBackendOptions {
 ///
 /// This backend is intentionally opt-in while `decv` is pre-1.0. Its types
 /// remain confined to this module so applications depend only on
-/// `gpui_video`'s stable backend boundary.
+/// `gpui_media`'s stable backend boundary.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DecvBackend {
     options: DecvBackendOptions,
@@ -100,16 +100,16 @@ impl DecvBackend {
     }
 }
 
-impl VideoBackend for DecvBackend {
+impl MediaBackend for DecvBackend {
     fn name(&self) -> &'static str {
         "decv"
     }
 
     fn open_playback(
         &self,
-        request: PlaybackBackendRequest,
-        output: PlaybackOutputSink,
-    ) -> Result<Box<dyn PlaybackSession>> {
+        request: MediaPlaybackRequest,
+        output: MediaOutputSink,
+    ) -> Result<Box<dyn MediaPlaybackSession>> {
         Ok(Box::new(DecvSession::open(
             request.source,
             output,
@@ -127,7 +127,7 @@ struct DecvSession {
 impl DecvSession {
     fn open(
         source: MediaSource,
-        output: PlaybackOutputSink,
+        output: MediaOutputSink,
         options: DecvBackendOptions,
     ) -> Result<Self> {
         let path = local_path(&source)?;
@@ -151,7 +151,7 @@ impl DecvSession {
                         "decv playback failed for {}: {error:#}",
                         worker_path.display()
                     );
-                    output.emit(BackendEvent::Error(error.to_string().into()));
+                    output.emit(MediaBackendEvent::Error(error.to_string().into()));
                 }
             })
             .context("failed to start decv playback thread")?;
@@ -170,12 +170,13 @@ impl DecvSession {
     }
 }
 
-impl PlaybackSession for DecvSession {
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
+impl MediaPlaybackSession for DecvSession {
+    fn capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            video: true,
             seeking: true,
             accurate_seeking: true,
-            ..BackendCapabilities::default()
+            ..MediaCapabilities::default()
         }
     }
 
@@ -265,7 +266,7 @@ fn playback_worker(
     track_index: usize,
     commands: mpsc::Receiver<Command>,
     shared_timeline: &Mutex<TimelineState>,
-    output: &PlaybackOutputSink,
+    output: &MediaOutputSink,
     parallelism: DecvParallelism,
 ) -> Result<()> {
     let demuxer = Mp4Demuxer::open(
@@ -362,7 +363,7 @@ fn playback_worker(
                     playing = false;
                     let now = Instant::now();
                     shared_timeline.lock_unpoisoned().finish(now);
-                    output.emit(BackendEvent::Ended);
+                    output.emit(MediaBackendEvent::Ended);
                 }
                 continue;
             }
@@ -440,7 +441,7 @@ fn playback_worker(
         shared_timeline
             .lock_unpoisoned()
             .present(timestamp, Instant::now());
-        output.publish_frame(frame);
+        output.publish_video_frame(frame);
         preroll = false;
         if output.is_closed() {
             return Ok(());
@@ -582,7 +583,7 @@ fn convert_frame(
     frame.validate().context("decv produced an invalid frame")?;
     if frame.format.pixel_format != PixelFormat::Nv12 {
         bail!(
-            "decv produced unsupported pixel format {:?}; gpui_video's decv adapter currently accepts NV12",
+            "decv produced unsupported pixel format {:?}; gpui_media's decv adapter currently accepts NV12",
             frame.format.pixel_format
         );
     }

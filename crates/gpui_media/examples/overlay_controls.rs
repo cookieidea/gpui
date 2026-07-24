@@ -6,7 +6,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Window, WindowBounds,
     WindowOptions, canvas, div, prelude::*, px, relative, rgba, size,
 };
-use gpui_video::{
+use gpui_media::{
     MediaSource, PlaybackState, SeekMode, VideoPlayer, VideoPlayerOptions, video_container,
 };
 
@@ -34,7 +34,7 @@ impl VideoControlsDemo {
             _ => player.play(cx),
         });
         if let Err(error) = result {
-            eprintln!("gpui_video controls example: {error:#}");
+            eprintln!("gpui_media controls example: {error:#}");
         }
     }
 
@@ -73,7 +73,7 @@ impl VideoControlsDemo {
                 player.seek_to(target, SeekMode::Accurate, cx)
             });
             if let Err(error) = result {
-                eprintln!("gpui_video controls example: {error:#}");
+                eprintln!("gpui_media controls example: {error:#}");
             }
         }
         cx.notify();
@@ -212,13 +212,13 @@ fn format_time(duration: Duration) -> String {
 fn main() -> Result<()> {
     let input = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
-            "Usage: cargo run -p gpui_video --example overlay_controls -- <video file or URI>"
+            "Usage: cargo run -p gpui_media --example overlay_controls -- <video file or URI>"
         );
         std::process::exit(2);
     });
     let source = MediaSource::parse(input)?;
 
-    gpui_video::init()?;
+    gpui_media::init()?;
     gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1100.0), px(680.0)), cx);
         let result = cx.open_window(
@@ -227,7 +227,7 @@ fn main() -> Result<()> {
                 ..Default::default()
             },
             move |window, cx| {
-                window.set_window_title("gpui_video · custom overlay controls");
+                window.set_window_title("gpui_media · custom overlay controls");
                 let player = cx.new(|cx| {
                     VideoPlayer::new_in_window(source, VideoPlayerOptions::default(), window, cx)
                         .expect("failed to create video player")
@@ -236,7 +236,7 @@ fn main() -> Result<()> {
             },
         );
         if let Err(error) = result {
-            eprintln!("gpui_video: failed to open controls example: {error}");
+            eprintln!("gpui_media: failed to open controls example: {error}");
             cx.quit();
             return;
         }

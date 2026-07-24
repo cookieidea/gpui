@@ -1,12 +1,12 @@
 //! Reusable GPUI video playback component.
 //!
-//! A pluggable [`VideoBackend`] owns demuxing, decoding, audio output and the
-//! playback clock. [`VideoPlayer`] renders only the newest decoded frame with
-//! GPUI's dynamic `surface` element. It deliberately contains no controls,
-//! pointer behavior, status overlay or fullscreen policy; host applications
-//! build those features from the exported state and events.
+//! A pluggable [`MediaBackend`] owns demuxing, video/audio decoding, audio
+//! output and the shared playback clock. [`VideoPlayer`] renders only the
+//! newest decoded video frame with GPUI's dynamic `surface` element. It
+//! deliberately contains no controls, pointer behavior, status overlay or
+//! fullscreen policy; host applications build those features from the
+//! exported state and events.
 
-mod backend;
 mod container;
 #[cfg(feature = "backend-decv")]
 mod decv_backend;
@@ -14,6 +14,7 @@ mod frame;
 mod frame_extractor;
 #[cfg(feature = "backend-gstreamer")]
 mod gstreamer_backend;
+mod media_backend;
 #[cfg(feature = "backend-gstreamer")]
 mod network;
 mod player;
@@ -22,17 +23,17 @@ mod stats;
 mod timeline;
 mod window_sizing;
 
-pub use backend::{
-    BackendCapabilities, BackendEvent, FrameExtractionSession, FrameExtractorBackendRequest,
-    FrameTransportPreference, PlaybackBackendRequest, PlaybackOutputSink, PlaybackSession,
-    TransportChange, VideoBackend,
-};
 pub use container::{VideoContainer, video_container};
 #[cfg(feature = "backend-decv")]
 pub use decv_backend::{DecvBackend, DecvBackendOptions, DecvParallelism};
 pub use frame::{FrameTransport, VideoFrame};
 pub use frame_extractor::{
     FrameExtractionSuperseded, VideoFrameExtractor, VideoFrameExtractorOptions,
+};
+pub use media_backend::{
+    FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
+    MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
+    MediaPlaybackSession, TransportChange,
 };
 pub use player::{
     PlaybackState, VideoPlayer, VideoPlayerBuilder, VideoPlayerEvent, VideoPlayerOptions,

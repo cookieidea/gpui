@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use gpui_video::{MediaSource, VideoFrameExtractor};
+use gpui_media::{MediaSource, VideoFrameExtractor};
 
 fn main() -> Result<()> {
     let mut arguments = std::env::args().skip(1);
     let input = arguments
         .next()
-        .context("usage: cargo run -p gpui_video --example frame_at -- <media> [seconds]")?;
+        .context("usage: cargo run -p gpui_media --example frame_at -- <media> [seconds]")?;
     let seconds = arguments
         .next()
         .map(|value| value.parse::<f64>())

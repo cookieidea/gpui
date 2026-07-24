@@ -5,22 +5,27 @@ use gpui::GpuSpecs;
 
 use crate::{MediaSource, PlaybackTimeline, SeekMode, VideoFrame, stats::PlaybackCounters};
 
-/// A backend-independent event produced by a playback session.
+/// A backend-independent event produced by a media playback session.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum BackendEvent {
+pub enum MediaBackendEvent {
+    /// The active media streams have completed preroll or an asynchronous
+    /// seek and the session can continue in its requested play/pause state.
+    Ready,
     Buffering(u8),
     Ended,
     Error(Arc<str>),
 }
 
-/// Capabilities exposed by one opened playback session.
+/// Media capabilities exposed by one opened playback session.
 ///
 /// Capabilities belong to the session rather than the factory because support
 /// can depend on the selected media streams and source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BackendCapabilities {
+pub struct MediaCapabilities {
+    pub video: bool,
     pub audio: bool,
+    pub subtitles: bool,
     pub seeking: bool,
     pub accurate_seeking: bool,
     pub playback_rate: bool,
@@ -48,9 +53,9 @@ pub enum TransportChange {
     Reconfigured,
 }
 
-/// Data supplied when a backend opens a playback session.
+/// Data supplied when a media backend opens a playback session.
 #[derive(Clone, Debug)]
-pub struct PlaybackBackendRequest {
+pub struct MediaPlaybackRequest {
     pub source: MediaSource,
     pub gpu_specs: Option<GpuSpecs>,
 }
@@ -62,39 +67,41 @@ pub struct FrameExtractorBackendRequest {
     pub timeout: Duration,
 }
 
-/// Thread-safe publisher shared with a playback backend.
+/// Thread-safe publisher shared with a media playback backend.
 ///
-/// Frames use a latest-only bounded queue. Publishing while the queue is full
-/// discards the older frame and records that drop in the common player stats.
+/// Video frames use a latest-only bounded queue. Publishing while the queue is
+/// full discards the older frame and records that drop in the common player
+/// stats. Audio output remains owned by the media backend so it can preserve a
+/// single playback clock and sample-accurate A/V synchronization.
 #[derive(Clone)]
-pub struct PlaybackOutputSink {
-    frames: async_channel::Sender<Arc<VideoFrame>>,
-    frame_drain: async_channel::Receiver<Arc<VideoFrame>>,
-    events: async_channel::Sender<BackendEvent>,
+pub struct MediaOutputSink {
+    video_frames: async_channel::Sender<Arc<VideoFrame>>,
+    video_frame_drain: async_channel::Receiver<Arc<VideoFrame>>,
+    events: async_channel::Sender<MediaBackendEvent>,
     counters: Arc<PlaybackCounters>,
 }
 
-pub(crate) struct PlaybackOutput {
-    pub(crate) frames: async_channel::Receiver<Arc<VideoFrame>>,
-    pub(crate) events: async_channel::Receiver<BackendEvent>,
+pub(crate) struct MediaOutput {
+    pub(crate) video_frames: async_channel::Receiver<Arc<VideoFrame>>,
+    pub(crate) events: async_channel::Receiver<MediaBackendEvent>,
     pub(crate) counters: Arc<PlaybackCounters>,
 }
 
-impl PlaybackOutputSink {
-    pub(crate) fn channel() -> (Self, PlaybackOutput) {
+impl MediaOutputSink {
+    pub(crate) fn channel() -> (Self, MediaOutput) {
         let (frame_tx, frame_rx) = async_channel::bounded(1);
         let (event_tx, event_rx) = async_channel::unbounded();
         let counters = Arc::new(PlaybackCounters::default());
 
         (
             Self {
-                frames: frame_tx,
-                frame_drain: frame_rx.clone(),
+                video_frames: frame_tx,
+                video_frame_drain: frame_rx.clone(),
                 events: event_tx,
                 counters: counters.clone(),
             },
-            PlaybackOutput {
-                frames: frame_rx,
+            MediaOutput {
+                video_frames: frame_rx,
                 events: event_rx,
                 counters,
             },
@@ -105,16 +112,16 @@ impl PlaybackOutputSink {
     /// reached the GPUI player entity.
     ///
     /// Returns `true` when an older frame was dropped.
-    pub fn publish_frame(&self, frame: Arc<VideoFrame>) -> bool {
+    pub fn publish_video_frame(&self, frame: Arc<VideoFrame>) -> bool {
         self.counters.record_decoded_frame();
-        match self.frames.try_send(frame) {
+        match self.video_frames.try_send(frame) {
             Ok(()) | Err(async_channel::TrySendError::Closed(_)) => false,
             Err(async_channel::TrySendError::Full(frame)) => {
-                let dropped = self.frame_drain.try_recv().is_ok();
+                let dropped = self.video_frame_drain.try_recv().is_ok();
                 if dropped {
                     self.counters.record_dropped_frame();
                 }
-                let _ = self.frames.try_send(frame);
+                let _ = self.video_frames.try_send(frame);
                 dropped
             }
         }
@@ -122,41 +129,42 @@ impl PlaybackOutputSink {
 
     /// Publishes a playback event. Returns `false` after the player has closed
     /// its event stream.
-    pub fn emit(&self, event: BackendEvent) -> bool {
+    pub fn emit(&self, event: MediaBackendEvent) -> bool {
         self.events.send_blocking(event).is_ok()
     }
 
     pub fn is_closed(&self) -> bool {
-        self.frames.is_closed() && self.events.is_closed()
+        self.video_frames.is_closed() && self.events.is_closed()
     }
 }
 
-/// One opened, stateful playback session.
+/// One opened, stateful media playback session.
 ///
 /// Methods are synchronous control operations. A backend may run demuxing,
-/// decoding and audio on its own workers and publish output through the sink
-/// passed to [`VideoBackend::open_playback`].
-pub trait PlaybackSession: Send {
-    fn capabilities(&self) -> BackendCapabilities;
+/// video/audio decoding, audio output and synchronization on its own workers,
+/// and publish video output and events through the sink passed to
+/// [`MediaBackend::open_playback`].
+pub trait MediaPlaybackSession: Send {
+    fn capabilities(&self) -> MediaCapabilities;
 
     fn play(&mut self) -> Result<()>;
     fn pause(&mut self) -> Result<()>;
     fn timeline(&self) -> PlaybackTimeline;
 
     fn reload(&mut self, _autoplay: bool) -> Result<()> {
-        bail!("this video backend cannot reload its active source")
+        bail!("this media backend cannot reload its active source")
     }
 
     fn seek_to(&mut self, _position: Duration, _mode: SeekMode) -> Result<()> {
-        bail!("this video backend does not support seeking")
+        bail!("this media backend does not support seeking")
     }
 
     fn step_forward(&mut self, _frames: u64) -> Result<()> {
-        bail!("this video backend does not support frame stepping")
+        bail!("this media backend does not support video frame stepping")
     }
 
     fn set_playback_rate(&mut self, _rate: f64) -> Result<()> {
-        bail!("this video backend does not support playback-rate changes")
+        bail!("this media backend does not support playback-rate changes")
     }
 
     fn set_volume(&mut self, _volume: f64) {}
@@ -171,7 +179,7 @@ pub trait PlaybackSession: Send {
         &mut self,
         _preference: FrameTransportPreference,
     ) -> Result<TransportChange> {
-        bail!("this video backend cannot change frame transport")
+        bail!("this media backend cannot change video frame transport")
     }
 }
 
@@ -181,31 +189,31 @@ pub trait FrameExtractionSession: Send {
     fn frame_at(&mut self, position: Duration, seek_mode: SeekMode) -> Result<Arc<VideoFrame>>;
 }
 
-/// Factory for playback and frame-extraction sessions.
+/// Factory for unified media playback and video frame-extraction sessions.
 ///
 /// Applications may implement this trait in another crate and pass it to
 /// `VideoPlayer` or `VideoFrameExtractor` without enabling a built-in backend.
-pub trait VideoBackend: Send + Sync + 'static {
+pub trait MediaBackend: Send + Sync + 'static {
     fn name(&self) -> &'static str;
 
     fn open_playback(
         &self,
-        request: PlaybackBackendRequest,
-        output: PlaybackOutputSink,
-    ) -> Result<Box<dyn PlaybackSession>>;
+        request: MediaPlaybackRequest,
+        output: MediaOutputSink,
+    ) -> Result<Box<dyn MediaPlaybackSession>>;
 
     fn open_frame_extractor(
         &self,
         _request: FrameExtractorBackendRequest,
     ) -> Result<Box<dyn FrameExtractionSession>> {
         bail!(
-            "video backend {} does not support frame extraction",
+            "media backend {} does not support video frame extraction",
             self.name()
         )
     }
 }
 
-pub(crate) fn default_backend() -> Result<Arc<dyn VideoBackend>> {
+pub(crate) fn default_media_backend() -> Result<Arc<dyn MediaBackend>> {
     #[cfg(feature = "backend-gstreamer")]
     {
         return Ok(Arc::new(crate::gstreamer_backend::GstreamerBackend));
@@ -219,7 +227,7 @@ pub(crate) fn default_backend() -> Result<Arc<dyn VideoBackend>> {
     #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]
     {
         bail!(
-            "gpui_video has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend"
+            "gpui_media has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend"
         )
     }
 }
@@ -230,7 +238,7 @@ mod tests {
 
     use gpui::{DevicePixels, SurfaceFrame, SurfaceHandle, size};
 
-    use super::PlaybackOutputSink;
+    use super::MediaOutputSink;
     use crate::VideoFrame;
 
     fn frame(sequence: u64) -> Arc<VideoFrame> {
@@ -247,11 +255,14 @@ mod tests {
 
     #[test]
     fn output_sink_keeps_only_the_latest_frame() {
-        let (sink, output) = PlaybackOutputSink::channel();
+        let (sink, output) = MediaOutputSink::channel();
 
-        assert!(!sink.publish_frame(frame(1)));
-        assert!(sink.publish_frame(frame(2)));
-        assert_eq!(output.frames.try_recv().unwrap().surface().sequence(), 2);
+        assert!(!sink.publish_video_frame(frame(1)));
+        assert!(sink.publish_video_frame(frame(2)));
+        assert_eq!(
+            output.video_frames.try_recv().unwrap().surface().sequence(),
+            2
+        );
 
         let stats = output.counters.snapshot(0);
         assert_eq!(stats.decoded_frames(), 2);

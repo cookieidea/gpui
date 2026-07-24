@@ -11,8 +11,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 
 use crate::{
-    FrameExtractionSession, FrameExtractorBackendRequest, MediaSource, SeekMode, VideoBackend,
-    VideoFrame, backend::default_backend,
+    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaSource, SeekMode,
+    VideoFrame, media_backend::default_media_backend,
 };
 
 /// Indicates that a pending latest-only preview request was replaced by a
@@ -83,22 +83,22 @@ impl VideoFrameExtractor {
         Self::with_options_and_backend(
             source,
             VideoFrameExtractorOptions::default(),
-            default_backend()?,
+            default_media_backend()?,
         )
     }
 
-    pub fn new_with_backend(source: MediaSource, backend: Arc<dyn VideoBackend>) -> Result<Self> {
+    pub fn new_with_backend(source: MediaSource, backend: Arc<dyn MediaBackend>) -> Result<Self> {
         Self::with_options_and_backend(source, VideoFrameExtractorOptions::default(), backend)
     }
 
     pub fn with_options(source: MediaSource, options: VideoFrameExtractorOptions) -> Result<Self> {
-        Self::with_options_and_backend(source, options, default_backend()?)
+        Self::with_options_and_backend(source, options, default_media_backend()?)
     }
 
     pub fn with_options_and_backend(
         source: MediaSource,
         options: VideoFrameExtractorOptions,
-        backend: Arc<dyn VideoBackend>,
+        backend: Arc<dyn MediaBackend>,
     ) -> Result<Self> {
         if options.timeout.is_zero() {
             anyhow::bail!("frame extraction timeout must be greater than zero");

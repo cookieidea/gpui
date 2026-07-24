@@ -15,9 +15,9 @@ use gpui::{
 use gst::prelude::*;
 
 use crate::{
-    BackendCapabilities, BackendEvent, FrameExtractionSession, FrameExtractorBackendRequest,
-    FrameTransportPreference, MediaSource, PlaybackBackendRequest, PlaybackOutputSink,
-    PlaybackSession, PlaybackTimeline, SeekMode, TransportChange, VideoBackend, VideoFrame,
+    FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
+    MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
+    MediaPlaybackSession, MediaSource, PlaybackTimeline, SeekMode, TransportChange, VideoFrame,
     network::configure_playbin_network,
 };
 
@@ -56,7 +56,7 @@ impl GstreamerPlayback {
     pub fn new(
         source: &MediaSource,
         gpu_specs: Option<&GpuSpecs>,
-        output: PlaybackOutputSink,
+        output: MediaOutputSink,
     ) -> Result<Self> {
         initialize()?;
 
@@ -101,7 +101,7 @@ impl GstreamerPlayback {
                         gst::FlowError::Error
                     })?;
 
-                    output_for_samples.publish_frame(frame);
+                    output_for_samples.publish_video_frame(frame);
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -118,6 +118,7 @@ impl GstreamerPlayback {
             .bus()
             .context("playbin3 did not provide a message bus")?;
         let bus_for_thread = bus.clone();
+        let playbin_for_bus = playbin.clone();
         let bus_shutdown = Arc::new(AtomicBool::new(false));
         let bus_shutdown_for_thread = bus_shutdown.clone();
         #[cfg(target_os = "linux")]
@@ -144,17 +145,24 @@ impl GstreamerPlayback {
                     }
 
                     let event = match message.view() {
-                        gst::MessageView::Buffering(buffering) => Some(BackendEvent::Buffering(
-                            buffering_percent(buffering.percent()),
-                        )),
-                        gst::MessageView::Eos(..) => Some(BackendEvent::Ended),
+                        gst::MessageView::AsyncDone(..)
+                            if message.src().is_some_and(|source| {
+                                source == playbin_for_bus.upcast_ref::<gst::Object>()
+                            }) =>
+                        {
+                            Some(MediaBackendEvent::Ready)
+                        }
+                        gst::MessageView::Buffering(buffering) => Some(
+                            MediaBackendEvent::Buffering(buffering_percent(buffering.percent())),
+                        ),
+                        gst::MessageView::Eos(..) => Some(MediaBackendEvent::Ended),
                         gst::MessageView::Error(error) => {
                             let mut message = error.error().to_string();
                             if let Some(debug) = error.debug() {
                                 message.push_str(": ");
                                 message.push_str(&debug);
                             }
-                            Some(BackendEvent::Error(message.into()))
+                            Some(MediaBackendEvent::Error(message.into()))
                         }
                         _ => None,
                     };
@@ -312,16 +320,16 @@ impl GstreamerPlayback {
     }
 }
 
-impl VideoBackend for GstreamerBackend {
+impl MediaBackend for GstreamerBackend {
     fn name(&self) -> &'static str {
         "gstreamer"
     }
 
     fn open_playback(
         &self,
-        request: PlaybackBackendRequest,
-        output: PlaybackOutputSink,
-    ) -> Result<Box<dyn PlaybackSession>> {
+        request: MediaPlaybackRequest,
+        output: MediaOutputSink,
+    ) -> Result<Box<dyn MediaPlaybackSession>> {
         Ok(Box::new(GstreamerPlayback::new(
             &request.source,
             request.gpu_specs.as_ref(),
@@ -342,9 +350,10 @@ impl VideoBackend for GstreamerBackend {
     }
 }
 
-impl PlaybackSession for GstreamerPlayback {
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
+impl MediaPlaybackSession for GstreamerPlayback {
+    fn capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            video: true,
             audio: true,
             seeking: true,
             accurate_seeking: true,
@@ -352,6 +361,7 @@ impl PlaybackSession for GstreamerPlayback {
             frame_stepping: true,
             frame_extraction: true,
             transport_switching: cfg!(target_os = "linux"),
+            ..MediaCapabilities::default()
         }
     }
 

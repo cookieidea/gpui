@@ -2,26 +2,26 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
 use gpui::{DevicePixels, SurfaceFrame, SurfaceHandle, size};
-use gpui_video::{
-    BackendCapabilities, FrameExtractionSession, FrameExtractorBackendRequest, MediaSource,
-    PlaybackBackendRequest, PlaybackOutputSink, PlaybackSession, PlaybackTimeline, SeekMode,
-    VideoBackend, VideoFrame, VideoFrameExtractor,
+use gpui_media::{
+    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaCapabilities,
+    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaSource, PlaybackTimeline,
+    SeekMode, VideoFrame, VideoFrameExtractor,
 };
 
 #[derive(Clone, Copy)]
 struct CustomBackend;
 
-impl VideoBackend for CustomBackend {
+impl MediaBackend for CustomBackend {
     fn name(&self) -> &'static str {
         "custom-test"
     }
 
     fn open_playback(
         &self,
-        _request: PlaybackBackendRequest,
-        output: PlaybackOutputSink,
-    ) -> Result<Box<dyn PlaybackSession>> {
-        output.publish_frame(test_frame(1, Duration::ZERO));
+        _request: MediaPlaybackRequest,
+        output: MediaOutputSink,
+    ) -> Result<Box<dyn MediaPlaybackSession>> {
+        output.publish_video_frame(test_frame(1, Duration::ZERO));
         Ok(Box::new(CustomPlayback))
     }
 
@@ -35,9 +35,10 @@ impl VideoBackend for CustomBackend {
 
 struct CustomPlayback;
 
-impl PlaybackSession for CustomPlayback {
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
+impl MediaPlaybackSession for CustomPlayback {
+    fn capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            video: true,
             seeking: true,
             frame_extraction: true,
             ..Default::default()
@@ -104,7 +105,7 @@ fn test_frame(sequence: u64, timestamp: Duration) -> Arc<VideoFrame> {
 #[test]
 fn external_backend_drives_the_generic_frame_extractor() {
     let source = MediaSource::from_uri("custom-test://video").unwrap();
-    let backend: Arc<dyn VideoBackend> = Arc::new(CustomBackend);
+    let backend: Arc<dyn MediaBackend> = Arc::new(CustomBackend);
     let extractor = VideoFrameExtractor::new_with_backend(source, backend).unwrap();
 
     let initial = extractor.initial_frame_blocking().unwrap();

@@ -2839,6 +2839,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "core-foundation 0.10.0",
+ "core-video",
+ "decv-core",
+ "decv-h264",
+ "decv-mp4",
+ "gpui",
+ "gpui_platform",
+ "gstreamer",
+ "gstreamer-allocators",
+ "gstreamer-app",
+ "gstreamer-video",
+ "log",
+ "url",
+]
+
+[[package]]
 name = "gpui_platform"
 version = "0.1.0"
 dependencies = [
@@ -2876,27 +2897,6 @@ dependencies = [
  "anyhow",
  "log",
  "which",
-]
-
-[[package]]
-name = "gpui_video"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel 2.5.0",
- "core-foundation 0.10.0",
- "core-video",
- "decv-core",
- "decv-h264",
- "decv-mp4",
- "gpui",
- "gpui_platform",
- "gstreamer",
- "gstreamer-allocators",
- "gstreamer-app",
- "gstreamer-video",
- "log",
- "url",
 ]
 
 [[package]]

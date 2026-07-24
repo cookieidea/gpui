@@ -9,10 +9,10 @@ use gpui::{
 use gpui::{DmaBufImportStatus, SurfaceFrameBacking};
 
 use crate::{
-    BackendCapabilities, BackendEvent, FrameTransport, FrameTransportPreference, MediaSource,
-    PlaybackBackendRequest, PlaybackOutputSink, PlaybackSession, PlaybackTimeline, SeekMode,
-    TransportChange, VideoBackend, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
-    backend::default_backend, stats::PlaybackCounters,
+    FrameTransport, FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities,
+    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaSource, PlaybackTimeline,
+    SeekMode, TransportChange, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
+    media_backend::default_media_backend, stats::PlaybackCounters,
 };
 
 /// Initial behavior for a [`VideoPlayer`].
@@ -28,7 +28,7 @@ pub struct VideoPlayerOptions {
 pub struct VideoPlayerBuilder {
     source: MediaSource,
     options: VideoPlayerOptions,
-    backend: Option<Arc<dyn VideoBackend>>,
+    backend: Option<Arc<dyn MediaBackend>>,
 }
 
 impl VideoPlayerBuilder {
@@ -37,12 +37,12 @@ impl VideoPlayerBuilder {
         self
     }
 
-    pub fn backend(mut self, backend: impl VideoBackend) -> Self {
+    pub fn backend(mut self, backend: impl MediaBackend) -> Self {
         self.backend = Some(Arc::new(backend));
         self
     }
 
-    pub fn shared_backend(mut self, backend: Arc<dyn VideoBackend>) -> Self {
+    pub fn shared_backend(mut self, backend: Arc<dyn MediaBackend>) -> Self {
         self.backend = Some(backend);
         self
     }
@@ -50,7 +50,7 @@ impl VideoPlayerBuilder {
     pub fn build(self, cx: &mut Context<VideoPlayer>) -> Result<VideoPlayer> {
         let backend = match self.backend {
             Some(backend) => backend,
-            None => default_backend()?,
+            None => default_media_backend()?,
         };
         VideoPlayer::new_with_backend(self.source, self.options, backend, cx)
     }
@@ -62,7 +62,7 @@ impl VideoPlayerBuilder {
     ) -> Result<VideoPlayer> {
         let backend = match self.backend {
             Some(backend) => backend,
-            None => default_backend()?,
+            None => default_media_backend()?,
         };
         VideoPlayer::new_in_window_with_backend(self.source, self.options, backend, window, cx)
     }
@@ -112,8 +112,8 @@ pub enum VideoPlayerEvent {
 /// no built-in interaction or player chrome.
 pub struct VideoPlayer {
     source: MediaSource,
-    backend: Arc<dyn VideoBackend>,
-    playback: Box<dyn PlaybackSession>,
+    backend: Arc<dyn MediaBackend>,
+    playback: Box<dyn MediaPlaybackSession>,
     counters: Arc<PlaybackCounters>,
     frame: Option<Arc<VideoFrame>>,
     frame_transport: Option<FrameTransport>,
@@ -142,7 +142,7 @@ impl VideoPlayer {
         options: VideoPlayerOptions,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        Self::new_with_backend_and_gpu_specs(source, options, default_backend()?, None, cx)
+        Self::new_with_backend_and_gpu_specs(source, options, default_media_backend()?, None, cx)
     }
 
     /// Creates a player configured for the renderer backing `window`.
@@ -159,7 +159,7 @@ impl VideoPlayer {
         Self::new_with_backend_and_gpu_specs(
             source,
             options,
-            default_backend()?,
+            default_media_backend()?,
             window.gpu_specs(),
             cx,
         )
@@ -169,7 +169,7 @@ impl VideoPlayer {
     pub fn new_with_backend(
         source: MediaSource,
         options: VideoPlayerOptions,
-        backend: Arc<dyn VideoBackend>,
+        backend: Arc<dyn MediaBackend>,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
         Self::new_with_backend_and_gpu_specs(source, options, backend, None, cx)
@@ -180,7 +180,7 @@ impl VideoPlayer {
     pub fn new_in_window_with_backend(
         source: MediaSource,
         options: VideoPlayerOptions,
-        backend: Arc<dyn VideoBackend>,
+        backend: Arc<dyn MediaBackend>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
@@ -190,13 +190,13 @@ impl VideoPlayer {
     fn new_with_backend_and_gpu_specs(
         source: MediaSource,
         options: VideoPlayerOptions,
-        backend: Arc<dyn VideoBackend>,
+        backend: Arc<dyn MediaBackend>,
         gpu_specs: Option<GpuSpecs>,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let (output_sink, output) = PlaybackOutputSink::channel();
+        let (output_sink, output) = MediaOutputSink::channel();
         let mut playback = backend.open_playback(
-            PlaybackBackendRequest {
+            MediaPlaybackRequest {
                 source: source.clone(),
                 gpu_specs,
             },
@@ -206,7 +206,7 @@ impl VideoPlayer {
         playback.set_volume(initial_volume);
         playback.set_muted(options.muted);
 
-        let frames = output.frames;
+        let frames = output.video_frames;
         cx.spawn(async move |this, cx| {
             while let Ok(frame) = frames.recv().await {
                 let Some(this) = this.upgrade() else {
@@ -230,19 +230,7 @@ impl VideoPlayer {
                         cx.emit(VideoPlayerEvent::FrameTransportChanged(transport));
                     }
                     player.frame = Some(frame.clone());
-                    let next_state = player.state_after_seek.take().or_else(|| {
-                        (player.state == PlaybackState::Loading).then_some(PlaybackState::Playing)
-                    });
-                    if let Some(next_state) = next_state {
-                        player.set_state(
-                            if next_state == PlaybackState::Playing && player.is_buffering() {
-                                PlaybackState::Loading
-                            } else {
-                                next_state
-                            },
-                            cx,
-                        );
-                    }
+                    player.finish_pending_transition(cx);
                     cx.emit(VideoPlayerEvent::FrameReady(frame));
                     cx.notify();
                 });
@@ -257,7 +245,10 @@ impl VideoPlayer {
                     break;
                 };
                 this.update(cx, |player, cx| match event {
-                    BackendEvent::Buffering(percent) => {
+                    MediaBackendEvent::Ready => {
+                        player.finish_pending_transition(cx);
+                    }
+                    MediaBackendEvent::Buffering(percent) => {
                         let was_buffering = player.is_buffering();
                         if player.buffering_percent != Some(percent) {
                             player.buffering_percent = Some(percent);
@@ -286,7 +277,7 @@ impl VideoPlayer {
                             }
                         }
                     }
-                    BackendEvent::Ended => {
+                    MediaBackendEvent::Ended => {
                         player.play_when_ready = false;
                         if let Some(duration) = player.timeline.duration() {
                             player.timeline = PlaybackTimeline::new(
@@ -298,7 +289,7 @@ impl VideoPlayer {
                         }
                         player.set_state(PlaybackState::Ended, cx);
                     }
-                    BackendEvent::Error(error) => {
+                    MediaBackendEvent::Error(error) => {
                         player.set_state(PlaybackState::Error(error.to_string().into()), cx);
                     }
                 });
@@ -360,7 +351,7 @@ impl VideoPlayer {
         &self.source
     }
 
-    pub fn backend(&self) -> &Arc<dyn VideoBackend> {
+    pub fn backend(&self) -> &Arc<dyn MediaBackend> {
         &self.backend
     }
 
@@ -368,7 +359,7 @@ impl VideoPlayer {
         self.backend.name()
     }
 
-    pub fn backend_capabilities(&self) -> BackendCapabilities {
+    pub fn backend_capabilities(&self) -> MediaCapabilities {
         self.playback.capabilities()
     }
 
@@ -658,6 +649,26 @@ impl VideoPlayer {
             muted: self.muted,
         });
         cx.notify();
+    }
+
+    fn finish_pending_transition(&mut self, cx: &mut Context<Self>) {
+        let next_state = self.state_after_seek.take().or_else(|| {
+            (self.state == PlaybackState::Loading).then_some(if self.play_when_ready {
+                PlaybackState::Playing
+            } else {
+                PlaybackState::Paused
+            })
+        });
+        if let Some(next_state) = next_state {
+            self.set_state(
+                if next_state == PlaybackState::Playing && self.is_buffering() {
+                    PlaybackState::Loading
+                } else {
+                    next_state
+                },
+                cx,
+            );
+        }
     }
 
     fn set_state(&mut self, state: PlaybackState, cx: &mut Context<Self>) {
