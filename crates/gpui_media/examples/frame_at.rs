@@ -1,21 +1,32 @@
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
 use gpui_media::{MediaSource, VideoFrameExtractor};
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
-    let input = arguments
-        .next()
-        .context("usage: cargo run -p gpui_media --example frame_at -- <media> [seconds]")?;
+    let input = arguments.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: cargo run -p gpui_media --example frame_at -- <media> [seconds]",
+        )
+    })?;
     let seconds = arguments
         .next()
         .map(|value| value.parse::<f64>())
         .transpose()
-        .context("frame timestamp must be a number of seconds")?
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("frame timestamp must be a number of seconds: {error}"),
+            )
+        })?
         .unwrap_or_default();
     if !seconds.is_finite() || seconds < 0.0 {
-        anyhow::bail!("frame timestamp must be finite and non-negative");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "frame timestamp must be finite and non-negative",
+        )
+        .into());
     }
 
     let extractor = VideoFrameExtractor::new(MediaSource::parse(input)?)?;

@@ -8,11 +8,10 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow};
-
 use crate::{
-    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaSource, SeekMode,
-    VideoFrame, media_backend::default_media_backend,
+    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaError, MediaErrorKind,
+    MediaRecovery, MediaResult, MediaSource, SeekMode, VideoFrame,
+    media_backend::default_media_backend,
 };
 
 /// Indicates that a pending latest-only preview request was replaced by a
@@ -27,6 +26,16 @@ impl fmt::Display for FrameExtractionSuperseded {
 }
 
 impl std::error::Error for FrameExtractionSuperseded {}
+
+impl From<FrameExtractionSuperseded> for MediaError {
+    fn from(error: FrameExtractionSuperseded) -> Self {
+        Self::new(
+            MediaErrorKind::Superseded,
+            error.to_string(),
+            MediaRecovery::None,
+        )
+    }
+}
 
 /// Configuration for an independent frame extraction pipeline.
 #[derive(Clone, Copy, Debug)]
@@ -75,11 +84,11 @@ enum WorkerRequest {
 struct FrameRequest {
     position: Duration,
     seek_mode: SeekMode,
-    response: async_channel::Sender<Result<Arc<VideoFrame>>>,
+    response: async_channel::Sender<MediaResult<Arc<VideoFrame>>>,
 }
 
 impl VideoFrameExtractor {
-    pub fn new(source: MediaSource) -> Result<Self> {
+    pub fn new(source: MediaSource) -> MediaResult<Self> {
         Self::with_options_and_backend(
             source,
             VideoFrameExtractorOptions::default(),
@@ -87,11 +96,17 @@ impl VideoFrameExtractor {
         )
     }
 
-    pub fn new_with_backend(source: MediaSource, backend: Arc<dyn MediaBackend>) -> Result<Self> {
+    pub fn new_with_backend(
+        source: MediaSource,
+        backend: Arc<dyn MediaBackend>,
+    ) -> MediaResult<Self> {
         Self::with_options_and_backend(source, VideoFrameExtractorOptions::default(), backend)
     }
 
-    pub fn with_options(source: MediaSource, options: VideoFrameExtractorOptions) -> Result<Self> {
+    pub fn with_options(
+        source: MediaSource,
+        options: VideoFrameExtractorOptions,
+    ) -> MediaResult<Self> {
         Self::with_options_and_backend(source, options, default_media_backend()?)
     }
 
@@ -99,12 +114,16 @@ impl VideoFrameExtractor {
         source: MediaSource,
         options: VideoFrameExtractorOptions,
         backend: Arc<dyn MediaBackend>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         if options.timeout.is_zero() {
-            anyhow::bail!("frame extraction timeout must be greater than zero");
+            return Err(MediaError::invalid_input(
+                "frame extraction timeout must be greater than zero",
+            ));
         }
         if options.request_queue_capacity == 0 {
-            anyhow::bail!("frame extraction request queue capacity must be greater than zero");
+            return Err(MediaError::invalid_input(
+                "frame extraction request queue capacity must be greater than zero",
+            ));
         }
 
         let session = backend.open_frame_extractor(FrameExtractorBackendRequest {
@@ -148,7 +167,7 @@ impl VideoFrameExtractor {
                     }
                 }
             })
-            .context("failed to start frame extraction worker")?;
+            .map_err(|error| MediaError::io("failed to start frame extraction worker", error))?;
 
         Ok(Self {
             inner: Arc::new(ExtractorInner {
@@ -162,7 +181,7 @@ impl VideoFrameExtractor {
     }
 
     /// Extracts a frame asynchronously with the default seek mode.
-    pub async fn frame_at(&self, position: Duration) -> Result<Arc<VideoFrame>> {
+    pub async fn frame_at(&self, position: Duration) -> MediaResult<Arc<VideoFrame>> {
         self.frame_at_with_mode(position, self.inner.default_seek_mode)
             .await
     }
@@ -173,7 +192,7 @@ impl VideoFrameExtractor {
     /// display size without briefly showing a provisional window. Unlike an
     /// arbitrary timestamp request, this also works for sequential HTTP
     /// responses that do not support byte ranges.
-    pub async fn initial_frame(&self) -> Result<Arc<VideoFrame>> {
+    pub async fn initial_frame(&self) -> MediaResult<Arc<VideoFrame>> {
         self.frame_at(Duration::ZERO).await
     }
 
@@ -182,7 +201,7 @@ impl VideoFrameExtractor {
         &self,
         position: Duration,
         seek_mode: SeekMode,
-    ) -> Result<Arc<VideoFrame>> {
+    ) -> MediaResult<Arc<VideoFrame>> {
         let (response_tx, response_rx) = async_channel::bounded(1);
         self.inner
             .requests
@@ -192,11 +211,11 @@ impl VideoFrameExtractor {
                 response: response_tx,
             }))
             .await
-            .map_err(|_| anyhow!("frame extraction worker has stopped"))?;
+            .map_err(|_| frame_extraction_worker_stopped())?;
         response_rx
             .recv()
             .await
-            .map_err(|_| anyhow!("frame extraction worker stopped before returning a frame"))?
+            .map_err(|_| frame_extraction_worker_stopped())?
     }
 
     /// Extracts the newest requested preview frame and supersedes an older
@@ -205,7 +224,7 @@ impl VideoFrameExtractor {
     /// This is intended for interactive scrubbers and hover previews. It does
     /// not cancel the seek currently executing on the worker. Use [`Self::frame_at`]
     /// when every submitted request must complete, such as thumbnail generation.
-    pub async fn frame_at_latest(&self, position: Duration) -> Result<Arc<VideoFrame>> {
+    pub async fn frame_at_latest(&self, position: Duration) -> MediaResult<Arc<VideoFrame>> {
         self.frame_at_latest_with_mode(position, self.inner.default_seek_mode)
             .await
     }
@@ -215,7 +234,7 @@ impl VideoFrameExtractor {
         &self,
         position: Duration,
         seek_mode: SeekMode,
-    ) -> Result<Arc<VideoFrame>> {
+    ) -> MediaResult<Arc<VideoFrame>> {
         let (response_tx, response_rx) = async_channel::bounded(1);
         self.submit_latest(FrameRequest {
             position,
@@ -225,16 +244,16 @@ impl VideoFrameExtractor {
         response_rx
             .recv()
             .await
-            .map_err(|_| anyhow!("frame extraction worker stopped before returning a frame"))?
+            .map_err(|_| frame_extraction_worker_stopped())?
     }
 
     /// Blocking counterpart to [`Self::frame_at`].
-    pub fn frame_at_blocking(&self, position: Duration) -> Result<Arc<VideoFrame>> {
+    pub fn frame_at_blocking(&self, position: Duration) -> MediaResult<Arc<VideoFrame>> {
         self.frame_at_blocking_with_mode(position, self.inner.default_seek_mode)
     }
 
     /// Blocking counterpart to [`Self::initial_frame`].
-    pub fn initial_frame_blocking(&self) -> Result<Arc<VideoFrame>> {
+    pub fn initial_frame_blocking(&self) -> MediaResult<Arc<VideoFrame>> {
         self.frame_at_blocking(Duration::ZERO)
     }
 
@@ -243,7 +262,7 @@ impl VideoFrameExtractor {
         &self,
         position: Duration,
         seek_mode: SeekMode,
-    ) -> Result<Arc<VideoFrame>> {
+    ) -> MediaResult<Arc<VideoFrame>> {
         let (response_tx, response_rx) = async_channel::bounded(1);
         self.inner
             .requests
@@ -252,13 +271,13 @@ impl VideoFrameExtractor {
                 seek_mode,
                 response: response_tx,
             }))
-            .map_err(|_| anyhow!("frame extraction worker has stopped"))?;
+            .map_err(|_| frame_extraction_worker_stopped())?;
         response_rx
             .recv_blocking()
-            .map_err(|_| anyhow!("frame extraction worker stopped before returning a frame"))?
+            .map_err(|_| frame_extraction_worker_stopped())?
     }
 
-    fn submit_latest(&self, request: FrameRequest) -> Result<()> {
+    fn submit_latest(&self, request: FrameRequest) -> MediaResult<()> {
         let should_notify = replace_latest_request(&self.inner.latest_request, request);
         if !should_notify {
             return Ok(());
@@ -268,7 +287,7 @@ impl VideoFrameExtractor {
             Ok(()) | Err(async_channel::TrySendError::Full(_)) => Ok(()),
             Err(async_channel::TrySendError::Closed(_)) => {
                 let _ = take_latest_request(&self.inner.latest_request);
-                Err(anyhow!("frame extraction worker has stopped"))
+                Err(frame_extraction_worker_stopped())
             }
         }
     }
@@ -302,9 +321,13 @@ fn replace_latest_request(
     if let Some(previous) = previous {
         let _ = previous
             .response
-            .try_send(Err(anyhow!(FrameExtractionSuperseded)));
+            .try_send(Err(FrameExtractionSuperseded.into()));
     }
     should_notify
+}
+
+fn frame_extraction_worker_stopped() -> MediaError {
+    MediaError::backend_retryable("frame extraction worker has stopped")
 }
 
 impl Drop for ExtractorInner {
@@ -325,10 +348,8 @@ impl Drop for ExtractorInner {
 mod tests {
     use std::time::Duration;
 
-    use super::{
-        FrameExtractionSuperseded, FrameRequest, VideoFrameExtractorOptions, replace_latest_request,
-    };
-    use crate::SeekMode;
+    use super::{FrameRequest, VideoFrameExtractorOptions, replace_latest_request};
+    use crate::{MediaErrorKind, SeekMode};
 
     #[test]
     fn extraction_requests_are_bounded_by_default() {
@@ -362,6 +383,6 @@ mod tests {
         ));
 
         let error = first_result.try_recv().unwrap().unwrap_err();
-        assert!(error.is::<FrameExtractionSuperseded>());
+        assert_eq!(error.kind, MediaErrorKind::Superseded);
     }
 }

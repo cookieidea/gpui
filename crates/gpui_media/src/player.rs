@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
 use gpui::{
     Context, EventEmitter, GpuSpecs, IntoElement, Render, SharedString, Window, div, prelude::*,
     surface,
@@ -409,7 +408,7 @@ impl VideoPlayer {
 
     /// Creates an independent extractor for thumbnails, previews and scrubbing.
     /// Reuse the returned extractor for multiple frame requests.
-    pub fn frame_extractor(&self) -> Result<VideoFrameExtractor> {
+    pub fn frame_extractor(&self) -> MediaResult<VideoFrameExtractor> {
         VideoFrameExtractor::new_with_backend(self.source.clone(), self.backend.clone())
     }
 

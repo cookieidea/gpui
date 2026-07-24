@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
 use gpui::{DevicePixels, SurfaceFrame, SurfaceHandle, size};
 use gpui_media::{
     FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaCapabilities,
@@ -28,7 +27,7 @@ impl MediaBackend for CustomBackend {
     fn open_frame_extractor(
         &self,
         _request: FrameExtractorBackendRequest,
-    ) -> Result<Box<dyn FrameExtractionSession>> {
+    ) -> MediaResult<Box<dyn FrameExtractionSession>> {
         Ok(Box::new(CustomExtractor))
     }
 }
@@ -79,11 +78,15 @@ impl MediaPlaybackSession for CustomPlayback {
 struct CustomExtractor;
 
 impl FrameExtractionSession for CustomExtractor {
-    fn initial_frame(&mut self) -> Result<Arc<VideoFrame>> {
+    fn initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>> {
         Ok(test_frame(1, Duration::ZERO))
     }
 
-    fn frame_at(&mut self, position: Duration, _seek_mode: SeekMode) -> Result<Arc<VideoFrame>> {
+    fn frame_at(
+        &mut self,
+        position: Duration,
+        _seek_mode: SeekMode,
+    ) -> MediaResult<Arc<VideoFrame>> {
         Ok(test_frame(2, position))
     }
 }

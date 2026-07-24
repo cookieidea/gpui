@@ -1,13 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context as _, Result, anyhow};
 use gpui::SurfaceHandle;
 use gst::prelude::*;
 
-use crate::{FrameExtractionSession, MediaSource, SeekMode, VideoFrame};
+use crate::{
+    FrameExtractionSession, MediaError, MediaErrorKind, MediaRecovery, MediaResult, MediaSource,
+    SeekMode, VideoFrame,
+};
 
 use super::{
-    add_required_allocation_metas, appsink_caps, clock_time, sample_to_video_frame, seek_flags,
+    add_required_allocation_metas, appsink_caps, clock_time, gst_backend_error, gst_decode_error,
+    sample_to_video_frame, seek_flags,
 };
 use crate::network::configure_playbin_network;
 
@@ -22,7 +25,7 @@ pub(super) struct GstreamerFrameExtractionSession {
 }
 
 impl GstreamerFrameExtractionSession {
-    pub(super) fn new(source: &MediaSource, timeout: Duration) -> Result<Self> {
+    pub(super) fn new(source: &MediaSource, timeout: Duration) -> MediaResult<Self> {
         super::initialize()?;
         let caps = appsink_caps(None)?;
         let appsink = gst_app::AppSink::builder()
@@ -44,10 +47,14 @@ impl GstreamerFrameExtractionSession {
         let audio_sink = gst::ElementFactory::make("fakesink")
             .property("sync", false)
             .build()
-            .context("GStreamer element 'fakesink' is not installed")?;
+            .map_err(|error| {
+                gst_backend_error("GStreamer element 'fakesink' is not installed", error)
+            })?;
         let playbin = gst::ElementFactory::make("playbin3")
             .build()
-            .context("GStreamer element 'playbin3' is not installed")?;
+            .map_err(|error| {
+                gst_backend_error("GStreamer element 'playbin3' is not installed", error)
+            })?;
         configure_playbin_network(&playbin, source.network_options());
         playbin.set_property("uri", source.uri());
         playbin.set_property("video-sink", &appsink);
@@ -68,7 +75,7 @@ impl GstreamerFrameExtractionSession {
         &mut self,
         requested: Duration,
         seek_mode: SeekMode,
-    ) -> Result<Arc<VideoFrame>> {
+    ) -> MediaResult<Arc<VideoFrame>> {
         let initial_frame = self.preroll_initial_frame()?;
         if requested.is_zero() {
             return Ok(initial_frame);
@@ -82,7 +89,12 @@ impl GstreamerFrameExtractionSession {
         for candidate in extraction_candidates(position) {
             self.playbin
                 .seek_simple(seek_flags(seek_mode), clock_time(candidate)?)
-                .with_context(|| format!("failed to seek frame extractor to {candidate:?}"))?;
+                .map_err(|error| {
+                    gst_decode_error(
+                        format!("failed to seek frame extractor to {candidate:?}"),
+                        error,
+                    )
+                })?;
 
             if let Some(sample) = self.appsink.try_pull_preroll(clock_time(self.timeout)?) {
                 let frame = sample_to_video_frame(
@@ -97,28 +109,30 @@ impl GstreamerFrameExtractionSession {
             }
         }
 
-        Err(anyhow!(
-            "failed to extract a video frame at or before {position:?}"
+        Err(MediaError::new(
+            MediaErrorKind::Decode,
+            format!("failed to extract a video frame at or before {position:?}"),
+            MediaRecovery::None,
         ))
     }
 
-    fn preroll_initial_frame(&mut self) -> Result<Arc<VideoFrame>> {
+    fn preroll_initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>> {
         if let Some(frame) = &self.initial_frame {
             return Ok(frame.clone());
         }
 
         self.playbin
             .set_state(gst::State::Paused)
-            .map_err(|error| anyhow!("failed to prepare frame extraction: {error:?}"))?;
+            .map_err(|error| gst_backend_error("failed to prepare frame extraction", error))?;
         let timeout = clock_time(self.timeout)?;
         self.playbin
             .state(timeout)
             .0
-            .map_err(|error| anyhow!("frame extraction preroll failed: {error:?}"))?;
+            .map_err(|error| gst_decode_error("frame extraction preroll failed", error))?;
         let sample = self
             .appsink
             .try_pull_preroll(timeout)
-            .context("timed out waiting for the initial video frame")?;
+            .ok_or_else(|| MediaError::timeout("timed out waiting for the initial video frame"))?;
         self.end_guard = estimated_frame_duration(&sample)
             .unwrap_or(self.end_guard)
             .max(Duration::from_millis(1));
@@ -136,11 +150,15 @@ impl GstreamerFrameExtractionSession {
 }
 
 impl FrameExtractionSession for GstreamerFrameExtractionSession {
-    fn initial_frame(&mut self) -> Result<Arc<VideoFrame>> {
+    fn initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>> {
         self.preroll_initial_frame()
     }
 
-    fn frame_at(&mut self, position: Duration, seek_mode: SeekMode) -> Result<Arc<VideoFrame>> {
+    fn frame_at(
+        &mut self,
+        position: Duration,
+        seek_mode: SeekMode,
+    ) -> MediaResult<Arc<VideoFrame>> {
         self.extract_frame(position, seek_mode)
     }
 }

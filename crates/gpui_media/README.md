@@ -319,7 +319,7 @@ player.update(cx, |player, cx| {
     player.set_playback_rate(1.5, cx)?;
     player.set_volume(0.8, cx);
     player.set_muted(false, cx);
-    anyhow::Ok(())
+    Ok::<_, gpui_media::MediaError>(())
 })?;
 ```
 

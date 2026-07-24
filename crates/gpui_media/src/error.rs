@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io};
 
 use gpui::SharedString;
 
@@ -6,9 +6,13 @@ use gpui::SharedString;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaErrorKind {
+    InvalidInput,
     Authentication,
     Network { status: Option<u16> },
+    Io { kind: io::ErrorKind },
     SourceNotFound,
+    Timeout,
+    Superseded,
     UnsupportedContainer,
     UnsupportedCodec,
     UnsupportedOperation,
@@ -55,6 +59,51 @@ impl MediaError {
 
     pub fn backend(message: impl Into<SharedString>) -> Self {
         Self::new(MediaErrorKind::Backend, message, MediaRecovery::None)
+    }
+
+    pub fn backend_retryable(message: impl Into<SharedString>) -> Self {
+        Self::new(MediaErrorKind::Backend, message, MediaRecovery::Retry)
+    }
+
+    pub fn invalid_input(message: impl Into<SharedString>) -> Self {
+        Self::new(MediaErrorKind::InvalidInput, message, MediaRecovery::None)
+    }
+
+    pub fn timeout(message: impl Into<SharedString>) -> Self {
+        Self::new(MediaErrorKind::Timeout, message, MediaRecovery::Retry)
+    }
+
+    pub fn io(context: impl fmt::Display, error: io::Error) -> Self {
+        let kind = error.kind();
+        Self::new(
+            if kind == io::ErrorKind::NotFound {
+                MediaErrorKind::SourceNotFound
+            } else {
+                MediaErrorKind::Io { kind }
+            },
+            format!("{context}: {error}"),
+            if matches!(
+                kind,
+                io::ErrorKind::Interrupted
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+            ) {
+                MediaRecovery::Retry
+            } else {
+                MediaRecovery::None
+            },
+        )
+    }
+
+    pub fn from_error(
+        kind: MediaErrorKind,
+        recovery: MediaRecovery,
+        context: impl fmt::Display,
+        error: impl fmt::Display,
+    ) -> Self {
+        Self::new(kind, format!("{context}: {error}"), recovery)
     }
 
     pub fn unsupported(message: impl Into<SharedString>) -> Self {

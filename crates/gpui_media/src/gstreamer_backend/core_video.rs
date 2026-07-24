@@ -1,11 +1,15 @@
 use std::ffi::{c_char, c_void};
 
-use anyhow::{Context as _, Result, bail};
 use core_foundation::base::TCFType as _;
 use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferRef};
 use gpui::{CoreVideoHandle, SurfaceFormat, SurfaceFrame, SurfaceHandle};
 
-use super::{surface_color_info, video_frame_geometry};
+use crate::MediaResult;
+
+use super::{
+    gst_decode_error, gst_decode_message, gst_video_output_error, surface_color_info,
+    video_frame_geometry,
+};
 
 #[repr(C)]
 struct GstCoreVideoMeta {
@@ -51,11 +55,14 @@ pub(super) fn sample_to_surface_frame(
     sample: &gst::Sample,
     handle: SurfaceHandle,
     sequence: u64,
-) -> Result<Option<SurfaceFrame>> {
-    let caps = sample.caps().context("decoded sample has no caps")?;
-    let info = gst_video::VideoInfo::from_caps(caps).context("invalid decoded video caps")?;
+) -> MediaResult<Option<SurfaceFrame>> {
+    let caps = sample
+        .caps()
+        .ok_or_else(|| gst_decode_message("decoded sample has no caps"))?;
+    let info = gst_video::VideoInfo::from_caps(caps)
+        .map_err(|error| gst_decode_error("invalid decoded video caps", error))?;
     let Some(buffer) = sample.buffer() else {
-        bail!("decoded sample has no buffer");
+        return Err(gst_decode_message("decoded sample has no buffer"));
     };
     let Some(pixel_buffer) = core_video_pixel_buffer(buffer) else {
         return Ok(None);
@@ -94,6 +101,6 @@ pub(super) fn sample_to_surface_frame(
         unsafe { CoreVideoHandle::new(pixel_buffer) },
         color,
     )
-    .context("GPUI rejected CoreVideo frame")?;
+    .map_err(|error| gst_video_output_error("GPUI rejected CoreVideo frame", error))?;
     Ok(Some(frame))
 }

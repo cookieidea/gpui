@@ -51,7 +51,7 @@ pub use window_sizing::{fit_video_window_bounds, fit_video_window_size};
 /// default GStreamer backend during startup. Custom backends initialize
 /// themselves when opening a session, and this function is a no-op when no
 /// built-in backend feature is enabled.
-pub fn init() -> anyhow::Result<()> {
+pub fn init() -> MediaResult<()> {
     #[cfg(feature = "backend-gstreamer")]
     {
         return gstreamer_backend::initialize();

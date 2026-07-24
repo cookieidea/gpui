@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{
     Bounds, ColorRange, DevicePixels, GpuSpecs, SurfaceColorInfo, SurfaceFormat, SurfaceFrame,
     SurfaceHandle, SurfacePlane, YuvMatrix, point, size,
@@ -31,12 +30,19 @@ mod frame_extractor;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GstreamerBackend;
 
-pub(crate) fn initialize() -> Result<()> {
-    gst::init().map_err(|error| anyhow!("failed to initialize GStreamer: {error}"))
+pub(crate) fn initialize() -> MediaResult<()> {
+    gst::init().map_err(|error| {
+        MediaError::from_error(
+            MediaErrorKind::Backend,
+            MediaRecovery::None,
+            "failed to initialize GStreamer",
+            error,
+        )
+    })
 }
 
 impl GstreamerBackend {
-    pub fn initialize() -> Result<()> {
+    pub fn initialize() -> MediaResult<()> {
         initialize()
     }
 }
@@ -57,7 +63,7 @@ impl GstreamerPlayback {
         source: &MediaSource,
         gpu_specs: Option<&GpuSpecs>,
         output: MediaOutputSink,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         initialize()?;
 
         let caps = appsink_caps(gpu_specs)?;
@@ -121,14 +127,16 @@ impl GstreamerPlayback {
 
         let playbin = gst::ElementFactory::make("playbin3")
             .build()
-            .context("GStreamer element 'playbin3' is not installed")?;
+            .map_err(|error| {
+                gst_backend_error("GStreamer element 'playbin3' is not installed", error)
+            })?;
         configure_playbin_network(&playbin, source.network_options());
         playbin.set_property("uri", source.uri());
         playbin.set_property("video-sink", &appsink);
 
         let bus = playbin
             .bus()
-            .context("playbin3 did not provide a message bus")?;
+            .ok_or_else(|| MediaError::backend("playbin3 did not provide a message bus"))?;
         let bus_for_thread = bus.clone();
         let playbin_for_bus = playbin.clone();
         let bus_shutdown = Arc::new(AtomicBool::new(false));
@@ -182,7 +190,7 @@ impl GstreamerPlayback {
                     }
                 }
             })
-            .context("failed to start GStreamer bus thread")?;
+            .map_err(|error| MediaError::io("failed to start GStreamer bus thread", error))?;
 
         Ok(Self {
             playbin,
@@ -196,24 +204,24 @@ impl GstreamerPlayback {
         })
     }
 
-    pub fn play(&self) -> Result<()> {
+    pub fn play(&self) -> MediaResult<()> {
         self.playbin
             .set_state(gst::State::Playing)
             .map(|_| ())
-            .map_err(|error| anyhow!("failed to start playback: {error:?}"))
+            .map_err(|error| gst_backend_error("failed to start playback", error))
     }
 
-    pub fn pause(&self) -> Result<()> {
+    pub fn pause(&self) -> MediaResult<()> {
         self.playbin
             .set_state(gst::State::Paused)
             .map(|_| ())
-            .map_err(|error| anyhow!("failed to pause playback: {error:?}"))
+            .map_err(|error| gst_backend_error("failed to pause playback", error))
     }
 
-    pub fn reload(&self, autoplay: bool) -> Result<()> {
+    pub fn reload(&self, autoplay: bool) -> MediaResult<()> {
         self.playbin
             .set_state(gst::State::Null)
-            .map_err(|error| anyhow!("failed to reset playback pipeline: {error:?}"))?;
+            .map_err(|error| gst_backend_error("failed to reset playback pipeline", error))?;
         let target = if autoplay {
             gst::State::Playing
         } else {
@@ -222,7 +230,7 @@ impl GstreamerPlayback {
         self.playbin
             .set_state(target)
             .map(|_| ())
-            .map_err(|error| anyhow!("failed to reload playback pipeline: {error:?}"))
+            .map_err(|error| gst_backend_error("failed to reload playback pipeline", error))
     }
 
     pub fn timeline(&self) -> PlaybackTimeline {
@@ -241,28 +249,34 @@ impl GstreamerPlayback {
         PlaybackTimeline::new(position, duration, seekable)
     }
 
-    pub fn seek_to(&self, position: Duration, mode: SeekMode) -> Result<()> {
+    pub fn seek_to(&self, position: Duration, mode: SeekMode) -> MediaResult<()> {
         let position = clock_time(position)?;
         self.playbin
             .seek_simple(seek_flags(mode), position)
-            .with_context(|| format!("failed to seek to {position}"))
+            .map_err(|error| gst_backend_error(format!("failed to seek to {position}"), error))
     }
 
-    pub fn step_forward(&self, frames: u64) -> Result<()> {
+    pub fn step_forward(&self, frames: u64) -> MediaResult<()> {
         if frames == 0 {
-            bail!("frame step amount must be greater than zero");
+            return Err(MediaError::invalid_input(
+                "frame step amount must be greater than zero",
+            ));
         }
         let event = gst::event::Step::new(gst::format::Buffers::from_u64(frames), 1.0, true, false);
         if self.playbin.send_event(event) {
             Ok(())
         } else {
-            bail!("the playback pipeline rejected frame stepping")
+            Err(MediaError::unsupported(
+                "the playback pipeline rejected frame stepping",
+            ))
         }
     }
 
-    pub fn set_playback_rate(&self, rate: f64) -> Result<()> {
+    pub fn set_playback_rate(&self, rate: f64) -> MediaResult<()> {
         if !rate.is_finite() || rate <= 0.0 {
-            bail!("playback rate must be finite and greater than zero");
+            return Err(MediaError::invalid_input(
+                "playback rate must be finite and greater than zero",
+            ));
         }
         let position = self
             .playbin
@@ -277,7 +291,9 @@ impl GstreamerPlayback {
                 gst::SeekType::None,
                 gst::ClockTime::NONE,
             )
-            .with_context(|| format!("failed to change playback rate to {rate}"))
+            .map_err(|error| {
+                gst_backend_error(format!("failed to change playback rate to {rate}"), error)
+            })
     }
 
     pub fn set_volume(&self, volume: f64) {
@@ -294,7 +310,7 @@ impl GstreamerPlayback {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn switch_to_cpu_fallback(&self) -> Result<bool> {
+    pub fn switch_to_cpu_fallback(&self) -> MediaResult<bool> {
         if self
             .using_cpu_fallback
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -314,8 +330,11 @@ impl GstreamerPlayback {
             if let Some(position) = self.playbin.query_position::<gst::ClockTime>() {
                 self.playbin
                     .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, position)
-                    .with_context(|| {
-                        format!("failed to renegotiate CPU video output at {position}")
+                    .map_err(|error| {
+                        gst_video_output_error(
+                            format!("failed to renegotiate CPU video output at {position}"),
+                            error,
+                        )
                     })?;
             }
             Ok(true)
@@ -334,7 +353,7 @@ fn publish_appsink_sample(
     surface_handle: &SurfaceHandle,
     sequence: &AtomicU64,
     #[cfg(target_os = "linux")] producer_drm_device: Option<gpui::DrmDevice>,
-) -> Result<gst::FlowSuccess, gst::FlowError> {
+) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
     let next_sequence = sequence.fetch_add(1, Ordering::Relaxed);
     let frame = sample_to_video_frame(
         sample,
@@ -364,25 +383,22 @@ impl MediaBackend for GstreamerBackend {
     ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
         GstreamerPlayback::new(&request.source, request.gpu_specs.as_ref(), output)
             .map(|playback| Box::new(playback) as Box<dyn MediaPlaybackSession>)
-            .map_err(|error| {
-                MediaError::new(
-                    MediaErrorKind::Backend,
-                    request.source.redact_error_message(&error.to_string()),
-                    MediaRecovery::Retry,
-                )
+            .map_err(|mut error| {
+                error.message = request.source.redact_error_message(&error.message).into();
+                error
             })
     }
 
     fn open_frame_extractor(
         &self,
         request: FrameExtractorBackendRequest,
-    ) -> Result<Box<dyn FrameExtractionSession>> {
-        Ok(Box::new(
-            frame_extractor::GstreamerFrameExtractionSession::new(
-                &request.source,
-                request.timeout,
-            )?,
-        ))
+    ) -> MediaResult<Box<dyn FrameExtractionSession>> {
+        frame_extractor::GstreamerFrameExtractionSession::new(&request.source, request.timeout)
+            .map(|session| Box::new(session) as Box<dyn FrameExtractionSession>)
+            .map_err(|mut error| {
+                error.message = request.source.redact_error_message(&error.message).into();
+                error
+            })
     }
 }
 
@@ -402,15 +418,15 @@ impl MediaPlaybackSession for GstreamerPlayback {
     }
 
     fn play(&mut self) -> MediaResult<()> {
-        GstreamerPlayback::play(self).map_err(media_backend_error)
+        GstreamerPlayback::play(self)
     }
 
     fn pause(&mut self) -> MediaResult<()> {
-        GstreamerPlayback::pause(self).map_err(media_backend_error)
+        GstreamerPlayback::pause(self)
     }
 
     fn reload(&mut self, autoplay: bool) -> MediaResult<()> {
-        GstreamerPlayback::reload(self, autoplay).map_err(media_backend_error)
+        GstreamerPlayback::reload(self, autoplay)
     }
 
     fn timeline(&self) -> PlaybackTimeline {
@@ -418,15 +434,15 @@ impl MediaPlaybackSession for GstreamerPlayback {
     }
 
     fn seek_to(&mut self, position: Duration, mode: SeekMode) -> MediaResult<()> {
-        GstreamerPlayback::seek_to(self, position, mode).map_err(media_backend_error)
+        GstreamerPlayback::seek_to(self, position, mode)
     }
 
     fn step_forward(&mut self, frames: u64) -> MediaResult<()> {
-        GstreamerPlayback::step_forward(self, frames).map_err(media_backend_error)
+        GstreamerPlayback::step_forward(self, frames)
     }
 
     fn set_playback_rate(&mut self, rate: f64) -> MediaResult<()> {
-        GstreamerPlayback::set_playback_rate(self, rate).map_err(media_backend_error)
+        GstreamerPlayback::set_playback_rate(self, rate)
     }
 
     fn set_volume(&mut self, volume: f64) {
@@ -448,15 +464,13 @@ impl MediaPlaybackSession for GstreamerPlayback {
             FrameTransportPreference::CpuOnly => {
                 #[cfg(target_os = "linux")]
                 {
-                    self.switch_to_cpu_fallback()
-                        .map(|changed| {
-                            if changed {
-                                TransportChange::Reconfigured
-                            } else {
-                                TransportChange::Unchanged
-                            }
-                        })
-                        .map_err(media_backend_error)
+                    self.switch_to_cpu_fallback().map(|changed| {
+                        if changed {
+                            TransportChange::Reconfigured
+                        } else {
+                            TransportChange::Unchanged
+                        }
+                    })
                 }
 
                 #[cfg(not(target_os = "linux"))]
@@ -468,8 +482,39 @@ impl MediaPlaybackSession for GstreamerPlayback {
     }
 }
 
-fn media_backend_error(error: anyhow::Error) -> MediaError {
-    MediaError::backend(error.to_string())
+fn gst_backend_error(context: impl std::fmt::Display, error: impl std::fmt::Debug) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::Backend,
+        format!("{context}: {error:?}"),
+        MediaRecovery::None,
+    )
+}
+
+fn gst_video_output_error(
+    context: impl std::fmt::Display,
+    error: impl std::fmt::Debug,
+) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::VideoOutput,
+        format!("{context}: {error:?}"),
+        MediaRecovery::Retry,
+    )
+}
+
+fn gst_video_output_message(message: impl Into<gpui::SharedString>) -> MediaError {
+    MediaError::new(MediaErrorKind::VideoOutput, message, MediaRecovery::Retry)
+}
+
+fn gst_decode_error(context: impl std::fmt::Display, error: impl std::fmt::Debug) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::Decode,
+        format!("{context}: {error:?}"),
+        MediaRecovery::None,
+    )
+}
+
+fn gst_decode_message(message: impl Into<gpui::SharedString>) -> MediaError {
+    MediaError::new(MediaErrorKind::Decode, message, MediaRecovery::None)
 }
 
 fn media_error_from_gstreamer_message(
@@ -587,11 +632,18 @@ pub(crate) fn seek_flags(mode: SeekMode) -> gst::SeekFlags {
     }
 }
 
-pub(crate) fn clock_time(duration: Duration) -> Result<gst::ClockTime> {
-    gst::ClockTime::try_from(duration).context("media timestamp exceeds the GStreamer time range")
+pub(crate) fn clock_time(duration: Duration) -> MediaResult<gst::ClockTime> {
+    gst::ClockTime::try_from(duration).map_err(|error| {
+        MediaError::from_error(
+            MediaErrorKind::InvalidInput,
+            MediaRecovery::None,
+            "media timestamp exceeds the GStreamer time range",
+            error,
+        )
+    })
 }
 
-pub(crate) fn appsink_caps(_gpu_specs: Option<&GpuSpecs>) -> Result<gst::Caps> {
+pub(crate) fn appsink_caps(_gpu_specs: Option<&GpuSpecs>) -> MediaResult<gst::Caps> {
     #[cfg(target_os = "linux")]
     {
         dma_buf::appsink_caps(_gpu_specs)
@@ -601,15 +653,15 @@ pub(crate) fn appsink_caps(_gpu_specs: Option<&GpuSpecs>) -> Result<gst::Caps> {
     {
         "video/x-raw,format=(string){NV12,BGRA,RGBA}"
             .parse::<gst::Caps>()
-            .context("failed to construct appsink caps")
+            .map_err(|error| gst_video_output_error("failed to construct appsink caps", error))
     }
 }
 
 #[cfg(target_os = "linux")]
-fn cpu_appsink_caps() -> Result<gst::Caps> {
+fn cpu_appsink_caps() -> MediaResult<gst::Caps> {
     "video/x-raw,format=(string){NV12,BGRA,RGBA}"
         .parse::<gst::Caps>()
-        .context("failed to construct CPU appsink caps")
+        .map_err(|error| gst_video_output_error("failed to construct CPU appsink caps", error))
 }
 
 fn sample_to_surface_frame(
@@ -617,7 +669,7 @@ fn sample_to_surface_frame(
     handle: SurfaceHandle,
     sequence: u64,
     #[cfg(target_os = "linux")] producer_drm_device: Option<gpui::DrmDevice>,
-) -> Result<SurfaceFrame> {
+) -> MediaResult<SurfaceFrame> {
     #[cfg(target_os = "macos")]
     if let Some(frame) = core_video::sample_to_surface_frame(sample, handle.clone(), sequence)? {
         return Ok(frame);
@@ -636,8 +688,10 @@ pub(crate) fn sample_to_video_frame(
     handle: SurfaceHandle,
     sequence: u64,
     #[cfg(target_os = "linux")] producer_drm_device: Option<gpui::DrmDevice>,
-) -> Result<Arc<VideoFrame>> {
-    let buffer = sample.buffer().context("decoded sample has no buffer")?;
+) -> MediaResult<Arc<VideoFrame>> {
+    let buffer = sample
+        .buffer()
+        .ok_or_else(|| gst_decode_message("decoded sample has no buffer"))?;
     let timestamp = buffer.pts().map(Duration::from);
     let duration = buffer.duration().map(Duration::from);
     let surface = Arc::new(sample_to_surface_frame(
@@ -678,23 +732,28 @@ fn sample_to_cpu_surface_frame(
     sample: &gst::Sample,
     handle: SurfaceHandle,
     sequence: u64,
-) -> Result<SurfaceFrame> {
-    let caps = sample.caps().context("decoded sample has no caps")?;
-    let info = gst_video::VideoInfo::from_caps(caps).context("invalid decoded video caps")?;
+) -> MediaResult<SurfaceFrame> {
+    let caps = sample
+        .caps()
+        .ok_or_else(|| gst_decode_message("decoded sample has no caps"))?;
+    let info = gst_video::VideoInfo::from_caps(caps)
+        .map_err(|error| gst_decode_error("invalid decoded video caps", error))?;
     let buffer = sample
         .buffer_owned()
-        .context("decoded sample has no buffer")?;
+        .ok_or_else(|| gst_decode_message("decoded sample has no buffer"))?;
     let (coded_size, visible_rect, display_size) = video_frame_geometry(buffer.as_ref(), &info)?;
     let frame = gst_video::VideoFrame::from_buffer_readable(buffer, &info)
-        .map_err(|_| anyhow!("failed to map decoded video buffer"))?;
+        .map_err(|_| gst_decode_message("failed to map decoded video buffer"))?;
 
-    let stride = |plane: usize| -> Result<u32> {
+    let stride = |plane: usize| -> MediaResult<u32> {
         let stride = *info
             .stride()
             .get(plane)
-            .context("decoded video plane has no stride")?;
+            .ok_or_else(|| gst_decode_message("decoded video plane has no stride"))?;
         if stride <= 0 {
-            bail!("negative decoded video stride is not supported: {stride}");
+            return Err(gst_decode_message(format!(
+                "negative decoded video stride is not supported: {stride}"
+            )));
         }
         Ok(stride as u32)
     };
@@ -710,13 +769,13 @@ fn sample_to_cpu_surface_frame(
             [SurfacePlane::new(
                 frame
                     .plane_data(0)
-                    .context("failed to read BGRA plane")?
+                    .map_err(|error| gst_decode_error("failed to read BGRA plane", error))?
                     .to_vec(),
                 stride(0)?,
             )],
             SurfaceColorInfo::default(),
         )
-        .context("GPUI rejected BGRA frame"),
+        .map_err(|error| gst_video_output_error("GPUI rejected BGRA frame", error)),
         gst_video::VideoFormat::Rgba => SurfaceFrame::new(
             handle,
             sequence,
@@ -727,13 +786,13 @@ fn sample_to_cpu_surface_frame(
             [SurfacePlane::new(
                 frame
                     .plane_data(0)
-                    .context("failed to read RGBA plane")?
+                    .map_err(|error| gst_decode_error("failed to read RGBA plane", error))?
                     .to_vec(),
                 stride(0)?,
             )],
             SurfaceColorInfo::default(),
         )
-        .context("GPUI rejected RGBA frame"),
+        .map_err(|error| gst_video_output_error("GPUI rejected RGBA frame", error)),
         gst_video::VideoFormat::Nv12 => SurfaceFrame::new(
             handle,
             sequence,
@@ -745,36 +804,46 @@ fn sample_to_cpu_surface_frame(
                 SurfacePlane::new(
                     frame
                         .plane_data(0)
-                        .context("failed to read NV12 Y plane")?
+                        .map_err(|error| gst_decode_error("failed to read NV12 Y plane", error))?
                         .to_vec(),
                     stride(0)?,
                 ),
                 SurfacePlane::new(
                     frame
                         .plane_data(1)
-                        .context("failed to read NV12 UV plane")?
+                        .map_err(|error| gst_decode_error("failed to read NV12 UV plane", error))?
                         .to_vec(),
                     stride(1)?,
                 ),
             ],
             surface_color_info(&info),
         )
-        .context("GPUI rejected NV12 frame"),
-        format => bail!("unsupported decoded video format: {format:?}"),
+        .map_err(|error| gst_video_output_error("GPUI rejected NV12 frame", error)),
+        format => Err(MediaError::new(
+            MediaErrorKind::UnsupportedCodec,
+            format!("unsupported decoded video format: {format:?}"),
+            MediaRecovery::None,
+        )),
     }
 }
 
 pub(super) fn video_frame_geometry(
     buffer: &gst::BufferRef,
     info: &gst_video::VideoInfo,
-) -> Result<(
+) -> MediaResult<(
     gpui::Size<DevicePixels>,
     Bounds<DevicePixels>,
     gpui::Size<DevicePixels>,
 )> {
     let coded_size = size(
-        DevicePixels(i32::try_from(info.width()).context("video width is too large")?),
-        DevicePixels(i32::try_from(info.height()).context("video height is too large")?),
+        DevicePixels(
+            i32::try_from(info.width())
+                .map_err(|error| gst_decode_error("video width is too large", error))?,
+        ),
+        DevicePixels(
+            i32::try_from(info.height())
+                .map_err(|error| gst_decode_error("video height is too large", error))?,
+        ),
     );
     let (x, y, width, height) = buffer
         .meta::<gst_video::VideoCropMeta>()
@@ -782,12 +851,24 @@ pub(super) fn video_frame_geometry(
         .unwrap_or((0, 0, info.width(), info.height()));
     let visible_rect = Bounds {
         origin: point(
-            DevicePixels(i32::try_from(x).context("video crop x is too large")?),
-            DevicePixels(i32::try_from(y).context("video crop y is too large")?),
+            DevicePixels(
+                i32::try_from(x)
+                    .map_err(|error| gst_decode_error("video crop x is too large", error))?,
+            ),
+            DevicePixels(
+                i32::try_from(y)
+                    .map_err(|error| gst_decode_error("video crop y is too large", error))?,
+            ),
         ),
         size: size(
-            DevicePixels(i32::try_from(width).context("video crop width is too large")?),
-            DevicePixels(i32::try_from(height).context("video crop height is too large")?),
+            DevicePixels(
+                i32::try_from(width)
+                    .map_err(|error| gst_decode_error("video crop width is too large", error))?,
+            ),
+            DevicePixels(
+                i32::try_from(height)
+                    .map_err(|error| gst_decode_error("video crop height is too large", error))?,
+            ),
         ),
     };
 
@@ -802,10 +883,16 @@ pub(super) fn video_frame_geometry(
         .checked_mul(numerator)
         .and_then(|scaled| scaled.checked_add(denominator / 2))
         .map(|scaled| scaled / denominator)
-        .context("video display width overflow")?;
+        .ok_or_else(|| gst_decode_message("video display width overflow"))?;
     let display_size = size(
-        DevicePixels(i32::try_from(display_width).context("video display width is too large")?),
-        DevicePixels(i32::try_from(height).context("video display height is too large")?),
+        DevicePixels(
+            i32::try_from(display_width)
+                .map_err(|error| gst_decode_error("video display width is too large", error))?,
+        ),
+        DevicePixels(
+            i32::try_from(height)
+                .map_err(|error| gst_decode_error("video display height is too large", error))?,
+        ),
     );
 
     Ok((coded_size, visible_rect, display_size))

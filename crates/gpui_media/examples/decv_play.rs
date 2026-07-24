@@ -1,13 +1,12 @@
 use std::{num::NonZeroUsize, time::Instant};
 
-use anyhow::{Result, anyhow, bail};
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_media::{
     DecvBackend, DecvParallelism, MediaSource, PlaybackState, VideoPlayer, VideoPlayerEvent,
     VideoPlayerOptions,
 };
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (input, parallelism) = parse_arguments()?;
     let source = MediaSource::from_path(input)?;
     let title = format!("gpui_media · decv · {}", source.display_name());
@@ -72,7 +71,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_arguments() -> Result<(String, DecvParallelism)> {
+fn parse_arguments() -> Result<(String, DecvParallelism), std::io::Error> {
     let mut arguments = std::env::args().skip(1);
     let mut input = None;
     let mut parallelism = DecvParallelism::Auto;
@@ -80,7 +79,7 @@ fn parse_arguments() -> Result<(String, DecvParallelism)> {
         match argument.as_str() {
             "--parallelism" => {
                 let value = arguments.next().ok_or_else(|| {
-                    anyhow!("--parallelism requires auto, serial, or a thread count")
+                    invalid_argument("--parallelism requires auto, serial, or a thread count")
                 })?;
                 parallelism = match value.as_str() {
                     "auto" => DecvParallelism::Auto,
@@ -91,25 +90,31 @@ fn parse_arguments() -> Result<(String, DecvParallelism)> {
                             .ok()
                             .and_then(NonZeroUsize::new)
                             .ok_or_else(|| {
-                                anyhow!(
+                                invalid_argument(
                                     "--parallelism must be auto, serial, or a positive thread count"
                                 )
                             })?,
                     ),
                 };
             }
-            value if value.starts_with('-') => bail!("unknown option {value:?}"),
+            value if value.starts_with('-') => {
+                return Err(invalid_argument(format!("unknown option {value:?}")));
+            }
             value if input.is_none() => input = Some(value.to_owned()),
-            value => bail!("unexpected argument {value:?}"),
+            value => return Err(invalid_argument(format!("unexpected argument {value:?}"))),
         }
     }
 
     let input = input.ok_or_else(|| {
-        anyhow!(
+        invalid_argument(
             "Usage: cargo run -p gpui_media --no-default-features \
              --features backend-decv --example decv_play -- \
-             [--parallelism auto|serial|THREADS] <local MP4>"
+             [--parallelism auto|serial|THREADS] <local MP4>",
         )
     })?;
     Ok((input, parallelism))
+}
+
+fn invalid_argument(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }

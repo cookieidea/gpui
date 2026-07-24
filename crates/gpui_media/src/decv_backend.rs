@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
 use decv_core::{
     ColorMatrix as DecvColorMatrix, ColorRange as DecvColorRange, DecodeInputStatus, DecodeOutput,
     DecodedVideoFrame, EncodedVideoPacket, FrameStorage, MediaTime, PixelFormat, VideoDecoder,
@@ -113,7 +112,6 @@ impl MediaBackend for DecvBackend {
     ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
         DecvSession::open(request.source, output, self.options)
             .map(|session| Box::new(session) as Box<dyn MediaPlaybackSession>)
-            .map_err(decv_open_error)
     }
 }
 
@@ -128,7 +126,7 @@ impl DecvSession {
         source: MediaSource,
         output: MediaOutputSink,
         options: DecvBackendOptions,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         let path = local_path(&source)?;
         let probe = probe_mp4(&path)?;
         let timeline = Arc::new(Mutex::new(TimelineState::new(probe.duration)));
@@ -147,17 +145,13 @@ impl DecvSession {
                     options.parallelism,
                 ) {
                     log::error!(
-                        "decv playback failed for {}: {error:#}",
+                        "decv playback failed for {}: {error}",
                         worker_path.display()
                     );
-                    output.emit(MediaBackendEvent::Error(Arc::new(MediaError::new(
-                        MediaErrorKind::Decode,
-                        error.to_string(),
-                        MediaRecovery::None,
-                    ))));
+                    output.emit(MediaBackendEvent::Error(Arc::new(error)));
                 }
             })
-            .context("failed to start decv playback thread")?;
+            .map_err(|error| MediaError::io("failed to start decv playback thread", error))?;
 
         Ok(Self {
             commands,
@@ -227,26 +221,6 @@ impl MediaPlaybackSession for DecvSession {
     }
 }
 
-fn decv_open_error(error: anyhow::Error) -> MediaError {
-    if error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .any(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
-        MediaError::new(
-            MediaErrorKind::SourceNotFound,
-            error.to_string(),
-            MediaRecovery::None,
-        )
-    } else {
-        MediaError::new(
-            MediaErrorKind::UnsupportedContainer,
-            error.to_string(),
-            MediaRecovery::None,
-        )
-    }
-}
-
 impl Drop for DecvSession {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
@@ -271,11 +245,56 @@ struct Probe {
     duration: Option<Duration>,
 }
 
-fn probe_mp4(path: &Path) -> Result<Probe> {
-    let demuxer = Mp4Demuxer::open(
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
+fn decv_container_error(
+    context: impl std::fmt::Display,
+    error: impl std::fmt::Debug,
+) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::UnsupportedContainer,
+        format!("{context}: {error:?}"),
+        MediaRecovery::None,
     )
-    .with_context(|| format!("failed to parse MP4 {}", path.display()))?;
+}
+
+fn decv_container_message(message: impl Into<gpui::SharedString>) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::UnsupportedContainer,
+        message,
+        MediaRecovery::None,
+    )
+}
+
+fn decv_decode_error(context: impl std::fmt::Display, error: impl std::fmt::Debug) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::Decode,
+        format!("{context}: {error:?}"),
+        MediaRecovery::None,
+    )
+}
+
+fn decv_decode_message(message: impl Into<gpui::SharedString>) -> MediaError {
+    MediaError::new(MediaErrorKind::Decode, message, MediaRecovery::None)
+}
+
+fn decv_video_output_error(
+    context: impl std::fmt::Display,
+    error: impl std::fmt::Debug,
+) -> MediaError {
+    MediaError::new(
+        MediaErrorKind::VideoOutput,
+        format!("{context}: {error:?}"),
+        MediaRecovery::None,
+    )
+}
+
+fn probe_mp4(path: &Path) -> MediaResult<Probe> {
+    let demuxer =
+        Mp4Demuxer::open(File::open(path).map_err(|error| {
+            MediaError::io(format!("failed to open {}", path.display()), error)
+        })?)
+        .map_err(|error| {
+            decv_container_error(format!("failed to parse MP4 {}", path.display()), error)
+        })?;
     let track_index = video_track_index(&demuxer)?;
     let duration = demuxer
         .movie()
@@ -295,31 +314,50 @@ fn playback_worker(
     shared_timeline: &Mutex<TimelineState>,
     output: &MediaOutputSink,
     parallelism: DecvParallelism,
-) -> Result<()> {
-    let demuxer = Mp4Demuxer::open(
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
-    )?;
+) -> MediaResult<()> {
+    let demuxer =
+        Mp4Demuxer::open(File::open(path).map_err(|error| {
+            MediaError::io(format!("failed to open {}", path.display()), error)
+        })?)
+        .map_err(|error| {
+            decv_container_error(format!("failed to parse MP4 {}", path.display()), error)
+        })?;
     if track_index >= demuxer.movie().tracks().len() {
-        bail!("video track changed after probing the MP4");
+        return Err(decv_container_message(
+            "video track changed after probing the MP4",
+        ));
     }
-    let mut cursor = demuxer.packet_cursor(track_index)?;
+    let mut cursor = demuxer
+        .packet_cursor(track_index)
+        .map_err(|error| decv_container_error("failed to open MP4 packet cursor", error))?;
     let decoder_config = cursor
-        .decoder_config()?
-        .context("MP4 video track has no decoder configuration")?;
+        .decoder_config()
+        .map_err(|error| decv_container_error("failed to read MP4 decoder configuration", error))?
+        .ok_or_else(|| {
+            MediaError::new(
+                MediaErrorKind::UnsupportedCodec,
+                "MP4 video track has no decoder configuration",
+                MediaRecovery::None,
+            )
+        })?;
     let first_description = cursor
         .track()
         .samples()
         .first()
-        .context("MP4 video track has no samples")?
+        .ok_or_else(|| decv_container_message("MP4 video track has no samples"))?
         .description_index();
 
     let mut decoder = H264Decoder::new();
     decoder
         .set_parallelism(parallelism.into())
-        .context("failed to configure decv H.264 parallelism")?;
-    decoder
-        .configure(decoder_config)
-        .context("failed to configure decv H.264 decoder")?;
+        .map_err(|error| decv_decode_error("failed to configure decv H.264 parallelism", error))?;
+    decoder.configure(decoder_config).map_err(|error| {
+        MediaError::new(
+            MediaErrorKind::UnsupportedCodec,
+            format!("failed to configure decv H.264 decoder: {error:?}"),
+            MediaRecovery::None,
+        )
+    })?;
 
     let surface_handle = SurfaceHandle::new();
     let mut sequence = 0u64;
@@ -336,7 +374,7 @@ fn playback_worker(
         if !playing && !preroll {
             let command = commands
                 .recv()
-                .map_err(|_| anyhow!("decv playback command channel closed"))?;
+                .map_err(|_| MediaError::backend("decv playback command channel closed"))?;
             if apply_command(
                 command,
                 &mut cursor,
@@ -494,7 +532,7 @@ fn apply_command(
     minimum_pts: &mut Option<Duration>,
     clock: &mut PresentationClock,
     shared_timeline: &Mutex<TimelineState>,
-) -> Result<bool> {
+) -> MediaResult<bool> {
     match command {
         Command::Play => {
             let position = shared_timeline
@@ -521,8 +559,15 @@ fn apply_command(
         Command::Seek { position, mode } => {
             let target = duration_to_media_time(position)?;
             cursor
-                .seek_to_keyframe(target)?
-                .with_context(|| format!("no MP4 keyframe exists at or before {position:?}"))?;
+                .seek_to_keyframe(target)
+                .map_err(|error| decv_container_error("failed to seek MP4 packet cursor", error))?
+                .ok_or_else(|| {
+                    MediaError::new(
+                        MediaErrorKind::UnsupportedOperation,
+                        format!("no MP4 keyframe exists at or before {position:?}"),
+                        MediaRecovery::None,
+                    )
+                })?;
             reset_decode_timeline(decoder, pending_packet, pending_frame, draining);
             *minimum_pts = (mode == SeekMode::Accurate).then_some(position);
             *ended = false;
@@ -553,11 +598,11 @@ fn decode_next_frame(
     pending_packet: &mut Option<EncodedVideoPacket>,
     draining: &mut bool,
     first_description: usize,
-) -> Result<Option<DecodedVideoFrame>> {
+) -> MediaResult<Option<DecodedVideoFrame>> {
     loop {
         match decoder
             .receive_frame()
-            .context("decv failed while receiving a frame")?
+            .map_err(|error| decv_decode_error("decv failed while receiving a frame", error))?
         {
             DecodeOutput::Frame(frame) => return Ok(Some(frame)),
             DecodeOutput::FormatChanged(format) => {
@@ -571,37 +616,53 @@ fn decode_next_frame(
             DecodeOutput::EndOfStream => return Ok(None),
             DecodeOutput::NeedInput => {
                 if *draining {
-                    bail!("decv requested input after drain");
+                    return Err(decv_decode_message("decv requested input after drain"));
                 }
 
                 let packet = match pending_packet.take() {
                     Some(packet) => packet,
                     None => {
-                        let Some(packet) = cursor.next_packet()? else {
-                            decoder.drain().context("decv failed to drain")?;
+                        let Some(packet) = cursor.next_packet().map_err(|error| {
+                            decv_container_error("failed to read the next MP4 packet", error)
+                        })?
+                        else {
+                            decoder.drain().map_err(|error| {
+                                decv_decode_error("decv failed to drain", error)
+                            })?;
                             *draining = true;
                             continue;
                         };
                         let sample = &cursor.track().samples()[cursor.next_sample_index() - 1];
                         if sample.description_index() != first_description {
-                            bail!("mid-stream MP4 sample-description changes are not supported");
+                            return Err(MediaError::new(
+                                MediaErrorKind::UnsupportedCodec,
+                                "mid-stream MP4 sample-description changes are not supported",
+                                MediaRecovery::None,
+                            ));
                         }
                         packet
                     }
                 };
 
-                match decoder
-                    .send_packet(packet)
-                    .context("decv failed while decoding an MP4 packet")?
-                {
+                match decoder.send_packet(packet).map_err(|error| {
+                    decv_decode_error("decv failed while decoding an MP4 packet", error)
+                })? {
                     DecodeInputStatus::Accepted => {}
                     DecodeInputStatus::NeedOutput(unconsumed) => {
                         *pending_packet = Some(unconsumed);
                     }
-                    status => bail!("decv returned an unsupported input status: {status:?}"),
+                    status => {
+                        return Err(decv_decode_message(format!(
+                            "decv returned an unsupported input status: {status:?}"
+                        )));
+                    }
                 }
             }
-            output => bail!("decv returned an unsupported decoder output: {output:?}"),
+            output => {
+                return Err(decv_decode_message(format!(
+                    "decv returned an unsupported decoder output: {output:?}"
+                )));
+            }
         }
     }
 }
@@ -610,20 +671,34 @@ fn convert_frame(
     frame: DecodedVideoFrame,
     handle: SurfaceHandle,
     sequence: u64,
-) -> Result<VideoFrame> {
-    frame.validate().context("decv produced an invalid frame")?;
+) -> MediaResult<VideoFrame> {
+    frame
+        .validate()
+        .map_err(|error| decv_decode_error("decv produced an invalid frame", error))?;
     if frame.format.pixel_format != PixelFormat::Nv12 {
-        bail!(
-            "decv produced unsupported pixel format {:?}; gpui_media's decv adapter currently accepts NV12",
-            frame.format.pixel_format
-        );
+        return Err(MediaError::new(
+            MediaErrorKind::UnsupportedCodec,
+            format!(
+                "decv produced unsupported pixel format {:?}; gpui_media's decv adapter currently accepts NV12",
+                frame.format.pixel_format
+            ),
+            MediaRecovery::None,
+        ));
     }
     let cpu = match frame.storage {
         FrameStorage::Cpu(cpu) => cpu,
-        _ => bail!("decv produced a non-CPU frame that this adapter does not support"),
+        _ => {
+            return Err(MediaError::new(
+                MediaErrorKind::VideoOutput,
+                "decv produced a non-CPU frame that this adapter does not support",
+                MediaRecovery::None,
+            ));
+        }
     };
     let [y, uv] = cpu.planes.as_slice() else {
-        bail!("decv NV12 frame does not contain exactly two planes");
+        return Err(decv_decode_message(
+            "decv NV12 frame does not contain exactly two planes",
+        ));
     };
 
     let coded_size = device_size(frame.format.coded_size)?;
@@ -649,17 +724,20 @@ fn convert_frame(
             SurfacePlane::with_offset(
                 y.bytes.clone(),
                 y.offset,
-                u32::try_from(y.stride).context("decv Y stride exceeds u32")?,
+                u32::try_from(y.stride)
+                    .map_err(|error| decv_video_output_error("decv Y stride exceeds u32", error))?,
             ),
             SurfacePlane::with_offset(
                 uv.bytes.clone(),
                 uv.offset,
-                u32::try_from(uv.stride).context("decv UV stride exceeds u32")?,
+                u32::try_from(uv.stride).map_err(|error| {
+                    decv_video_output_error("decv UV stride exceeds u32", error)
+                })?,
             ),
         ],
         surface_color_info(frame.format.color, frame.format.coded_size.height),
     )
-    .context("GPUI rejected the decv NV12 frame")?;
+    .map_err(|error| decv_video_output_error("GPUI rejected the decv NV12 frame", error))?;
 
     Ok(VideoFrame::new(
         Arc::new(surface),
@@ -695,19 +773,30 @@ fn surface_color_info(color: decv_core::ColorInfo, coded_height: u32) -> Surface
     SurfaceColorInfo { matrix, range }
 }
 
-fn local_path(source: &MediaSource) -> Result<PathBuf> {
-    let uri = url::Url::parse(source.uri()).context("invalid media URI")?;
+fn local_path(source: &MediaSource) -> MediaResult<PathBuf> {
+    let uri = url::Url::parse(source.uri()).map_err(|error| {
+        MediaError::from_error(
+            MediaErrorKind::InvalidInput,
+            MediaRecovery::None,
+            "invalid media URI",
+            error,
+        )
+    })?;
     if uri.scheme() != "file" {
-        bail!(
-            "decv currently accepts local MP4 files only; unsupported URI scheme {:?}",
-            uri.scheme()
-        );
+        return Err(MediaError::new(
+            MediaErrorKind::UnsupportedOperation,
+            format!(
+                "decv currently accepts local MP4 files only; unsupported URI scheme {:?}",
+                uri.scheme()
+            ),
+            MediaRecovery::None,
+        ));
     }
     uri.to_file_path()
-        .map_err(|_| anyhow!("cannot convert media URI to a local path"))
+        .map_err(|_| MediaError::invalid_input("cannot convert media URI to a local path"))
 }
 
-fn video_track_index(demuxer: &Mp4Demuxer<File>) -> Result<usize> {
+fn video_track_index(demuxer: &Mp4Demuxer<File>) -> MediaResult<usize> {
     demuxer
         .movie()
         .tracks()
@@ -715,19 +804,20 @@ fn video_track_index(demuxer: &Mp4Demuxer<File>) -> Result<usize> {
         .enumerate()
         .find(|(_, track)| track.handler() == VIDEO_HANDLER && !track.samples().is_empty())
         .map(|(index, _)| index)
-        .context("MP4 contains no non-empty video track")
+        .ok_or_else(|| decv_container_message("MP4 contains no non-empty video track"))
 }
 
-fn duration_from_ratio(value: u64, timescale: u32) -> Result<Duration> {
+fn duration_from_ratio(value: u64, timescale: u32) -> MediaResult<Duration> {
     if timescale == 0 {
-        bail!("media timescale is zero");
+        return Err(decv_container_message("media timescale is zero"));
     }
     let seconds = value / u64::from(timescale);
     let remainder = value % u64::from(timescale);
     let nanos = (u128::from(remainder) * 1_000_000_000u128) / u128::from(timescale);
     Ok(Duration::new(
         seconds,
-        u32::try_from(nanos).context("media timestamp exceeds nanosecond precision")?,
+        u32::try_from(nanos)
+            .map_err(|error| decv_container_error("media timestamp is invalid", error))?,
     ))
 }
 
@@ -739,23 +829,30 @@ fn media_time_to_duration(time: Option<MediaTime>) -> Option<Duration> {
     duration_from_ratio(time.value as u64, time.timescale.get()).ok()
 }
 
-fn duration_to_media_time(duration: Duration) -> Result<MediaTime> {
-    let value = i64::try_from(duration.as_nanos())
-        .context("seek target cannot be represented by decv MediaTime")?;
-    MediaTime::from_parts(value, MEDIA_TIME_SCALE).context("invalid decv media timescale")
+fn duration_to_media_time(duration: Duration) -> MediaResult<MediaTime> {
+    let value = i64::try_from(duration.as_nanos()).map_err(|error| {
+        MediaError::from_error(
+            MediaErrorKind::InvalidInput,
+            MediaRecovery::None,
+            "seek target cannot be represented by decv MediaTime",
+            error,
+        )
+    })?;
+    MediaTime::from_parts(value, MEDIA_TIME_SCALE)
+        .ok_or_else(|| MediaError::invalid_input("invalid decv media timescale"))
 }
 
-fn device_size(value: decv_core::Size) -> Result<gpui::Size<DevicePixels>> {
+fn device_size(value: decv_core::Size) -> MediaResult<gpui::Size<DevicePixels>> {
     Ok(size(
         device_pixel(value.width)?,
         device_pixel(value.height)?,
     ))
 }
 
-fn device_pixel(value: u32) -> Result<DevicePixels> {
-    Ok(DevicePixels(
-        i32::try_from(value).context("video dimension exceeds i32")?,
-    ))
+fn device_pixel(value: u32) -> MediaResult<DevicePixels> {
+    Ok(DevicePixels(i32::try_from(value).map_err(|error| {
+        decv_video_output_error("video dimension exceeds i32", error)
+    })?))
 }
 
 #[derive(Clone, Copy)]

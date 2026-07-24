@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Result, bail};
 use gpui::GpuSpecs;
 
 use crate::{
@@ -198,8 +197,9 @@ pub trait MediaPlaybackSession: Send {
 
 /// Blocking frame extraction primitive owned by the generic extractor worker.
 pub trait FrameExtractionSession: Send {
-    fn initial_frame(&mut self) -> Result<Arc<VideoFrame>>;
-    fn frame_at(&mut self, position: Duration, seek_mode: SeekMode) -> Result<Arc<VideoFrame>>;
+    fn initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>>;
+    fn frame_at(&mut self, position: Duration, seek_mode: SeekMode)
+    -> MediaResult<Arc<VideoFrame>>;
 }
 
 /// Factory for unified media playback and video frame-extraction sessions.
@@ -218,11 +218,11 @@ pub trait MediaBackend: Send + Sync + 'static {
     fn open_frame_extractor(
         &self,
         _request: FrameExtractorBackendRequest,
-    ) -> Result<Box<dyn FrameExtractionSession>> {
-        bail!(
+    ) -> MediaResult<Box<dyn FrameExtractionSession>> {
+        Err(MediaError::unsupported(format!(
             "media backend {} does not support video frame extraction",
             self.name()
-        )
+        )))
     }
 }
 

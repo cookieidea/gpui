@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, bail};
+use crate::{MediaError, MediaResult};
 
 /// A media URI accepted by the playback backend.
 #[derive(Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ impl NetworkSourceOptions {
         mut self,
         name: impl Into<String>,
         value: impl Into<String>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         let name = name.into();
         let value = value.into();
         validate_header(&name, &value)?;
@@ -70,7 +70,7 @@ impl NetworkSourceOptions {
         Ok(self)
     }
 
-    pub fn with_bearer_token(self, token: impl AsRef<str>) -> Result<Self> {
+    pub fn with_bearer_token(self, token: impl AsRef<str>) -> MediaResult<Self> {
         self.with_header("Authorization", format!("Bearer {}", token.as_ref()))
     }
 
@@ -86,7 +86,7 @@ impl NetworkSourceOptions {
         self
     }
 
-    pub fn with_referer(self, referer: impl Into<String>) -> Result<Self> {
+    pub fn with_referer(self, referer: impl Into<String>) -> MediaResult<Self> {
         self.with_header("Referer", referer)
     }
 
@@ -236,9 +236,16 @@ impl fmt::Debug for NetworkSourceOptions {
 
 impl MediaSource {
     /// Creates a source from an already encoded URI.
-    pub fn from_uri(uri: impl Into<String>) -> Result<Self> {
+    pub fn from_uri(uri: impl Into<String>) -> MediaResult<Self> {
         let uri = uri.into();
-        let parsed = url::Url::parse(&uri).context("invalid media URI")?;
+        let parsed = url::Url::parse(&uri).map_err(|error| {
+            MediaError::from_error(
+                crate::MediaErrorKind::InvalidInput,
+                crate::MediaRecovery::None,
+                "invalid media URI",
+                error,
+            )
+        })?;
         let display_name = parsed
             .path_segments()
             .and_then(|mut segments| segments.next_back())
@@ -254,20 +261,25 @@ impl MediaSource {
     }
 
     /// Creates a file URI from a local path.
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn from_path(path: impl AsRef<Path>) -> MediaResult<Self> {
         let path = path.as_ref();
         let canonical = path
             .canonicalize()
-            .with_context(|| format!("media file does not exist: {}", path.display()))?;
+            .map_err(|error| MediaError::io(format!("failed to open {}", path.display()), error))?;
         if !canonical.is_file() {
-            bail!("media source is not a file: {}", canonical.display());
+            return Err(MediaError::invalid_input(format!(
+                "media source is not a file: {}",
+                canonical.display()
+            )));
         }
 
-        let uri = url::Url::from_file_path(&canonical)
-            .map_err(|_| {
-                anyhow::anyhow!("cannot convert path to file URI: {}", canonical.display())
-            })?
-            .into();
+        let uri = url::Url::from_file_path(&canonical).map_err(|_| {
+            MediaError::invalid_input(format!(
+                "cannot convert path to file URI: {}",
+                canonical.display()
+            ))
+        })?;
+        let uri = uri.into();
         let display_name = canonical
             .file_name()
             .and_then(|name| name.to_str())
@@ -283,7 +295,7 @@ impl MediaSource {
 
     /// Treats inputs containing a URI scheme as URIs and all other inputs as
     /// local filesystem paths.
-    pub fn parse(input: impl AsRef<str>) -> Result<Self> {
+    pub fn parse(input: impl AsRef<str>) -> MediaResult<Self> {
         let input = input.as_ref();
         match url::Url::parse(input) {
             Ok(url) if !url.scheme().is_empty() => Self::from_uri(url.to_string()),
@@ -355,7 +367,7 @@ fn safe_uri_label(uri: &url::Url) -> String {
     }
 }
 
-fn validate_header(name: &str, value: &str) -> Result<()> {
+fn validate_header(name: &str, value: &str) -> MediaResult<()> {
     if name.is_empty()
         || !name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
@@ -378,29 +390,33 @@ fn validate_header(name: &str, value: &str) -> Result<()> {
                 )
         })
     {
-        bail!("invalid HTTP header name: {name:?}");
+        return Err(MediaError::invalid_input(format!(
+            "invalid HTTP header name: {name:?}"
+        )));
     }
     if !value
         .bytes()
         .all(|byte| byte == b'\t' || (byte >= b' ' && byte != 0x7f))
     {
-        bail!("HTTP header value contains an invalid control character");
+        return Err(MediaError::invalid_input(
+            "HTTP header value contains an invalid control character",
+        ));
     }
     Ok(())
 }
 
 impl TryFrom<&Path> for MediaSource {
-    type Error = anyhow::Error;
+    type Error = MediaError;
 
-    fn try_from(path: &Path) -> Result<Self> {
+    fn try_from(path: &Path) -> MediaResult<Self> {
         Self::from_path(path)
     }
 }
 
 impl TryFrom<PathBuf> for MediaSource {
-    type Error = anyhow::Error;
+    type Error = MediaError;
 
-    fn try_from(path: PathBuf) -> Result<Self> {
+    fn try_from(path: PathBuf) -> MediaResult<Self> {
         Self::from_path(path)
     }
 }
@@ -408,6 +424,7 @@ impl TryFrom<PathBuf> for MediaSource {
 #[cfg(test)]
 mod tests {
     use super::{MediaSource, NetworkSourceOptions};
+    use crate::MediaErrorKind;
 
     #[test]
     fn parses_remote_uri() {
@@ -419,7 +436,7 @@ mod tests {
     #[test]
     fn rejects_missing_local_file() {
         let error = MediaSource::parse("this-video-does-not-exist.mp4").unwrap_err();
-        assert!(error.to_string().contains("does not exist"));
+        assert_eq!(error.kind, MediaErrorKind::SourceNotFound);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
 use gpui::{
     App, AppContext, Bounds, Context, DevicePixels, Entity, IntoElement, KeyBinding, MouseButton,
     Render, Size, Task, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div,
@@ -72,10 +71,13 @@ impl Render for BorderlessVideo {
     }
 }
 
-fn main() -> Result<()> {
-    let input = std::env::args()
-        .nth(1)
-        .context("usage: cargo run -p gpui_media --example borderless -- <video file or URI>")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = std::env::args().nth(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: cargo run -p gpui_media --example borderless -- <video file or URI>",
+        )
+    })?;
     let source = MediaSource::parse(input)?;
 
     gpui_media::init()?;

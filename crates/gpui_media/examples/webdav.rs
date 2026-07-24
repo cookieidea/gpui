@@ -1,22 +1,28 @@
 use std::{env, time::Duration};
 
-use anyhow::{Context as _, Result, bail};
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_media::{
     MediaSource, NetworkSourceOptions, PlaybackState, VideoPlayer, VideoPlayerEvent,
     VideoPlayerOptions,
 };
 
-fn main() -> Result<()> {
-    let url = env::args().nth(1).context(
-        "usage: GPUI_MEDIA_WEBDAV_USERNAME=user \
-         GPUI_MEDIA_WEBDAV_PASSWORD=password \
-         cargo run -p gpui_media --example webdav -- <direct WebDAV file URL>",
-    )?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let url = env::args().nth(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: GPUI_MEDIA_WEBDAV_USERNAME=user \
+             GPUI_MEDIA_WEBDAV_PASSWORD=password \
+             cargo run -p gpui_media --example webdav -- <direct WebDAV file URL>",
+        )
+    })?;
     let username = env::var("GPUI_MEDIA_WEBDAV_USERNAME").ok();
     let password = env::var("GPUI_MEDIA_WEBDAV_PASSWORD").ok();
     if username.is_some() != password.is_some() {
-        bail!("GPUI_MEDIA_WEBDAV_USERNAME and GPUI_MEDIA_WEBDAV_PASSWORD must be set together");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "GPUI_MEDIA_WEBDAV_USERNAME and GPUI_MEDIA_WEBDAV_PASSWORD must be set together",
+        )
+        .into());
     }
 
     let mut network = NetworkSourceOptions::default()

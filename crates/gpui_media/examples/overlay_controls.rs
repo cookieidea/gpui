@@ -1,6 +1,5 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
-use anyhow::Result;
 use gpui::{
     App, AppContext, Bounds, Context, CursorStyle, Entity, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Window, WindowBounds,
@@ -209,7 +208,7 @@ fn format_time(duration: Duration) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!(
             "Usage: cargo run -p gpui_media --example overlay_controls -- <video file or URI>"

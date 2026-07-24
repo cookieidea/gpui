@@ -1,8 +1,7 @@
-use anyhow::Result;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_media::{MediaSource, VideoPlayer, VideoPlayerEvent, VideoPlayerOptions};
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = std::env::args().nth(1).unwrap_or_else(|| {
         eprintln!("Usage: cargo run -p gpui_media --example play -- <video file or URI>");
         std::process::exit(2);
