@@ -10,6 +10,7 @@
 mod container;
 #[cfg(feature = "backend-decv")]
 mod decv_backend;
+mod error;
 mod frame;
 mod frame_extractor;
 #[cfg(feature = "backend-gstreamer")]
@@ -26,6 +27,7 @@ mod window_sizing;
 pub use container::{VideoContainer, video_container};
 #[cfg(feature = "backend-decv")]
 pub use decv_backend::{DecvBackend, DecvBackendOptions, DecvParallelism};
+pub use error::{MediaError, MediaErrorKind, MediaRecovery, MediaResult};
 pub use frame::{FrameTransport, VideoFrame};
 pub use frame_extractor::{
     FrameExtractionSuperseded, VideoFrameExtractor, VideoFrameExtractorOptions,

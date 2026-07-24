@@ -10,9 +10,9 @@ use gpui::{DmaBufImportStatus, SurfaceFrameBacking};
 
 use crate::{
     FrameTransport, FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities,
-    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaSource, PlaybackTimeline,
-    SeekMode, TransportChange, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
-    media_backend::default_media_backend, stats::PlaybackCounters,
+    MediaError, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaResult,
+    MediaSource, PlaybackTimeline, SeekMode, TransportChange, VideoFrame, VideoFrameExtractor,
+    VideoPlaybackStats, media_backend::default_media_backend, stats::PlaybackCounters,
 };
 
 /// Initial behavior for a [`VideoPlayer`].
@@ -47,7 +47,7 @@ impl VideoPlayerBuilder {
         self
     }
 
-    pub fn build(self, cx: &mut Context<VideoPlayer>) -> Result<VideoPlayer> {
+    pub fn build(self, cx: &mut Context<VideoPlayer>) -> MediaResult<VideoPlayer> {
         let backend = match self.backend {
             Some(backend) => backend,
             None => default_media_backend()?,
@@ -59,7 +59,7 @@ impl VideoPlayerBuilder {
         self,
         window: &Window,
         cx: &mut Context<VideoPlayer>,
-    ) -> Result<VideoPlayer> {
+    ) -> MediaResult<VideoPlayer> {
         let backend = match self.backend {
             Some(backend) => backend,
             None => default_media_backend()?,
@@ -87,11 +87,12 @@ pub enum PlaybackState {
     Paused,
     Seeking,
     Ended,
-    Error(SharedString),
+    Error(Arc<MediaError>),
 }
 
 /// Events emitted by [`VideoPlayer`] for host controls and custom player UIs.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum VideoPlayerEvent {
     StateChanged(PlaybackState),
     TimelineChanged(PlaybackTimeline),
@@ -141,7 +142,7 @@ impl VideoPlayer {
         source: MediaSource,
         options: VideoPlayerOptions,
         cx: &mut Context<Self>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         Self::new_with_backend_and_gpu_specs(source, options, default_media_backend()?, None, cx)
     }
 
@@ -155,7 +156,7 @@ impl VideoPlayer {
         options: VideoPlayerOptions,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         Self::new_with_backend_and_gpu_specs(
             source,
             options,
@@ -171,7 +172,7 @@ impl VideoPlayer {
         options: VideoPlayerOptions,
         backend: Arc<dyn MediaBackend>,
         cx: &mut Context<Self>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         Self::new_with_backend_and_gpu_specs(source, options, backend, None, cx)
     }
 
@@ -183,7 +184,7 @@ impl VideoPlayer {
         backend: Arc<dyn MediaBackend>,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         Self::new_with_backend_and_gpu_specs(source, options, backend, window.gpu_specs(), cx)
     }
 
@@ -193,7 +194,7 @@ impl VideoPlayer {
         backend: Arc<dyn MediaBackend>,
         gpu_specs: Option<GpuSpecs>,
         cx: &mut Context<Self>,
-    ) -> Result<Self> {
+    ) -> MediaResult<Self> {
         let (output_sink, output) = MediaOutputSink::channel();
         let mut playback = backend.open_playback(
             MediaPlaybackRequest {
@@ -215,7 +216,7 @@ impl VideoPlayer {
                 this.update(cx, |player, cx| {
                     player.delivered_frames = player.delivered_frames.saturating_add(1);
                     if let Err(error) = player.check_frame_import(cx) {
-                        player.set_state(PlaybackState::Error(error.to_string().into()), cx);
+                        player.set_state(PlaybackState::Error(Arc::new(error)), cx);
                     }
                     if player.state_after_seek.is_none()
                         && let Some(timestamp) = frame.timestamp()
@@ -266,15 +267,13 @@ impl VideoPlayer {
                         let is_buffering = player.is_buffering();
                         if is_buffering && !was_buffering && player.play_when_ready {
                             if let Err(error) = player.playback.pause() {
-                                player
-                                    .set_state(PlaybackState::Error(error.to_string().into()), cx);
+                                player.set_state(PlaybackState::Error(Arc::new(error)), cx);
                             } else if player.state != PlaybackState::Seeking {
                                 player.set_state(PlaybackState::Loading, cx);
                             }
                         } else if !is_buffering && was_buffering && player.play_when_ready {
                             if let Err(error) = player.playback.play() {
-                                player
-                                    .set_state(PlaybackState::Error(error.to_string().into()), cx);
+                                player.set_state(PlaybackState::Error(Arc::new(error)), cx);
                             } else if player.state != PlaybackState::Seeking {
                                 let state = if player.frame.is_some() {
                                     PlaybackState::Playing
@@ -298,7 +297,7 @@ impl VideoPlayer {
                         player.set_state(PlaybackState::Ended, cx);
                     }
                     MediaBackendEvent::Error(error) => {
-                        player.set_state(PlaybackState::Error(error.to_string().into()), cx);
+                        player.set_state(PlaybackState::Error(error), cx);
                     }
                 });
             }
@@ -318,7 +317,7 @@ impl VideoPlayer {
                 };
                 this.update(cx, |player, cx| {
                     if let Err(error) = player.check_frame_import(cx) {
-                        player.set_state(PlaybackState::Error(error.to_string().into()), cx);
+                        player.set_state(PlaybackState::Error(Arc::new(error)), cx);
                     }
                     player.refresh_timeline(cx);
                 });
@@ -435,7 +434,7 @@ impl VideoPlayer {
         self.muted
     }
 
-    pub fn play(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    pub fn play(&mut self, cx: &mut Context<Self>) -> MediaResult<()> {
         self.play_when_ready = true;
         if self.state == PlaybackState::Ended {
             self.playback.restart()?;
@@ -454,7 +453,7 @@ impl VideoPlayer {
         Ok(())
     }
 
-    pub fn pause(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    pub fn pause(&mut self, cx: &mut Context<Self>) -> MediaResult<()> {
         self.play_when_ready = false;
         self.playback.pause()?;
         self.state_after_seek = None;
@@ -462,7 +461,7 @@ impl VideoPlayer {
         Ok(())
     }
 
-    pub fn stop(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    pub fn stop(&mut self, cx: &mut Context<Self>) -> MediaResult<()> {
         self.play_when_ready = false;
         self.playback.pause()?;
         self.playback.seek_to(Duration::ZERO, SeekMode::KeyFrame)?;
@@ -477,7 +476,7 @@ impl VideoPlayer {
         Ok(())
     }
 
-    pub fn toggle_playback(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    pub fn toggle_playback(&mut self, cx: &mut Context<Self>) -> MediaResult<()> {
         match self.state {
             PlaybackState::Playing | PlaybackState::Loading => self.pause(cx),
             PlaybackState::Paused
@@ -491,7 +490,7 @@ impl VideoPlayer {
     ///
     /// This is useful after a network or decoder error. The host decides when
     /// and how often to retry; the player only performs one explicit reload.
-    pub fn reload(&mut self, autoplay: bool, cx: &mut Context<Self>) -> Result<()> {
+    pub fn reload(&mut self, autoplay: bool, cx: &mut Context<Self>) -> MediaResult<()> {
         self.playback.reload(autoplay)?;
         self.frame = None;
         self.frame_transport = None;
@@ -519,7 +518,7 @@ impl VideoPlayer {
         position: Duration,
         mode: SeekMode,
         cx: &mut Context<Self>,
-    ) -> Result<()> {
+    ) -> MediaResult<()> {
         let target = self
             .timeline
             .duration()
@@ -546,7 +545,7 @@ impl VideoPlayer {
         amount: Duration,
         mode: SeekMode,
         cx: &mut Context<Self>,
-    ) -> Result<()> {
+    ) -> MediaResult<()> {
         self.seek_to(self.timeline.target_after(amount), mode, cx)
     }
 
@@ -555,12 +554,12 @@ impl VideoPlayer {
         amount: Duration,
         mode: SeekMode,
         cx: &mut Context<Self>,
-    ) -> Result<()> {
+    ) -> MediaResult<()> {
         self.seek_to(self.timeline.target_before(amount), mode, cx)
     }
 
     /// Advances a paused pipeline by a number of decoded video frames.
-    pub fn step_forward(&mut self, frames: u64, cx: &mut Context<Self>) -> Result<()> {
+    pub fn step_forward(&mut self, frames: u64, cx: &mut Context<Self>) -> MediaResult<()> {
         self.playback.pause()?;
         self.set_state(PlaybackState::Paused, cx);
         self.playback.step_forward(frames)
@@ -568,7 +567,7 @@ impl VideoPlayer {
 
     /// Seeks backward by the current frame duration, or 1/30 second when the
     /// stream does not expose frame duration metadata.
-    pub fn step_backward(&mut self, frames: u64, cx: &mut Context<Self>) -> Result<()> {
+    pub fn step_backward(&mut self, frames: u64, cx: &mut Context<Self>) -> MediaResult<()> {
         if frames == 0 {
             return Ok(());
         }
@@ -583,7 +582,7 @@ impl VideoPlayer {
         self.skip_backward(amount, SeekMode::Accurate, cx)
     }
 
-    pub fn set_playback_rate(&mut self, rate: f64, cx: &mut Context<Self>) -> Result<()> {
+    pub fn set_playback_rate(&mut self, rate: f64, cx: &mut Context<Self>) -> MediaResult<()> {
         self.playback.set_playback_rate(rate)?;
         self.playback_rate = rate;
         cx.emit(VideoPlayerEvent::PlaybackRateChanged(rate));
@@ -594,7 +593,7 @@ impl VideoPlayer {
     pub fn set_frame_transport_preference(
         &mut self,
         preference: FrameTransportPreference,
-    ) -> Result<TransportChange> {
+    ) -> MediaResult<TransportChange> {
         self.playback.set_frame_transport_preference(preference)
     }
 
@@ -633,7 +632,7 @@ impl VideoPlayer {
     }
 
     #[cfg(target_os = "linux")]
-    fn check_frame_import(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    fn check_frame_import(&mut self, cx: &mut Context<Self>) -> MediaResult<()> {
         let Some(frame) = self.frame.as_deref() else {
             return Ok(());
         };
@@ -644,9 +643,16 @@ impl VideoPlayer {
             return Ok(());
         };
 
-        if self.set_frame_transport_preference(FrameTransportPreference::CpuOnly)?
-            == TransportChange::Reconfigured
-        {
+        let transport_change = self
+            .set_frame_transport_preference(FrameTransportPreference::CpuOnly)
+            .map_err(|error| {
+                MediaError::new(
+                    crate::MediaErrorKind::VideoOutput,
+                    error.message,
+                    crate::MediaRecovery::Retry,
+                )
+            })?;
+        if transport_change == TransportChange::Reconfigured {
             cx.emit(VideoPlayerEvent::DmaBufImportFailed(
                 reason.to_string().into(),
             ));
@@ -655,7 +661,7 @@ impl VideoPlayer {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn check_frame_import(&mut self, _: &mut Context<Self>) -> Result<()> {
+    fn check_frame_import(&mut self, _: &mut Context<Self>) -> MediaResult<()> {
         Ok(())
     }
 

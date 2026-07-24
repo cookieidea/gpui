@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use gpui::{DevicePixels, SurfaceFrame, SurfaceHandle, size};
 use gpui_media::{
     FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaCapabilities,
-    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaSource, PlaybackTimeline,
-    SeekMode, VideoFrame, VideoFrameExtractor,
+    MediaError, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaResult,
+    MediaSource, PlaybackTimeline, SeekMode, VideoFrame, VideoFrameExtractor,
 };
 
 #[derive(Clone, Copy)]
@@ -20,7 +20,7 @@ impl MediaBackend for CustomBackend {
         &self,
         _request: MediaPlaybackRequest,
         output: MediaOutputSink,
-    ) -> Result<Box<dyn MediaPlaybackSession>> {
+    ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
         output.publish_video_frame(test_frame(1, Duration::ZERO));
         Ok(Box::new(CustomPlayback))
     }
@@ -45,15 +45,15 @@ impl MediaPlaybackSession for CustomPlayback {
         }
     }
 
-    fn play(&mut self) -> Result<()> {
+    fn play(&mut self) -> MediaResult<()> {
         Ok(())
     }
 
-    fn pause(&mut self) -> Result<()> {
+    fn pause(&mut self) -> MediaResult<()> {
         Ok(())
     }
 
-    fn reload(&mut self, _autoplay: bool) -> Result<()> {
+    fn reload(&mut self, _autoplay: bool) -> MediaResult<()> {
         Ok(())
     }
 
@@ -61,16 +61,18 @@ impl MediaPlaybackSession for CustomPlayback {
         PlaybackTimeline::new(Duration::ZERO, Some(Duration::from_secs(10)), true)
     }
 
-    fn seek_to(&mut self, _position: Duration, _mode: SeekMode) -> Result<()> {
+    fn seek_to(&mut self, _position: Duration, _mode: SeekMode) -> MediaResult<()> {
         Ok(())
     }
 
-    fn step_forward(&mut self, _frames: u64) -> Result<()> {
-        bail!("frame stepping is unsupported")
+    fn step_forward(&mut self, _frames: u64) -> MediaResult<()> {
+        Err(MediaError::unsupported("frame stepping is unsupported"))
     }
 
-    fn set_playback_rate(&mut self, _rate: f64) -> Result<()> {
-        bail!("playback rate changes are unsupported")
+    fn set_playback_rate(&mut self, _rate: f64) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "playback rate changes are unsupported",
+        ))
     }
 }
 

@@ -16,9 +16,9 @@ use gst::prelude::*;
 
 use crate::{
     FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
-    MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
-    MediaPlaybackSession, MediaSource, PlaybackTimeline, SeekMode, TransportChange, VideoFrame,
-    network::configure_playbin_network,
+    MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind, MediaOutputSink,
+    MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult, MediaSource,
+    PlaybackTimeline, SeekMode, TransportChange, VideoFrame, network::configure_playbin_network,
 };
 
 #[cfg(target_os = "macos")]
@@ -136,6 +136,7 @@ impl GstreamerPlayback {
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_bus = producer_drm_device;
         let output_for_bus = output;
+        let source_for_bus = source.clone();
         let bus_thread = std::thread::Builder::new()
             .name("gpui-video-gstreamer-bus".into())
             .spawn(move || {
@@ -168,14 +169,9 @@ impl GstreamerPlayback {
                             MediaBackendEvent::Buffering(buffering_percent(buffering.percent())),
                         ),
                         gst::MessageView::Eos(..) => Some(MediaBackendEvent::Ended),
-                        gst::MessageView::Error(error) => {
-                            let mut message = error.error().to_string();
-                            if let Some(debug) = error.debug() {
-                                message.push_str(": ");
-                                message.push_str(&debug);
-                            }
-                            Some(MediaBackendEvent::Error(message.into()))
-                        }
+                        gst::MessageView::Error(error) => Some(MediaBackendEvent::Error(Arc::new(
+                            media_error_from_gstreamer_message(error, &source_for_bus),
+                        ))),
                         _ => None,
                     };
 
@@ -365,12 +361,16 @@ impl MediaBackend for GstreamerBackend {
         &self,
         request: MediaPlaybackRequest,
         output: MediaOutputSink,
-    ) -> Result<Box<dyn MediaPlaybackSession>> {
-        Ok(Box::new(GstreamerPlayback::new(
-            &request.source,
-            request.gpu_specs.as_ref(),
-            output,
-        )?))
+    ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
+        GstreamerPlayback::new(&request.source, request.gpu_specs.as_ref(), output)
+            .map(|playback| Box::new(playback) as Box<dyn MediaPlaybackSession>)
+            .map_err(|error| {
+                MediaError::new(
+                    MediaErrorKind::Backend,
+                    request.source.redact_error_message(&error.to_string()),
+                    MediaRecovery::Retry,
+                )
+            })
     }
 
     fn open_frame_extractor(
@@ -401,32 +401,32 @@ impl MediaPlaybackSession for GstreamerPlayback {
         }
     }
 
-    fn play(&mut self) -> Result<()> {
-        GstreamerPlayback::play(self)
+    fn play(&mut self) -> MediaResult<()> {
+        GstreamerPlayback::play(self).map_err(media_backend_error)
     }
 
-    fn pause(&mut self) -> Result<()> {
-        GstreamerPlayback::pause(self)
+    fn pause(&mut self) -> MediaResult<()> {
+        GstreamerPlayback::pause(self).map_err(media_backend_error)
     }
 
-    fn reload(&mut self, autoplay: bool) -> Result<()> {
-        GstreamerPlayback::reload(self, autoplay)
+    fn reload(&mut self, autoplay: bool) -> MediaResult<()> {
+        GstreamerPlayback::reload(self, autoplay).map_err(media_backend_error)
     }
 
     fn timeline(&self) -> PlaybackTimeline {
         GstreamerPlayback::timeline(self)
     }
 
-    fn seek_to(&mut self, position: Duration, mode: SeekMode) -> Result<()> {
-        GstreamerPlayback::seek_to(self, position, mode)
+    fn seek_to(&mut self, position: Duration, mode: SeekMode) -> MediaResult<()> {
+        GstreamerPlayback::seek_to(self, position, mode).map_err(media_backend_error)
     }
 
-    fn step_forward(&mut self, frames: u64) -> Result<()> {
-        GstreamerPlayback::step_forward(self, frames)
+    fn step_forward(&mut self, frames: u64) -> MediaResult<()> {
+        GstreamerPlayback::step_forward(self, frames).map_err(media_backend_error)
     }
 
-    fn set_playback_rate(&mut self, rate: f64) -> Result<()> {
-        GstreamerPlayback::set_playback_rate(self, rate)
+    fn set_playback_rate(&mut self, rate: f64) -> MediaResult<()> {
+        GstreamerPlayback::set_playback_rate(self, rate).map_err(media_backend_error)
     }
 
     fn set_volume(&mut self, volume: f64) {
@@ -440,7 +440,7 @@ impl MediaPlaybackSession for GstreamerPlayback {
     fn set_frame_transport_preference(
         &mut self,
         preference: FrameTransportPreference,
-    ) -> Result<TransportChange> {
+    ) -> MediaResult<TransportChange> {
         match preference {
             FrameTransportPreference::Auto | FrameTransportPreference::PreferNative => {
                 Ok(TransportChange::Unchanged)
@@ -448,13 +448,15 @@ impl MediaPlaybackSession for GstreamerPlayback {
             FrameTransportPreference::CpuOnly => {
                 #[cfg(target_os = "linux")]
                 {
-                    self.switch_to_cpu_fallback().map(|changed| {
-                        if changed {
-                            TransportChange::Reconfigured
-                        } else {
-                            TransportChange::Unchanged
-                        }
-                    })
+                    self.switch_to_cpu_fallback()
+                        .map(|changed| {
+                            if changed {
+                                TransportChange::Reconfigured
+                            } else {
+                                TransportChange::Unchanged
+                            }
+                        })
+                        .map_err(media_backend_error)
                 }
 
                 #[cfg(not(target_os = "linux"))]
@@ -464,6 +466,94 @@ impl MediaPlaybackSession for GstreamerPlayback {
             }
         }
     }
+}
+
+fn media_backend_error(error: anyhow::Error) -> MediaError {
+    MediaError::backend(error.to_string())
+}
+
+fn media_error_from_gstreamer_message(
+    error: &gst::message::Error,
+    source: &MediaSource,
+) -> MediaError {
+    let glib_error = error.error();
+    let status = error.details().and_then(|details| {
+        ["http-status-code", "status-code"]
+            .into_iter()
+            .find_map(|name| {
+                details
+                    .get::<i32>(name)
+                    .ok()
+                    .and_then(|value| u16::try_from(value).ok())
+            })
+    });
+    let (kind, recovery) = if matches!(status, Some(401 | 403)) {
+        (MediaErrorKind::Authentication, MediaRecovery::ReloadSource)
+    } else if status == Some(404) {
+        (MediaErrorKind::SourceNotFound, MediaRecovery::None)
+    } else if let Some(status) = status {
+        (
+            MediaErrorKind::Network {
+                status: Some(status),
+            },
+            if status == 408 || status == 429 || status >= 500 {
+                MediaRecovery::Retry
+            } else {
+                MediaRecovery::None
+            },
+        )
+    } else if let Some(resource) = glib_error.kind::<gst::ResourceError>() {
+        match resource {
+            gst::ResourceError::NotAuthorized => {
+                (MediaErrorKind::Authentication, MediaRecovery::ReloadSource)
+            }
+            gst::ResourceError::NotFound => (MediaErrorKind::SourceNotFound, MediaRecovery::None),
+            gst::ResourceError::OpenRead | gst::ResourceError::Read | gst::ResourceError::Busy
+                if source.uri().starts_with("http://") || source.uri().starts_with("https://") =>
+            {
+                (
+                    MediaErrorKind::Network { status: None },
+                    MediaRecovery::Retry,
+                )
+            }
+            _ => (MediaErrorKind::Backend, MediaRecovery::Retry),
+        }
+    } else if let Some(stream) = glib_error.kind::<gst::StreamError>() {
+        match stream {
+            gst::StreamError::CodecNotFound => {
+                (MediaErrorKind::UnsupportedCodec, MediaRecovery::None)
+            }
+            gst::StreamError::TypeNotFound
+            | gst::StreamError::WrongType
+            | gst::StreamError::Demux
+            | gst::StreamError::Format => {
+                (MediaErrorKind::UnsupportedContainer, MediaRecovery::None)
+            }
+            gst::StreamError::Decode => (MediaErrorKind::Decode, MediaRecovery::None),
+            _ => (MediaErrorKind::Backend, MediaRecovery::None),
+        }
+    } else {
+        let element_name = error
+            .src()
+            .and_then(|source| source.downcast_ref::<gst::Element>())
+            .map(|element| element.name().to_ascii_lowercase());
+        match element_name.as_deref() {
+            Some(name) if name.contains("audio") && name.contains("sink") => {
+                (MediaErrorKind::AudioOutput, MediaRecovery::Retry)
+            }
+            Some(name) if name.contains("video") && name.contains("sink") => {
+                (MediaErrorKind::VideoOutput, MediaRecovery::Retry)
+            }
+            _ => (MediaErrorKind::Backend, MediaRecovery::Retry),
+        }
+    };
+
+    let mut message = glib_error.to_string();
+    if let Some(debug) = error.debug() {
+        message.push_str(": ");
+        message.push_str(&debug);
+    }
+    MediaError::new(kind, source.redact_error_message(&message), recovery)
 }
 
 fn buffering_percent(percent: i32) -> u8 {
@@ -744,9 +834,11 @@ mod tests {
 
     use gpui::{SurfaceFrameBacking, SurfaceHandle};
 
+    use crate::{MediaErrorKind, MediaRecovery, MediaSource, NetworkSourceOptions};
+
     use super::{
-        add_required_allocation_metas, appsink_caps, buffering_percent, sample_to_surface_frame,
-        video_frame_geometry,
+        add_required_allocation_metas, appsink_caps, buffering_percent,
+        media_error_from_gstreamer_message, sample_to_surface_frame, video_frame_geometry,
     };
 
     #[test]
@@ -754,6 +846,52 @@ mod tests {
         assert_eq!(buffering_percent(-1), 0);
         assert_eq!(buffering_percent(42), 42);
         assert_eq!(buffering_percent(101), 100);
+    }
+
+    #[test]
+    fn classifies_http_authentication_and_redacts_diagnostics() {
+        crate::gstreamer_backend::initialize().unwrap();
+        let source = MediaSource::from_uri("https://example.com/video?token=signed-secret")
+            .unwrap()
+            .with_network_options(
+                NetworkSourceOptions::default()
+                    .with_bearer_token("bearer-secret")
+                    .unwrap(),
+            );
+        let details = gst::Structure::builder("http-error-details")
+            .field("http-status-code", 401i32)
+            .build();
+        let message = gst::message::Error::builder(
+            gst::ResourceError::NotAuthorized,
+            "authorization failed",
+        )
+        .debug("request https://example.com/video?token=signed-secret used Bearer bearer-secret")
+        .details(details)
+        .build();
+        let gst::MessageView::Error(error) = message.view() else {
+            panic!("expected a GStreamer error message");
+        };
+
+        let error = media_error_from_gstreamer_message(error, &source);
+        assert_eq!(error.kind, MediaErrorKind::Authentication);
+        assert_eq!(error.recovery, MediaRecovery::ReloadSource);
+        assert!(!error.message.contains("signed-secret"));
+        assert!(!error.message.contains("bearer-secret"));
+    }
+
+    #[test]
+    fn maps_missing_resources_without_retry() {
+        crate::gstreamer_backend::initialize().unwrap();
+        let source = MediaSource::from_uri("file:///missing.mp4").unwrap();
+        let message =
+            gst::message::Error::new(gst::ResourceError::NotFound, "resource was not found");
+        let gst::MessageView::Error(error) = message.view() else {
+            panic!("expected a GStreamer error message");
+        };
+
+        let error = media_error_from_gstreamer_message(error, &source);
+        assert_eq!(error.kind, MediaErrorKind::SourceNotFound);
+        assert!(!error.retryable());
     }
 
     #[test]

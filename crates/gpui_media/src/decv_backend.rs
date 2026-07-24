@@ -20,8 +20,9 @@ use gpui::{
 };
 
 use crate::{
-    MediaBackend, MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
-    MediaPlaybackSession, MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
+    MediaBackend, MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind,
+    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult,
+    MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
 };
 
 const VIDEO_HANDLER: FourCc = FourCc::new(*b"vide");
@@ -109,12 +110,10 @@ impl MediaBackend for DecvBackend {
         &self,
         request: MediaPlaybackRequest,
         output: MediaOutputSink,
-    ) -> Result<Box<dyn MediaPlaybackSession>> {
-        Ok(Box::new(DecvSession::open(
-            request.source,
-            output,
-            self.options,
-        )?))
+    ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
+        DecvSession::open(request.source, output, self.options)
+            .map(|session| Box::new(session) as Box<dyn MediaPlaybackSession>)
+            .map_err(decv_open_error)
     }
 }
 
@@ -151,7 +150,11 @@ impl DecvSession {
                         "decv playback failed for {}: {error:#}",
                         worker_path.display()
                     );
-                    output.emit(MediaBackendEvent::Error(error.to_string().into()));
+                    output.emit(MediaBackendEvent::Error(Arc::new(MediaError::new(
+                        MediaErrorKind::Decode,
+                        error.to_string(),
+                        MediaRecovery::None,
+                    ))));
                 }
             })
             .context("failed to start decv playback thread")?;
@@ -163,10 +166,14 @@ impl DecvSession {
         })
     }
 
-    fn send(&self, command: Command) -> Result<()> {
-        self.commands
-            .send(command)
-            .map_err(|_| anyhow!("decv playback thread has stopped"))
+    fn send(&self, command: Command) -> MediaResult<()> {
+        self.commands.send(command).map_err(|_| {
+            MediaError::new(
+                MediaErrorKind::Backend,
+                "decv playback thread has stopped",
+                MediaRecovery::Retry,
+            )
+        })
     }
 }
 
@@ -180,14 +187,14 @@ impl MediaPlaybackSession for DecvSession {
         }
     }
 
-    fn play(&mut self) -> Result<()> {
+    fn play(&mut self) -> MediaResult<()> {
         self.timeline
             .lock_unpoisoned()
             .set_playing(true, Instant::now());
         self.send(Command::Play)
     }
 
-    fn pause(&mut self) -> Result<()> {
+    fn pause(&mut self) -> MediaResult<()> {
         self.timeline
             .lock_unpoisoned()
             .set_playing(false, Instant::now());
@@ -198,14 +205,14 @@ impl MediaPlaybackSession for DecvSession {
         self.timeline.lock_unpoisoned().snapshot(Instant::now())
     }
 
-    fn reload(&mut self, autoplay: bool) -> Result<()> {
+    fn reload(&mut self, autoplay: bool) -> MediaResult<()> {
         self.timeline
             .lock_unpoisoned()
             .reset(Duration::ZERO, autoplay, Instant::now());
         self.send(Command::Reload { autoplay })
     }
 
-    fn seek_to(&mut self, position: Duration, mode: SeekMode) -> Result<()> {
+    fn seek_to(&mut self, position: Duration, mode: SeekMode) -> MediaResult<()> {
         let mut timeline = self.timeline.lock_unpoisoned();
         let target = timeline
             .duration
@@ -217,6 +224,26 @@ impl MediaPlaybackSession for DecvSession {
             position: target,
             mode,
         })
+    }
+}
+
+fn decv_open_error(error: anyhow::Error) -> MediaError {
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        MediaError::new(
+            MediaErrorKind::SourceNotFound,
+            error.to_string(),
+            MediaRecovery::None,
+        )
+    } else {
+        MediaError::new(
+            MediaErrorKind::UnsupportedContainer,
+            error.to_string(),
+            MediaRecovery::None,
+        )
     }
 }
 

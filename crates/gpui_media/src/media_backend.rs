@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Result, bail};
 use gpui::GpuSpecs;
 
-use crate::{MediaSource, PlaybackTimeline, SeekMode, VideoFrame, stats::PlaybackCounters};
+use crate::{
+    MediaError, MediaResult, MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
+    stats::PlaybackCounters,
+};
 
 /// A backend-independent event produced by a media playback session.
 #[derive(Clone, Debug)]
@@ -14,7 +17,7 @@ pub enum MediaBackendEvent {
     Ready,
     Buffering(u8),
     Ended,
-    Error(Arc<str>),
+    Error(Arc<MediaError>),
 }
 
 /// Media capabilities exposed by one opened playback session.
@@ -147,30 +150,38 @@ impl MediaOutputSink {
 pub trait MediaPlaybackSession: Send {
     fn capabilities(&self) -> MediaCapabilities;
 
-    fn play(&mut self) -> Result<()>;
-    fn pause(&mut self) -> Result<()>;
+    fn play(&mut self) -> MediaResult<()>;
+    fn pause(&mut self) -> MediaResult<()>;
     fn timeline(&self) -> PlaybackTimeline;
 
-    fn reload(&mut self, _autoplay: bool) -> Result<()> {
-        bail!("this media backend cannot reload its active source")
+    fn reload(&mut self, _autoplay: bool) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend cannot reload its active source",
+        ))
     }
 
-    fn seek_to(&mut self, _position: Duration, _mode: SeekMode) -> Result<()> {
-        bail!("this media backend does not support seeking")
+    fn seek_to(&mut self, _position: Duration, _mode: SeekMode) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend does not support seeking",
+        ))
     }
 
-    fn step_forward(&mut self, _frames: u64) -> Result<()> {
-        bail!("this media backend does not support video frame stepping")
+    fn step_forward(&mut self, _frames: u64) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend does not support video frame stepping",
+        ))
     }
 
-    fn set_playback_rate(&mut self, _rate: f64) -> Result<()> {
-        bail!("this media backend does not support playback-rate changes")
+    fn set_playback_rate(&mut self, _rate: f64) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend does not support playback-rate changes",
+        ))
     }
 
     fn set_volume(&mut self, _volume: f64) {}
     fn set_muted(&mut self, _muted: bool) {}
 
-    fn restart(&mut self) -> Result<()> {
+    fn restart(&mut self) -> MediaResult<()> {
         self.seek_to(Duration::ZERO, SeekMode::KeyFrame)?;
         self.play()
     }
@@ -178,8 +189,10 @@ pub trait MediaPlaybackSession: Send {
     fn set_frame_transport_preference(
         &mut self,
         _preference: FrameTransportPreference,
-    ) -> Result<TransportChange> {
-        bail!("this media backend cannot change video frame transport")
+    ) -> MediaResult<TransportChange> {
+        Err(MediaError::unsupported(
+            "this media backend cannot change video frame transport",
+        ))
     }
 }
 
@@ -200,7 +213,7 @@ pub trait MediaBackend: Send + Sync + 'static {
         &self,
         request: MediaPlaybackRequest,
         output: MediaOutputSink,
-    ) -> Result<Box<dyn MediaPlaybackSession>>;
+    ) -> MediaResult<Box<dyn MediaPlaybackSession>>;
 
     fn open_frame_extractor(
         &self,
@@ -213,7 +226,7 @@ pub trait MediaBackend: Send + Sync + 'static {
     }
 }
 
-pub(crate) fn default_media_backend() -> Result<Arc<dyn MediaBackend>> {
+pub(crate) fn default_media_backend() -> MediaResult<Arc<dyn MediaBackend>> {
     #[cfg(feature = "backend-gstreamer")]
     {
         return Ok(Arc::new(crate::gstreamer_backend::GstreamerBackend));
@@ -226,9 +239,9 @@ pub(crate) fn default_media_backend() -> Result<Arc<dyn MediaBackend>> {
 
     #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]
     {
-        bail!(
-            "gpui_media has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend"
-        )
+        Err(MediaError::backend(
+            "gpui_media has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend",
+        ))
     }
 }
 

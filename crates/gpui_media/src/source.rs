@@ -8,11 +8,22 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 /// A media URI accepted by the playback backend.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MediaSource {
     uri: String,
     display_name: String,
     network: NetworkSourceOptions,
+}
+
+impl fmt::Debug for MediaSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaSource")
+            .field("uri", &redacted_uri(&self.uri))
+            .field("display_name", &self.display_name)
+            .field("network", &self.network)
+            .finish()
+    }
 }
 
 /// HTTP-oriented options available to playback backends.
@@ -232,8 +243,8 @@ impl MediaSource {
             .path_segments()
             .and_then(|mut segments| segments.next_back())
             .filter(|name| !name.is_empty())
-            .unwrap_or(parsed.as_str())
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| safe_uri_label(&parsed));
 
         Ok(Self {
             uri,
@@ -295,6 +306,52 @@ impl MediaSource {
 
     pub fn network_options(&self) -> &NetworkSourceOptions {
         &self.network
+    }
+
+    #[cfg(any(feature = "backend-gstreamer", test))]
+    pub(crate) fn redact_error_message(&self, message: &str) -> String {
+        let mut redacted = message.replace(&self.uri, &redacted_uri(&self.uri));
+        for secret in self.network.sensitive_values() {
+            if !secret.is_empty() {
+                redacted = redacted.replace(secret, "[REDACTED]");
+            }
+            if let Some(token) = secret.strip_prefix("Bearer ")
+                && !token.is_empty()
+            {
+                redacted = redacted.replace(token, "[REDACTED]");
+            }
+        }
+        redacted
+    }
+}
+
+impl NetworkSourceOptions {
+    #[cfg(any(feature = "backend-gstreamer", test))]
+    fn sensitive_values(&self) -> impl Iterator<Item = &str> {
+        self.headers
+            .values()
+            .map(String::as_str)
+            .chain(self.user_id.iter().map(String::as_str))
+            .chain(self.user_password.iter().map(String::as_str))
+            .chain(self.proxy.iter().map(String::as_str))
+    }
+}
+
+fn redacted_uri(uri: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(uri) else {
+        return "[invalid media URI]".to_owned();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.into()
+}
+
+fn safe_uri_label(uri: &url::Url) -> String {
+    match uri.host_str() {
+        Some(host) => format!("{}://{host}", uri.scheme()),
+        None => uri.scheme().to_owned(),
     }
 }
 
@@ -417,5 +474,50 @@ mod tests {
             .with_network_options(options.clone());
 
         assert_eq!(source.network_options(), &options);
+    }
+
+    #[test]
+    fn debug_redacts_uri_and_network_credentials() {
+        let source =
+            MediaSource::from_uri("https://alice:secret@example.com/watch?token=signed-value")
+                .unwrap()
+                .with_network_options(
+                    NetworkSourceOptions::default()
+                        .with_bearer_token("bearer-secret")
+                        .unwrap()
+                        .with_basic_auth("alice", "basic-secret"),
+                );
+
+        let debug = format!("{source:?}");
+        assert!(debug.contains("https://example.com/watch"));
+        for secret in [
+            "alice",
+            "secret",
+            "signed-value",
+            "bearer-secret",
+            "basic-secret",
+        ] {
+            assert!(!debug.contains(secret), "{secret:?} leaked in {debug}");
+        }
+    }
+
+    #[test]
+    fn backend_messages_are_redacted_with_the_source() {
+        let source = MediaSource::from_uri("https://example.com/watch?token=signed-value")
+            .unwrap()
+            .with_network_options(
+                NetworkSourceOptions::default()
+                    .with_bearer_token("bearer-secret")
+                    .unwrap(),
+            );
+        let message = format!(
+            "request {} failed with Authorization: Bearer bearer-secret",
+            source.uri()
+        );
+
+        let redacted = source.redact_error_message(&message);
+        assert!(redacted.contains("https://example.com/watch"));
+        assert!(!redacted.contains("signed-value"));
+        assert!(!redacted.contains("bearer-secret"));
     }
 }
