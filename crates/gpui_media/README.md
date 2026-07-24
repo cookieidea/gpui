@@ -213,6 +213,23 @@ the probe and call `fit_video_window_bounds` directly. The initial-frame path
 does not seek, so WebDAV servers without HTTP byte-range support can still be
 probed.
 
+Run the complete borderless example with:
+
+```sh
+cargo run -p gpui_media --example borderless -- /path/to/video.mp4
+```
+
+The example marks the window as non-resizable. GPUI exposes that as equal
+minimum and maximum `xdg_toplevel` sizes on Wayland, so compositors that
+automatically float fixed-size windows, including niri, retain the fitted
+video size. It also uses the application id `gpui-media-borderless` for
+compositors where an explicit window rule is preferred.
+
+The entire content area starts a native window move on a left-button press.
+Press Escape to close the window. The example keeps the native video size when
+it fits and reduces oversized video proportionally to the selected display's
+visible area.
+
 Run the custom play/pause and timeline example with:
 
 ```sh

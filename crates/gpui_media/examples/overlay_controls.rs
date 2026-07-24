@@ -229,8 +229,21 @@ fn main() -> Result<()> {
             move |window, cx| {
                 window.set_window_title("gpui_media · custom overlay controls");
                 let player = cx.new(|cx| {
-                    VideoPlayer::new_in_window(source, VideoPlayerOptions::default(), window, cx)
-                        .expect("failed to create video player")
+                    #[cfg(feature = "backend-decv")]
+                    let player = VideoPlayer::builder(source)
+                        .options(VideoPlayerOptions::default())
+                        .backend(gpui_media::DecvBackend::new())
+                        .build_in_window(window, cx)
+                        .expect("failed to create decv video player");
+                    #[cfg(not(feature = "backend-decv"))]
+                    let player = VideoPlayer::new_in_window(
+                        source,
+                        VideoPlayerOptions::default(),
+                        window,
+                        cx,
+                    )
+                    .expect("failed to create video player");
+                    player
                 });
                 cx.new(|cx| VideoControlsDemo::new(player, cx))
             },

@@ -69,11 +69,16 @@ impl GstreamerPlayback {
             .sync(true)
             .build();
 
+        let output_for_preroll = output.clone();
         let output_for_samples = output.clone();
         let sequence = Arc::new(AtomicU64::new(1));
+        let sequence_for_preroll = sequence.clone();
         let surface_handle = SurfaceHandle::new();
+        let surface_handle_for_preroll = surface_handle.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device = Arc::new(std::sync::RwLock::new(None));
+        #[cfg(target_os = "linux")]
+        let producer_drm_device_for_preroll = producer_drm_device.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_samples = producer_drm_device.clone();
 
@@ -83,26 +88,33 @@ impl GstreamerPlayback {
                     add_required_allocation_metas(query);
                     true
                 })
+                .new_preroll(move |sink| {
+                    let sample = sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?;
+                    publish_appsink_sample(
+                        &sample,
+                        &output_for_preroll,
+                        &surface_handle_for_preroll,
+                        &sequence_for_preroll,
+                        #[cfg(target_os = "linux")]
+                        producer_drm_device_for_preroll
+                            .read()
+                            .ok()
+                            .and_then(|device| *device),
+                    )
+                })
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let next_sequence = sequence.fetch_add(1, Ordering::Relaxed);
-                    let frame = sample_to_video_frame(
+                    publish_appsink_sample(
                         &sample,
-                        surface_handle.clone(),
-                        next_sequence,
+                        &output_for_samples,
+                        &surface_handle,
+                        &sequence,
                         #[cfg(target_os = "linux")]
                         producer_drm_device_for_samples
                             .read()
                             .ok()
                             .and_then(|device| *device),
                     )
-                    .map_err(|error| {
-                        log::warn!("discarded decoded video frame: {error:#}");
-                        gst::FlowError::Error
-                    })?;
-
-                    output_for_samples.publish_video_frame(frame);
-                    Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
         );
@@ -318,6 +330,30 @@ impl GstreamerPlayback {
         }
         result
     }
+}
+
+fn publish_appsink_sample(
+    sample: &gst::Sample,
+    output: &MediaOutputSink,
+    surface_handle: &SurfaceHandle,
+    sequence: &AtomicU64,
+    #[cfg(target_os = "linux")] producer_drm_device: Option<gpui::DrmDevice>,
+) -> Result<gst::FlowSuccess, gst::FlowError> {
+    let next_sequence = sequence.fetch_add(1, Ordering::Relaxed);
+    let frame = sample_to_video_frame(
+        sample,
+        surface_handle.clone(),
+        next_sequence,
+        #[cfg(target_os = "linux")]
+        producer_drm_device,
+    )
+    .map_err(|error| {
+        log::warn!("discarded decoded video frame: {error:#}");
+        gst::FlowError::Error
+    })?;
+
+    output.publish_video_frame(frame);
+    Ok(gst::FlowSuccess::Ok)
 }
 
 impl MediaBackend for GstreamerBackend {

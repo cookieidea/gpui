@@ -435,6 +435,7 @@ fn playback_worker(
         let frame = pending_frame
             .take()
             .expect("the scheduled frame remains pending");
+        let completed_preroll = preroll;
         sequence = sequence.wrapping_add(1);
         let frame = Arc::new(convert_frame(frame, surface_handle.clone(), sequence)?);
         let timestamp = frame.timestamp().unwrap_or(timestamp);
@@ -443,6 +444,9 @@ fn playback_worker(
             .present(timestamp, Instant::now());
         output.publish_video_frame(frame);
         preroll = false;
+        if completed_preroll {
+            output.emit(MediaBackendEvent::Ready);
+        }
         if output.is_closed() {
             return Ok(());
         }

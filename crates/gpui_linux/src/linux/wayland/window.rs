@@ -110,6 +110,7 @@ pub struct WaylandWindowState {
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
+    is_resizable: bool,
     decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
@@ -268,8 +269,13 @@ impl WaylandSurfaceState {
             None
         };
 
-        if let Some(size) = params.window_min_size {
-            toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
+        if !params.is_resizable {
+            let size = xdg_toplevel_size(params.bounds.size);
+            toplevel.set_min_size(size.width, size.height);
+            toplevel.set_max_size(size.width, size.height);
+        } else if let Some(size) = params.window_min_size {
+            let size = xdg_toplevel_size(size);
+            toplevel.set_min_size(size.width, size.height);
         }
 
         // Attempt to set up window decorations based on the requested configuration
@@ -306,6 +312,10 @@ pub struct WaylandPopupSurfaceState {
     // Kept so the popup can be re-anchored via `xdg_popup.reposition` when resized.
     options: PopupOptions,
     next_reposition_token: Cell<u32>,
+}
+
+fn xdg_toplevel_size(size: Size<Pixels>) -> Size<i32> {
+    size.map(|value| (f32::from(value).round() as i32).max(1))
 }
 
 fn build_popup_positioner(
@@ -537,12 +547,13 @@ impl WaylandWindowState {
                 xdg_state.toplevel.set_app_id(app_id.clone());
             }
 
-            // Set max window size based on the GPU's maximum texture dimension.
-            // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
+            if options.is_resizable {
+                // Prevent a resizable window from exceeding what the GPU can render.
+                let max_texture_size = renderer.max_texture_size() as i32;
+                xdg_state
+                    .toplevel
+                    .set_max_size(max_texture_size, max_texture_size);
+            }
         }
 
         Ok(Self {
@@ -561,6 +572,7 @@ impl WaylandWindowState {
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
+            is_resizable: options.is_resizable,
             decorations: WindowDecorations::Client,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
@@ -1440,6 +1452,14 @@ impl PlatformWindow for WaylandWindow {
             return;
         }
 
+        if !state.is_resizable
+            && let Some(toplevel) = state.surface_state.toplevel()
+        {
+            let fixed_size = xdg_toplevel_size(size);
+            toplevel.set_min_size(fixed_size.width, fixed_size.height);
+            toplevel.set_max_size(fixed_size.width, fixed_size.height);
+        }
+
         // Keep window geometry consistent with configure handling. On Wayland, window geometry is
         // surface-local: resizing should not attempt to translate the window; the compositor
         // controls placement. We also account for client-side decoration insets and tiling.
@@ -2013,4 +2033,20 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{px, size};
+
+    use super::xdg_toplevel_size;
+
+    #[test]
+    fn xdg_toplevel_sizes_are_rounded_and_nonzero() {
+        assert_eq!(
+            xdg_toplevel_size(size(px(450.4), px(799.6))),
+            size(450, 800)
+        );
+        assert_eq!(xdg_toplevel_size(size(px(0.0), px(-1.0))), size(1, 1));
+    }
 }

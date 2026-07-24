@@ -217,7 +217,9 @@ impl VideoPlayer {
                     if let Err(error) = player.check_frame_import(cx) {
                         player.set_state(PlaybackState::Error(error.to_string().into()), cx);
                     }
-                    if let Some(timestamp) = frame.timestamp() {
+                    if player.state_after_seek.is_none()
+                        && let Some(timestamp) = frame.timestamp()
+                    {
                         player.timeline = PlaybackTimeline::new(
                             timestamp,
                             player.timeline.duration(),
@@ -230,7 +232,12 @@ impl VideoPlayer {
                         cx.emit(VideoPlayerEvent::FrameTransportChanged(transport));
                     }
                     player.frame = Some(frame.clone());
-                    player.finish_pending_transition(cx);
+                    // A frame may already be queued when a new seek begins.
+                    // Such a stale frame can finish initial loading, but only
+                    // the backend's causal `Ready` event may finish a seek.
+                    if player.state_after_seek.is_none() {
+                        player.finish_pending_transition(cx);
+                    }
                     cx.emit(VideoPlayerEvent::FrameReady(frame));
                     cx.notify();
                 });
@@ -247,6 +254,7 @@ impl VideoPlayer {
                 this.update(cx, |player, cx| match event {
                     MediaBackendEvent::Ready => {
                         player.finish_pending_transition(cx);
+                        player.refresh_timeline(cx);
                     }
                     MediaBackendEvent::Buffering(percent) => {
                         let was_buffering = player.is_buffering();
@@ -608,6 +616,14 @@ impl VideoPlayer {
 
     /// Refreshes duration, position and seekability immediately.
     pub fn refresh_timeline(&mut self, cx: &mut Context<Self>) {
+        // A backend may continue reporting its running clock while an
+        // asynchronous seek is still decoding toward the requested position.
+        // Keep the public timeline pinned to the seek target until the backend
+        // confirms completion with `MediaBackendEvent::Ready`.
+        if !accept_backend_timeline(&self.state) {
+            return;
+        }
+
         let timeline = self.playback.timeline();
         if timeline != self.timeline {
             self.timeline = timeline;
@@ -709,11 +725,22 @@ fn normalize_volume(volume: f64) -> f64 {
     }
 }
 
+fn accept_backend_timeline(state: &PlaybackState) -> bool {
+    state != &PlaybackState::Seeking
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{multiply_duration, normalize_volume};
+    use super::{PlaybackState, accept_backend_timeline, multiply_duration, normalize_volume};
+
+    #[test]
+    fn backend_timeline_is_suspended_while_seeking() {
+        assert!(!accept_backend_timeline(&PlaybackState::Seeking));
+        assert!(accept_backend_timeline(&PlaybackState::Playing));
+        assert!(accept_backend_timeline(&PlaybackState::Paused));
+    }
 
     #[test]
     fn frame_step_duration_saturates() {
