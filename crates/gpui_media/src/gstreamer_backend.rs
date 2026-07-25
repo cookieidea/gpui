@@ -25,6 +25,7 @@ mod core_video;
 #[cfg(target_os = "linux")]
 mod dma_buf;
 mod frame_extractor;
+mod iso_bmff;
 
 /// Built-in GStreamer playback backend.
 #[derive(Clone, Copy, Debug, Default)]
@@ -54,6 +55,7 @@ pub(crate) struct GstreamerPlayback {
     bus: gst::Bus,
     bus_shutdown: Arc<AtomicBool>,
     bus_thread: Option<JoinHandle<()>>,
+    container_duration: Option<Duration>,
     #[cfg(target_os = "linux")]
     using_cpu_fallback: AtomicBool,
 }
@@ -65,6 +67,7 @@ impl GstreamerPlayback {
         output: MediaOutputSink,
     ) -> MediaResult<Self> {
         initialize()?;
+        let container_duration = iso_bmff::fragmented_duration(source);
 
         let caps = appsink_caps(gpu_specs)?;
         let appsink = gst_app::AppSink::builder()
@@ -199,6 +202,7 @@ impl GstreamerPlayback {
             bus,
             bus_shutdown,
             bus_thread: Some(bus_thread),
+            container_duration,
             #[cfg(target_os = "linux")]
             using_cpu_fallback: AtomicBool::new(false),
         })
@@ -239,10 +243,11 @@ impl GstreamerPlayback {
             .query_position::<gst::ClockTime>()
             .map(Duration::from)
             .unwrap_or_default();
-        let duration = self
+        let queried_duration = self
             .playbin
             .query_duration::<gst::ClockTime>()
             .map(Duration::from);
+        let duration = self.container_duration.max(queried_duration);
         let mut seeking = gst::query::Seeking::new(gst::Format::Time);
         let seekable = self.playbin.query(&mut seeking) && seeking.result().0;
 
