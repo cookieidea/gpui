@@ -22,9 +22,9 @@ backend-decv = [
 
 [dependencies]
 async-channel.workspace = true
-decv-core = { git = "https://github.com/cradiy/decv", rev = "57ad80f0213a6a68816a99ebb1f25d651ffa9258", optional = true }
-decv-h264 = { git = "https://github.com/cradiy/decv", rev = "57ad80f0213a6a68816a99ebb1f25d651ffa9258", optional = true }
-decv-mp4 = { git = "https://github.com/cradiy/decv", rev = "57ad80f0213a6a68816a99ebb1f25d651ffa9258", optional = true }
+decv-core = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
+decv-h264 = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
+decv-mp4 = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
 gpui.workspace = true
 gst = { package = "gstreamer", version = "0.25", optional = true }
 gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"], optional = true }
