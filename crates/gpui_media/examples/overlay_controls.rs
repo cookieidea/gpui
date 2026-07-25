@@ -46,14 +46,31 @@ impl VideoControlsDemo {
 
     fn begin_scrub(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.dragging_timeline = true;
-        self.scrub_progress = Some(self.progress_at(event.position.x));
+        let progress = self.progress_at(event.position.x);
+        self.scrub_progress = Some(progress);
+        self.preview_scrub(progress, cx);
         cx.notify();
     }
 
     fn update_scrub(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.dragging_timeline {
-            self.scrub_progress = Some(self.progress_at(event.position.x));
+            let progress = self.progress_at(event.position.x);
+            self.scrub_progress = Some(progress);
+            self.preview_scrub(progress, cx);
             cx.notify();
+        }
+    }
+
+    fn preview_scrub(&mut self, progress: f64, cx: &mut Context<Self>) {
+        let Some(duration) = self.player.read(cx).duration() else {
+            return;
+        };
+        let target = duration.mul_f64(progress);
+        let result = self.player.update(cx, |player, cx| {
+            player.seek_to(target, SeekMode::Interactive, cx)
+        });
+        if let Err(error) = result {
+            eprintln!("gpui_media controls example: {error:#}");
         }
     }
 

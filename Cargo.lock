@@ -763,7 +763,7 @@ dependencies = [
 [[package]]
 name = "bit-readers"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 
 [[package]]
 name = "bit-set"
@@ -1746,7 +1746,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "decv"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 dependencies = [
  "decv-audio",
  "decv-core",
@@ -1757,7 +1757,7 @@ dependencies = [
 [[package]]
 name = "decv-audio"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 dependencies = [
  "decv-core",
  "symphonia",
@@ -1766,12 +1766,12 @@ dependencies = [
 [[package]]
 name = "decv-core"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 
 [[package]]
 name = "decv-h264"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 dependencies = [
  "bit-readers",
  "decv-core",
@@ -1782,7 +1782,7 @@ dependencies = [
 [[package]]
 name = "decv-mp4"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
 dependencies = [
  "decv-core",
 ]

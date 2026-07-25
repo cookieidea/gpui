@@ -22,7 +22,7 @@ backend-decv = [
 [dependencies]
 async-channel.workspace = true
 cpal = { workspace = true, optional = true }
-decv = { git = "https://github.com/cradiy/decv", rev = "2f939ffd13ae94805281df2ba35d2f9155ffc1fd", optional = true }
+decv = { git = "https://github.com/cradiy/decv", rev = "a41fbb5fe75604d64973560d702c5f7885104992", optional = true }
 gpui.workspace = true
 gst = { package = "gstreamer", version = "0.25", optional = true }
 gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"], optional = true }

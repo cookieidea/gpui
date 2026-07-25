@@ -5,6 +5,10 @@ use std::time::Duration;
 pub enum SeekMode {
     /// Decode forward from the preceding keyframe to reach the requested time.
     Accurate,
+    /// Produce a latency-bounded preview while an interactive seek is active.
+    ///
+    /// Finish the interaction with an [`Accurate`](Self::Accurate) seek.
+    Interactive,
     /// Stop at a nearby keyframe for a faster seek.
     #[default]
     KeyFrame,

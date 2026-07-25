@@ -38,6 +38,7 @@ const AUDIO_PREROLL_TARGET: Duration = Duration::from_millis(100);
 const AUDIO_CLOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const VIDEO_SEEK_CHECKPOINT_LIMIT: usize = 4;
 const VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES: usize = 12;
 
 /// Reconstruction parallelism used by the built-in `decv` H.264 decoder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,9 +64,19 @@ impl From<DecvParallelism> for H264Parallelism {
 }
 
 /// Options applied when a [`DecvBackend`] opens a playback session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecvBackendOptions {
     parallelism: DecvParallelism,
+    interactive_seek_maximum_input_samples: usize,
+}
+
+impl Default for DecvBackendOptions {
+    fn default() -> Self {
+        Self {
+            parallelism: DecvParallelism::default(),
+            interactive_seek_maximum_input_samples: DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES,
+        }
+    }
 }
 
 impl DecvBackendOptions {
@@ -80,6 +91,16 @@ impl DecvBackendOptions {
 
     pub fn selected_parallelism(self) -> DecvParallelism {
         self.parallelism
+    }
+
+    /// Sets the compressed-sample budget used by interactive seeks.
+    pub fn interactive_seek_maximum_input_samples(mut self, maximum: usize) -> Self {
+        self.interactive_seek_maximum_input_samples = maximum;
+        self
+    }
+
+    pub fn selected_interactive_seek_maximum_input_samples(self) -> usize {
+        self.interactive_seek_maximum_input_samples
     }
 }
 
@@ -104,6 +125,11 @@ impl DecvBackend {
 
     pub fn parallelism(mut self, parallelism: DecvParallelism) -> Self {
         self.options = self.options.parallelism(parallelism);
+        self
+    }
+
+    pub fn interactive_seek_maximum_input_samples(mut self, maximum: usize) -> Self {
+        self.options = self.options.interactive_seek_maximum_input_samples(maximum);
         self
     }
 
@@ -163,6 +189,7 @@ impl DecvSession {
                     &worker_latest_seek_generation,
                     &output,
                     options.parallelism,
+                    options.interactive_seek_maximum_input_samples,
                 ) {
                     log::error!(
                         "decv playback failed for {}: {error}",
@@ -237,6 +264,10 @@ impl MediaPlaybackSession for DecvSession {
     }
 
     fn seek_to(&mut self, position: Duration, mode: SeekMode) -> MediaResult<()> {
+        let generation = self
+            .latest_seek_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         let mut timeline = self.timeline.lock_unpoisoned();
         let target = timeline
             .duration
@@ -244,10 +275,6 @@ impl MediaPlaybackSession for DecvSession {
         let playing = timeline.playing;
         timeline.begin_seek(target, playing, Instant::now());
         drop(timeline);
-        let generation = self
-            .latest_seek_generation
-            .fetch_add(1, Ordering::AcqRel)
-            .wrapping_add(1);
         self.send(Command::Seek {
             position: target,
             mode,
@@ -317,6 +344,49 @@ fn coalesce_seek_command(
 
 fn seek_generation_is_current(handled: u64, latest: u64) -> bool {
     handled == latest
+}
+
+struct SeekPlaybackState {
+    handled_generation: u64,
+    interactive_preroll: bool,
+    interactive_exact_target: Option<Duration>,
+    reusable_interactive_exact_target: Option<Duration>,
+    ready_without_frame: Option<(Duration, u64)>,
+}
+
+impl SeekPlaybackState {
+    fn new(handled_generation: u64) -> Self {
+        Self {
+            handled_generation,
+            interactive_preroll: false,
+            interactive_exact_target: None,
+            reusable_interactive_exact_target: None,
+            ready_without_frame: None,
+        }
+    }
+
+    fn reset_interactive(&mut self) {
+        self.interactive_preroll = false;
+        self.interactive_exact_target = None;
+        self.reusable_interactive_exact_target = None;
+        self.ready_without_frame = None;
+    }
+
+    fn begin_interactive_preroll(&mut self, exact_target: Option<Duration>) {
+        self.interactive_preroll = true;
+        self.interactive_exact_target = exact_target;
+        self.reusable_interactive_exact_target = None;
+        self.ready_without_frame = None;
+    }
+
+    fn complete_interactive_preroll(&mut self) {
+        self.interactive_preroll = false;
+        self.reusable_interactive_exact_target = self.interactive_exact_target.take();
+    }
+
+    fn can_reuse_interactive_exact(&self, target: Duration) -> bool {
+        self.reusable_interactive_exact_target == Some(target)
+    }
 }
 
 struct Probe {
@@ -407,6 +477,7 @@ fn playback_worker(
     latest_seek_generation: &AtomicU64,
     output: &MediaOutputSink,
     parallelism: DecvParallelism,
+    interactive_seek_maximum_input_samples: usize,
 ) -> MediaResult<()> {
     let demuxer =
         Mp4Demuxer::open(File::open(path).map_err(|error| {
@@ -471,11 +542,35 @@ fn playback_worker(
     let mut preroll = false;
     let mut ended = false;
     let mut minimum_pts = None;
-    let mut handled_seek_generation = latest_seek_generation.load(Ordering::Acquire);
+    let mut seek_state = SeekPlaybackState::new(latest_seek_generation.load(Ordering::Acquire));
     let mut deferred_command = None;
     let mut clock = PresentationClock::new(Duration::ZERO);
 
     loop {
+        if let Some((position, generation)) = seek_state.ready_without_frame.take() {
+            if seek_generation_is_current(
+                generation,
+                latest_seek_generation.load(Ordering::Acquire),
+            ) {
+                let audio_clock = audio
+                    .as_ref()
+                    .filter(|audio| audio.uses_device_clock())
+                    .map(DecvAudioPlayback::clock);
+                clock = PresentationClock::new(position);
+                shared_timeline.lock_unpoisoned().complete_seek(
+                    position,
+                    playing,
+                    audio_clock,
+                    Instant::now(),
+                );
+                if playing && let Some(audio) = audio.as_ref() {
+                    audio.play()?;
+                }
+                output.emit(MediaBackendEvent::Ready);
+            }
+            continue;
+        }
+
         if !playing && !preroll {
             let command = match deferred_command.take() {
                 Some(command) => command,
@@ -489,7 +584,8 @@ fn playback_worker(
                 &mut cursor,
                 &mut decoder,
                 &mut seek_controller,
-                &mut handled_seek_generation,
+                &mut seek_state,
+                interactive_seek_maximum_input_samples,
                 &mut pending_packet,
                 &mut pending_frame,
                 &mut draining,
@@ -515,7 +611,8 @@ fn playback_worker(
                 &mut cursor,
                 &mut decoder,
                 &mut seek_controller,
-                &mut handled_seek_generation,
+                &mut seek_state,
+                interactive_seek_maximum_input_samples,
                 &mut pending_packet,
                 &mut pending_frame,
                 &mut draining,
@@ -582,7 +679,8 @@ fn playback_worker(
                                     &mut cursor,
                                     &mut decoder,
                                     &mut seek_controller,
-                                    &mut handled_seek_generation,
+                                    &mut seek_state,
+                                    interactive_seek_maximum_input_samples,
                                     &mut pending_packet,
                                     &mut pending_frame,
                                     &mut draining,
@@ -624,7 +722,8 @@ fn playback_worker(
                     &mut cursor,
                     &mut decoder,
                     &mut seek_controller,
-                    &mut handled_seek_generation,
+                    &mut seek_state,
+                    interactive_seek_maximum_input_samples,
                     &mut pending_packet,
                     &mut pending_frame,
                     &mut draining,
@@ -685,7 +784,8 @@ fn playback_worker(
                         &mut cursor,
                         &mut decoder,
                         &mut seek_controller,
-                        &mut handled_seek_generation,
+                        &mut seek_state,
+                        interactive_seek_maximum_input_samples,
                         &mut pending_packet,
                         &mut pending_frame,
                         &mut draining,
@@ -715,8 +815,9 @@ fn playback_worker(
             .take()
             .expect("the scheduled frame remains pending");
         let completed_preroll = preroll;
+        let completed_interactive_preroll = seek_state.interactive_preroll;
         if !seek_generation_is_current(
-            handled_seek_generation,
+            seek_state.handled_generation,
             latest_seek_generation.load(Ordering::Acquire),
         ) {
             continue;
@@ -726,7 +827,11 @@ fn playback_worker(
         let timestamp = frame.timestamp().unwrap_or(timestamp);
         output.publish_video_frame(frame);
         preroll = false;
-        if completed_preroll {
+        if completed_interactive_preroll {
+            seek_state.complete_interactive_preroll();
+            playing = false;
+        } else if completed_preroll {
+            seek_state.reusable_interactive_exact_target = None;
             let audio_clock = audio
                 .as_ref()
                 .filter(|audio| audio.uses_device_clock())
@@ -747,6 +852,7 @@ fn playback_worker(
             }
             output.emit(MediaBackendEvent::Ready);
         } else {
+            seek_state.reusable_interactive_exact_target = None;
             let timeline_position = audio
                 .as_ref()
                 .filter(|audio| playing && audio.uses_device_clock())
@@ -767,7 +873,8 @@ fn apply_command(
     cursor: &mut PacketCursor<'_, File>,
     decoder: &mut H264Decoder,
     seek_controller: &mut H264Mp4SeekController,
-    handled_seek_generation: &mut u64,
+    seek_state: &mut SeekPlaybackState,
+    interactive_seek_maximum_input_samples: usize,
     pending_packet: &mut Option<EncodedVideoPacket>,
     pending_frame: &mut Option<DecodedVideoFrame>,
     draining: &mut bool,
@@ -787,17 +894,24 @@ fn apply_command(
                 .snapshot(Instant::now())
                 .position();
             *clock = PresentationClock::new(position);
-            if !*preroll && let Some(audio) = audio {
-                audio.play()?;
+            if seek_state.interactive_preroll
+                || seek_state.reusable_interactive_exact_target.is_some()
+            {
+                *playing = false;
+            } else {
+                if !*preroll && let Some(audio) = audio {
+                    audio.play()?;
+                }
+                *playing = true;
             }
-            *playing = true;
         }
         Command::Pause => {
             if let Some(audio) = audio {
                 audio.pause()?;
             }
             *playing = false;
-            *preroll = pending_frame.is_none() && cursor.next_sample_index() == 0 && !*ended;
+            *preroll = seek_state.interactive_preroll
+                || (pending_frame.is_none() && cursor.next_sample_index() == 0 && !*ended);
         }
         Command::Reload {
             autoplay,
@@ -806,7 +920,8 @@ fn apply_command(
             cursor.rewind();
             reset_decode_timeline(decoder, pending_packet, pending_frame, draining);
             seek_controller.clear();
-            *handled_seek_generation = generation;
+            seek_state.reset_interactive();
+            seek_state.handled_generation = generation;
             *discontinuity = false;
             if let Some(audio) = audio {
                 audio.reload(false)?;
@@ -822,16 +937,68 @@ fn apply_command(
             mode,
             generation,
         } => {
+            if seek_state.can_reuse_interactive_exact(position)
+                && matches!(mode, SeekMode::Accurate | SeekMode::Interactive)
+            {
+                seek_state.handled_generation = generation;
+                seek_state.interactive_preroll = false;
+                seek_state.interactive_exact_target = None;
+                *minimum_pts = None;
+                *ended = false;
+                *clock = PresentationClock::new(position);
+                *preroll = false;
+                if mode == SeekMode::Accurate {
+                    *playing = shared_timeline.lock_unpoisoned().playing;
+                    seek_state.reusable_interactive_exact_target = None;
+                    seek_state.ready_without_frame = Some((position, generation));
+                } else {
+                    *playing = false;
+                }
+                return Ok(false);
+            }
+
             let target = duration_to_media_time(position)?;
-            let (seek_time, requires_discontinuity) = match mode {
+            let allow_forward_retarget = *preroll && !*draining && pending_packet.is_none();
+            let (seek_time, requires_discontinuity, exact, interactive) = match mode {
                 SeekMode::Accurate => {
-                    let allow_forward_retarget = *preroll && !*draining && pending_packet.is_none();
                     let outcome = seek_controller
                         .begin_exact_seek(decoder, cursor, target, allow_forward_retarget)
                         .map_err(|error| {
                             decv_decode_error("failed to coordinate exact H.264 MP4 seek", error)
                         })?;
-                    (target, outcome.requires_discontinuity())
+                    (target, outcome.requires_discontinuity(), true, false)
+                }
+                SeekMode::Interactive => {
+                    let decision = seek_controller
+                        .begin_interactive_seek(
+                            decoder,
+                            cursor,
+                            target,
+                            allow_forward_retarget,
+                            interactive_seek_maximum_input_samples,
+                        )
+                        .map_err(|error| {
+                            decv_decode_error(
+                                "failed to coordinate interactive H.264 MP4 seek",
+                                error,
+                            )
+                        })?;
+                    let seek_time = if decision.is_exact() {
+                        target
+                    } else {
+                        let sample_index = decision.preview_sample_index().ok_or_else(|| {
+                            decv_decode_message(
+                                "interactive decv seek returned neither an exact nor preview result",
+                            )
+                        })?;
+                        video_sample_time(cursor, sample_index)?
+                    };
+                    (
+                        seek_time,
+                        decision.requires_discontinuity(),
+                        decision.is_exact(),
+                        true,
+                    )
                 }
                 SeekMode::KeyFrame => {
                     let sample_index = seek_controller
@@ -839,25 +1006,35 @@ fn apply_command(
                         .map_err(|error| {
                             decv_decode_error("failed to coordinate H.264 MP4 seek preview", error)
                         })?;
-                    (video_sample_time(cursor, sample_index)?, true)
+                    (video_sample_time(cursor, sample_index)?, true, false, false)
                 }
             };
             let seek_position = media_time_to_duration(Some(seek_time)).unwrap_or(Duration::ZERO);
+            let timeline_position = if interactive { position } else { seek_position };
             *pending_packet = None;
             *pending_frame = None;
             *draining = false;
             *discontinuity = requires_discontinuity;
-            *minimum_pts = (mode == SeekMode::Accurate).then_some(seek_position);
+            *minimum_pts = exact.then_some(position);
             *ended = false;
-            *clock = PresentationClock::new(seek_position);
-            *playing = shared_timeline.lock_unpoisoned().playing;
-            shared_timeline
-                .lock_unpoisoned()
-                .begin_seek(seek_position, *playing, Instant::now());
+            *clock = PresentationClock::new(timeline_position);
+            let resume_playing = shared_timeline.lock_unpoisoned().playing;
+            *playing = if interactive { false } else { resume_playing };
+            shared_timeline.lock_unpoisoned().begin_seek(
+                timeline_position,
+                resume_playing,
+                Instant::now(),
+            );
             if let Some(audio) = audio {
-                audio.seek(seek_time, seek_position)?;
+                let audio_seek_time = if interactive { target } else { seek_time };
+                audio.seek(audio_seek_time, timeline_position)?;
             }
-            *handled_seek_generation = generation;
+            seek_state.handled_generation = generation;
+            if interactive {
+                seek_state.begin_interactive_preroll(exact.then_some(position));
+            } else {
+                seek_state.reset_interactive();
+            }
             *preroll = true;
         }
         Command::SetVolume(volume) => {
@@ -1586,8 +1763,9 @@ impl<T> MutexExt<T> for Mutex<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, DecvBackend, DecvBackendOptions, DecvParallelism, TimelineState, audio_clock_wait,
-        coalesce_seek_command, seek_generation_is_current,
+        Command, DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES, DecvBackend, DecvBackendOptions,
+        DecvParallelism, SeekPlaybackState, TimelineState, audio_clock_wait, coalesce_seek_command,
+        seek_generation_is_current,
     };
     use std::{
         num::NonZeroUsize,
@@ -1604,6 +1782,12 @@ mod tests {
             DecvParallelism::Auto
         );
         assert_eq!(
+            DecvBackend::default()
+                .options()
+                .selected_interactive_seek_maximum_input_samples(),
+            DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES
+        );
+        assert_eq!(
             DecvBackend::new()
                 .parallelism(DecvParallelism::Serial)
                 .options()
@@ -1618,6 +1802,13 @@ mod tests {
                 .options()
                 .selected_parallelism(),
             DecvParallelism::Threads(threads)
+        );
+        assert_eq!(
+            DecvBackend::new()
+                .interactive_seek_maximum_input_samples(8)
+                .options()
+                .selected_interactive_seek_maximum_input_samples(),
+            8
         );
     }
 
@@ -1706,5 +1897,22 @@ mod tests {
     fn stale_seek_generation_cannot_complete_preroll() {
         assert!(seek_generation_is_current(4, 4));
         assert!(!seek_generation_is_current(3, 4));
+    }
+
+    #[test]
+    fn completed_exact_interactive_seek_can_only_reuse_the_same_target() {
+        let target = Duration::from_secs(7);
+        let mut state = SeekPlaybackState::new(3);
+        state.begin_interactive_preroll(Some(target));
+        assert!(state.interactive_preroll);
+        assert!(!state.can_reuse_interactive_exact(target));
+
+        state.complete_interactive_preroll();
+        assert!(!state.interactive_preroll);
+        assert!(state.can_reuse_interactive_exact(target));
+        assert!(!state.can_reuse_interactive_exact(target + Duration::from_millis(1)));
+
+        state.reset_interactive();
+        assert!(!state.can_reuse_interactive_exact(target));
     }
 }

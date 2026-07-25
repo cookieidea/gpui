@@ -635,7 +635,9 @@ pub(crate) fn add_required_allocation_metas(query: &mut gst::query::Allocation) 
 pub(crate) fn seek_flags(mode: SeekMode) -> gst::SeekFlags {
     match mode {
         SeekMode::Accurate => gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-        SeekMode::KeyFrame => gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+        SeekMode::Interactive | SeekMode::KeyFrame => {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        }
     }
 }
 
