@@ -763,7 +763,7 @@ dependencies = [
 [[package]]
 name = "bit-readers"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=b20c34f85a72fb3f5c58e823b8f37a525a556684#b20c34f85a72fb3f5c58e823b8f37a525a556684"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
 
 [[package]]
 name = "bit-set"
@@ -1594,7 +1594,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1744,24 +1744,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
-name = "decv-aac"
+name = "decv"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=b20c34f85a72fb3f5c58e823b8f37a525a556684#b20c34f85a72fb3f5c58e823b8f37a525a556684"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
+dependencies = [
+ "decv-audio",
+ "decv-core",
+ "decv-h264",
+ "decv-mp4",
+]
+
+[[package]]
+name = "decv-audio"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
 dependencies = [
  "decv-core",
- "symphonia-codec-aac",
- "symphonia-core",
+ "symphonia",
 ]
 
 [[package]]
 name = "decv-core"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=b20c34f85a72fb3f5c58e823b8f37a525a556684#b20c34f85a72fb3f5c58e823b8f37a525a556684"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
 
 [[package]]
 name = "decv-h264"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=b20c34f85a72fb3f5c58e823b8f37a525a556684#b20c34f85a72fb3f5c58e823b8f37a525a556684"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
 dependencies = [
  "bit-readers",
  "decv-core",
@@ -1772,7 +1782,7 @@ dependencies = [
 [[package]]
 name = "decv-mp4"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=b20c34f85a72fb3f5c58e823b8f37a525a556684#b20c34f85a72fb3f5c58e823b8f37a525a556684"
+source = "git+https://github.com/cradiy/decv?rev=2f939ffd13ae94805281df2ba35d2f9155ffc1fd#2f939ffd13ae94805281df2ba35d2f9155ffc1fd"
 dependencies = [
  "decv-core",
 ]
@@ -2928,10 +2938,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "core-video",
  "cpal",
- "decv-aac",
- "decv-core",
- "decv-h264",
- "decv-mp4",
+ "decv",
  "gpui",
  "gpui_platform",
  "gstreamer",
@@ -6939,12 +6946,95 @@ dependencies = [
 ]
 
 [[package]]
+name = "symphonia"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1758d6c853020a7244de03cc3e0185eaea3f58715122422dd3cc7452e6d4c16a"
+dependencies = [
+ "lazy_static",
+ "symphonia-bundle-flac",
+ "symphonia-bundle-mp3",
+ "symphonia-codec-aac",
+ "symphonia-codec-adpcm",
+ "symphonia-codec-alac",
+ "symphonia-codec-pcm",
+ "symphonia-codec-vorbis",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-flac"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee69ad01236a67260b82fd1ff9790dd75ead29f2f46af145e63b7e72273e0e03"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-mp3"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350f1f2f2e19ad4dd315db94304d1eb361b29af070681f94e51b8fdaad769546"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
 name = "symphonia-codec-aac"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1979c515a76371b186aad2feff5f23e21cbec775bf95de08bf1e3af92a2ad76"
 dependencies = [
  "lazy_static",
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-adpcm"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ebbdfd76d6cc5a601c6292a44357c5b7c82f2cd7cdc0f171421f5c5cff0ea1f"
+dependencies = [
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-alac"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a149cbfc7fb5c405d123a273227d31de17138419552112bf1aa7b73e65827b8"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-pcm"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50baee168f0e9dcf6ba7fc06e8b57eb62072a4490cc7cf13af77e72baae5d328"
+dependencies = [
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-vorbis"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45b07b4423cd8e0fc472575909a5554b12c2f58e3c190b38c24f042e732fd8de"
+dependencies = [
  "log",
  "symphonia-common",
  "symphonia-core",

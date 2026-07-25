@@ -2,7 +2,11 @@ use std::{
     fs::File,
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -10,14 +14,13 @@ use std::{
 mod audio_output;
 
 use audio_output::{AudioClock, AudioOutput};
-use decv_aac::AacDecoder;
-use decv_core::{
-    AudioDecodeInputStatus, AudioDecodeOutput, AudioDecoder, ColorMatrix as DecvColorMatrix,
-    ColorRange as DecvColorRange, DecodeInputStatus, DecodeOutput, DecodedVideoFrame,
-    EncodedAudioPacket, EncodedVideoPacket, FrameStorage, MediaTime, PixelFormat, VideoDecoder,
+use decv::{
+    AudioDecodeInputStatus, AudioDecodeOutput, AudioDecoder, AudioFormat, AudioPacketCursor,
+    ColorInfo, ColorMatrix as DecvColorMatrix, ColorRange as DecvColorRange, DecodeInputStatus,
+    DecodeOutput, DecodedVideoFrame, EncodedAudioPacket, EncodedVideoPacket, FrameStorage,
+    H264Decoder, H264Mp4SeekController, H264Parallelism, MediaTime, Mp4Demuxer, PacketCursor,
+    PixelFormat, Size as DecvSize, SoftwareAudioDecoder, Track, TrackKind, VideoDecoder,
 };
-use decv_h264::{H264Decoder, H264Parallelism};
-use decv_mp4::{AudioPacketCursor, Mp4Demuxer, PacketCursor, TrackKind};
 use gpui::{
     Bounds, ColorRange, DevicePixels, SurfaceColorInfo, SurfaceFormat, SurfaceFrame, SurfaceHandle,
     SurfacePlane, YuvMatrix, point, size,
@@ -33,6 +36,8 @@ const MEDIA_TIME_SCALE: u32 = 1_000_000_000;
 const AUDIO_BUFFER_TARGET: Duration = Duration::from_secs(2);
 const AUDIO_PREROLL_TARGET: Duration = Duration::from_millis(100);
 const AUDIO_CLOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const VIDEO_SEEK_CHECKPOINT_LIMIT: usize = 4;
+const VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Reconstruction parallelism used by the built-in `decv` H.264 decoder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,6 +130,7 @@ impl MediaBackend for DecvBackend {
 struct DecvSession {
     commands: mpsc::Sender<Command>,
     timeline: Arc<Mutex<TimelineState>>,
+    latest_seek_generation: Arc<AtomicU64>,
     has_audio: bool,
     worker: Option<JoinHandle<()>>,
 }
@@ -142,6 +148,8 @@ impl DecvSession {
         let audio_track_index = probe.audio_track_index;
         let (commands, receiver) = mpsc::channel();
         let worker_timeline = timeline.clone();
+        let latest_seek_generation = Arc::new(AtomicU64::new(0));
+        let worker_latest_seek_generation = latest_seek_generation.clone();
         let worker_path = path;
         let worker = thread::Builder::new()
             .name("gpui-video-decv".to_owned())
@@ -152,6 +160,7 @@ impl DecvSession {
                     audio_track_index,
                     receiver,
                     &worker_timeline,
+                    &worker_latest_seek_generation,
                     &output,
                     options.parallelism,
                 ) {
@@ -167,6 +176,7 @@ impl DecvSession {
         Ok(Self {
             commands,
             timeline,
+            latest_seek_generation,
             has_audio: audio_track_index.is_some(),
             worker: Some(worker),
         })
@@ -213,10 +223,17 @@ impl MediaPlaybackSession for DecvSession {
     }
 
     fn reload(&mut self, autoplay: bool) -> MediaResult<()> {
+        let generation = self
+            .latest_seek_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         self.timeline
             .lock_unpoisoned()
             .begin_seek(Duration::ZERO, autoplay, Instant::now());
-        self.send(Command::Reload { autoplay })
+        self.send(Command::Reload {
+            autoplay,
+            generation,
+        })
     }
 
     fn seek_to(&mut self, position: Duration, mode: SeekMode) -> MediaResult<()> {
@@ -227,9 +244,14 @@ impl MediaPlaybackSession for DecvSession {
         let playing = timeline.playing;
         timeline.begin_seek(target, playing, Instant::now());
         drop(timeline);
+        let generation = self
+            .latest_seek_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         self.send(Command::Seek {
             position: target,
             mode,
+            generation,
         })
     }
 
@@ -256,11 +278,45 @@ impl Drop for DecvSession {
 enum Command {
     Play,
     Pause,
-    Reload { autoplay: bool },
-    Seek { position: Duration, mode: SeekMode },
+    Reload {
+        autoplay: bool,
+        generation: u64,
+    },
+    Seek {
+        position: Duration,
+        mode: SeekMode,
+        generation: u64,
+    },
     SetVolume(f64),
     SetMuted(bool),
     Shutdown,
+}
+
+fn coalesce_seek_command(
+    command: Command,
+    receiver: &mpsc::Receiver<Command>,
+    deferred_command: &mut Option<Command>,
+) -> Command {
+    if !matches!(command, Command::Seek { .. }) {
+        return command;
+    }
+
+    let mut latest = command;
+    loop {
+        match receiver.try_recv() {
+            Ok(command @ Command::Seek { .. }) => latest = command,
+            Ok(command) => {
+                *deferred_command = Some(command);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    latest
+}
+
+fn seek_generation_is_current(handled: u64, latest: u64) -> bool {
+    handled == latest
 }
 
 struct Probe {
@@ -348,6 +404,7 @@ fn playback_worker(
     audio_track_index: Option<usize>,
     commands: mpsc::Receiver<Command>,
     shared_timeline: &Mutex<TimelineState>,
+    latest_seek_generation: &AtomicU64,
     output: &MediaOutputSink,
     parallelism: DecvParallelism,
 ) -> MediaResult<()> {
@@ -394,6 +451,11 @@ fn playback_worker(
             MediaRecovery::None,
         )
     })?;
+    let mut seek_controller = H264Mp4SeekController::new(
+        video_track_index,
+        VIDEO_SEEK_CHECKPOINT_LIMIT,
+        VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
+    );
     let mut audio = audio_track_index
         .map(|track_index| DecvAudioPlayback::open(&demuxer, track_index))
         .transpose()?;
@@ -409,17 +471,25 @@ fn playback_worker(
     let mut preroll = false;
     let mut ended = false;
     let mut minimum_pts = None;
+    let mut handled_seek_generation = latest_seek_generation.load(Ordering::Acquire);
+    let mut deferred_command = None;
     let mut clock = PresentationClock::new(Duration::ZERO);
 
     loop {
         if !playing && !preroll {
-            let command = commands
-                .recv()
-                .map_err(|_| MediaError::backend("decv playback command channel closed"))?;
+            let command = match deferred_command.take() {
+                Some(command) => command,
+                None => commands
+                    .recv()
+                    .map_err(|_| MediaError::backend("decv playback command channel closed"))?,
+            };
+            let command = coalesce_seek_command(command, &commands, &mut deferred_command);
             if apply_command(
                 command,
                 &mut cursor,
                 &mut decoder,
+                &mut seek_controller,
+                &mut handled_seek_generation,
                 &mut pending_packet,
                 &mut pending_frame,
                 &mut draining,
@@ -437,11 +507,15 @@ fn playback_worker(
             continue;
         }
 
-        if let Ok(command) = commands.try_recv() {
+        let command = deferred_command.take().or_else(|| commands.try_recv().ok());
+        if let Some(command) = command {
+            let command = coalesce_seek_command(command, &commands, &mut deferred_command);
             if apply_command(
                 command,
                 &mut cursor,
                 &mut decoder,
+                &mut seek_controller,
+                &mut handled_seek_generation,
                 &mut pending_packet,
                 &mut pending_frame,
                 &mut draining,
@@ -480,62 +554,77 @@ fn playback_worker(
         }
 
         if pending_frame.is_none() {
-            pending_frame = decode_next_frame(
+            match decode_video_step(
                 &mut decoder,
                 &mut cursor,
+                &mut seek_controller,
                 &mut pending_packet,
                 &mut draining,
                 &mut discontinuity,
                 first_description,
-            )?;
-            if pending_frame.is_none() {
-                let audio_pending = audio
-                    .as_ref()
-                    .is_some_and(|audio| !audio.is_decode_complete() || !audio.is_drained());
-                if audio_pending {
-                    match commands.recv_timeout(AUDIO_CLOCK_POLL_INTERVAL) {
-                        Ok(command) => {
-                            if apply_command(
-                                command,
-                                &mut cursor,
-                                &mut decoder,
-                                &mut pending_packet,
-                                &mut pending_frame,
-                                &mut draining,
-                                &mut discontinuity,
-                                &mut audio,
-                                &mut playing,
-                                &mut preroll,
-                                &mut ended,
-                                &mut minimum_pts,
-                                &mut clock,
-                                shared_timeline,
-                            )? {
-                                return Ok(());
+            )? {
+                VideoDecodeStep::Progress => continue,
+                VideoDecodeStep::Frame(frame) => pending_frame = Some(frame),
+                VideoDecodeStep::EndOfStream => {
+                    let audio_pending = audio
+                        .as_ref()
+                        .is_some_and(|audio| !audio.is_decode_complete() || !audio.is_drained());
+                    if audio_pending {
+                        match commands.recv_timeout(AUDIO_CLOCK_POLL_INTERVAL) {
+                            Ok(command) => {
+                                let command = coalesce_seek_command(
+                                    command,
+                                    &commands,
+                                    &mut deferred_command,
+                                );
+                                if apply_command(
+                                    command,
+                                    &mut cursor,
+                                    &mut decoder,
+                                    &mut seek_controller,
+                                    &mut handled_seek_generation,
+                                    &mut pending_packet,
+                                    &mut pending_frame,
+                                    &mut draining,
+                                    &mut discontinuity,
+                                    &mut audio,
+                                    &mut playing,
+                                    &mut preroll,
+                                    &mut ended,
+                                    &mut minimum_pts,
+                                    &mut clock,
+                                    shared_timeline,
+                                )? {
+                                    return Ok(());
+                                }
                             }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        continue;
+                    }
+                    if !ended {
+                        ended = true;
+                        if let Some(audio) = audio.as_ref() {
+                            audio.pause()?;
+                        }
+                        playing = false;
+                        let now = Instant::now();
+                        shared_timeline.lock_unpoisoned().finish(now);
+                        output.emit(MediaBackendEvent::Ended);
                     }
                     continue;
                 }
-                if !ended {
-                    ended = true;
-                    if let Some(audio) = audio.as_ref() {
-                        audio.pause()?;
-                    }
-                    playing = false;
-                    let now = Instant::now();
-                    shared_timeline.lock_unpoisoned().finish(now);
-                    output.emit(MediaBackendEvent::Ended);
-                }
-                continue;
             }
-            if let Ok(command) = commands.try_recv() {
+            let command = deferred_command.take().or_else(|| commands.try_recv().ok());
+            if let Some(command) = command {
+                let command = coalesce_seek_command(command, &commands, &mut deferred_command);
                 if apply_command(
                     command,
                     &mut cursor,
                     &mut decoder,
+                    &mut seek_controller,
+                    &mut handled_seek_generation,
                     &mut pending_packet,
                     &mut pending_frame,
                     &mut draining,
@@ -590,10 +679,13 @@ fn playback_worker(
         if !wait.is_zero() {
             match commands.recv_timeout(wait) {
                 Ok(command) => {
+                    let command = coalesce_seek_command(command, &commands, &mut deferred_command);
                     if apply_command(
                         command,
                         &mut cursor,
                         &mut decoder,
+                        &mut seek_controller,
+                        &mut handled_seek_generation,
                         &mut pending_packet,
                         &mut pending_frame,
                         &mut draining,
@@ -623,6 +715,12 @@ fn playback_worker(
             .take()
             .expect("the scheduled frame remains pending");
         let completed_preroll = preroll;
+        if !seek_generation_is_current(
+            handled_seek_generation,
+            latest_seek_generation.load(Ordering::Acquire),
+        ) {
+            continue;
+        }
         sequence = sequence.wrapping_add(1);
         let frame = Arc::new(convert_frame(frame, surface_handle.clone(), sequence)?);
         let timestamp = frame.timestamp().unwrap_or(timestamp);
@@ -668,6 +766,8 @@ fn apply_command(
     command: Command,
     cursor: &mut PacketCursor<'_, File>,
     decoder: &mut H264Decoder,
+    seek_controller: &mut H264Mp4SeekController,
+    handled_seek_generation: &mut u64,
     pending_packet: &mut Option<EncodedVideoPacket>,
     pending_frame: &mut Option<DecodedVideoFrame>,
     draining: &mut bool,
@@ -699,9 +799,14 @@ fn apply_command(
             *playing = false;
             *preroll = pending_frame.is_none() && cursor.next_sample_index() == 0 && !*ended;
         }
-        Command::Reload { autoplay } => {
+        Command::Reload {
+            autoplay,
+            generation,
+        } => {
             cursor.rewind();
             reset_decode_timeline(decoder, pending_packet, pending_frame, draining);
+            seek_controller.clear();
+            *handled_seek_generation = generation;
             *discontinuity = false;
             if let Some(audio) = audio {
                 audio.reload(false)?;
@@ -712,33 +817,36 @@ fn apply_command(
             *preroll = true;
             *clock = PresentationClock::new(Duration::ZERO);
         }
-        Command::Seek { position, mode } => {
+        Command::Seek {
+            position,
+            mode,
+            generation,
+        } => {
             let target = duration_to_media_time(position)?;
-            let sample_index = match mode {
-                SeekMode::Accurate => cursor.seek_to_keyframe(target),
-                SeekMode::KeyFrame => cursor.seek_to_nearest_keyframe(target),
-            }
-            .map_err(|error| decv_container_error("failed to seek MP4 packet cursor", error))?
-            .ok_or_else(|| {
-                MediaError::new(
-                    MediaErrorKind::UnsupportedOperation,
-                    format!("no MP4 keyframe exists at or before {position:?}"),
-                    MediaRecovery::None,
-                )
-            })?;
-            let seek_time = match mode {
-                SeekMode::Accurate => target,
-                SeekMode::KeyFrame => video_sample_time(cursor, sample_index)?,
+            let (seek_time, requires_discontinuity) = match mode {
+                SeekMode::Accurate => {
+                    let allow_forward_retarget = *preroll && !*draining && pending_packet.is_none();
+                    let outcome = seek_controller
+                        .begin_exact_seek(decoder, cursor, target, allow_forward_retarget)
+                        .map_err(|error| {
+                            decv_decode_error("failed to coordinate exact H.264 MP4 seek", error)
+                        })?;
+                    (target, outcome.requires_discontinuity())
+                }
+                SeekMode::KeyFrame => {
+                    let sample_index = seek_controller
+                        .begin_nearest_preview(decoder, cursor, target)
+                        .map_err(|error| {
+                            decv_decode_error("failed to coordinate H.264 MP4 seek preview", error)
+                        })?;
+                    (video_sample_time(cursor, sample_index)?, true)
+                }
             };
             let seek_position = media_time_to_duration(Some(seek_time)).unwrap_or(Duration::ZERO);
-            reset_decode_timeline_for_seek(
-                decoder,
-                seek_time,
-                pending_packet,
-                pending_frame,
-                draining,
-            );
-            *discontinuity = true;
+            *pending_packet = None;
+            *pending_frame = None;
+            *draining = false;
+            *discontinuity = requires_discontinuity;
             *minimum_pts = (mode == SeekMode::Accurate).then_some(seek_position);
             *ended = false;
             *clock = PresentationClock::new(seek_position);
@@ -749,6 +857,7 @@ fn apply_command(
             if let Some(audio) = audio {
                 audio.seek(seek_time, seek_position)?;
             }
+            *handled_seek_generation = generation;
             *preroll = true;
         }
         Command::SetVolume(volume) => {
@@ -778,101 +887,100 @@ fn reset_decode_timeline(
     *draining = false;
 }
 
-fn reset_decode_timeline_for_seek(
-    decoder: &mut H264Decoder,
-    target: MediaTime,
-    pending_packet: &mut Option<EncodedVideoPacket>,
-    pending_frame: &mut Option<DecodedVideoFrame>,
-    draining: &mut bool,
-) {
-    decoder.flush_for_seek(target);
-    *pending_packet = None;
-    *pending_frame = None;
-    *draining = false;
+enum VideoDecodeStep {
+    Progress,
+    Frame(DecodedVideoFrame),
+    EndOfStream,
 }
 
-fn decode_next_frame(
+fn decode_video_step(
     decoder: &mut H264Decoder,
     cursor: &mut PacketCursor<'_, File>,
+    seek_controller: &mut H264Mp4SeekController,
     pending_packet: &mut Option<EncodedVideoPacket>,
     draining: &mut bool,
     discontinuity: &mut bool,
     first_description: usize,
-) -> MediaResult<Option<DecodedVideoFrame>> {
-    loop {
-        match decoder
-            .receive_frame()
-            .map_err(|error| decv_decode_error("decv failed while receiving a frame", error))?
-        {
-            DecodeOutput::Frame(frame) => return Ok(Some(frame)),
-            DecodeOutput::FormatChanged(format) => {
-                log::debug!(
-                    "decv format changed: {}x{} {:?}",
-                    format.coded_size.width,
-                    format.coded_size.height,
-                    format.pixel_format
-                );
-            }
-            DecodeOutput::EndOfStream => return Ok(None),
-            DecodeOutput::NeedInput => {
-                if *draining {
-                    return Err(decv_decode_message("decv requested input after drain"));
-                }
-
-                let packet = match pending_packet.take() {
-                    Some(packet) => packet,
-                    None => {
-                        let Some(mut packet) = cursor.next_packet().map_err(|error| {
-                            decv_container_error("failed to read the next MP4 packet", error)
-                        })?
-                        else {
-                            decoder.drain().map_err(|error| {
-                                decv_decode_error("decv failed to drain", error)
-                            })?;
-                            *draining = true;
-                            continue;
-                        };
-                        let sample = &cursor.track().samples()[cursor.next_sample_index() - 1];
-                        if sample.description_index() != first_description {
-                            return Err(MediaError::new(
-                                MediaErrorKind::UnsupportedCodec,
-                                "mid-stream MP4 sample-description changes are not supported",
-                                MediaRecovery::None,
-                            ));
-                        }
-                        if std::mem::take(discontinuity) {
-                            packet.discontinuity = true;
-                        }
-                        packet
-                    }
-                };
-
-                match decoder.send_packet(packet).map_err(|error| {
-                    decv_decode_error("decv failed while decoding an MP4 packet", error)
-                })? {
-                    DecodeInputStatus::Accepted => {}
-                    DecodeInputStatus::NeedOutput(unconsumed) => {
-                        *pending_packet = Some(unconsumed);
-                    }
-                    status => {
-                        return Err(decv_decode_message(format!(
-                            "decv returned an unsupported input status: {status:?}"
-                        )));
-                    }
-                }
-            }
-            output => {
-                return Err(decv_decode_message(format!(
-                    "decv returned an unsupported decoder output: {output:?}"
-                )));
-            }
+) -> MediaResult<VideoDecodeStep> {
+    match decoder
+        .receive_frame()
+        .map_err(|error| decv_decode_error("decv failed while receiving a frame", error))?
+    {
+        DecodeOutput::Frame(frame) => Ok(VideoDecodeStep::Frame(frame)),
+        DecodeOutput::FormatChanged(format) => {
+            log::debug!(
+                "decv format changed: {}x{} {:?}",
+                format.coded_size.width,
+                format.coded_size.height,
+                format.pixel_format
+            );
+            Ok(VideoDecodeStep::Progress)
         }
+        DecodeOutput::EndOfStream => Ok(VideoDecodeStep::EndOfStream),
+        DecodeOutput::NeedInput => {
+            if *draining {
+                return Err(decv_decode_message("decv requested input after drain"));
+            }
+
+            let packet = match pending_packet.take() {
+                Some(packet) => packet,
+                None => {
+                    let Some(mut packet) = cursor.next_packet().map_err(|error| {
+                        decv_container_error("failed to read the next MP4 packet", error)
+                    })?
+                    else {
+                        decoder
+                            .drain()
+                            .map_err(|error| decv_decode_error("decv failed to drain", error))?;
+                        *draining = true;
+                        return Ok(VideoDecodeStep::Progress);
+                    };
+                    let sample = &cursor.track().samples()[cursor.next_sample_index() - 1];
+                    if sample.description_index() != first_description {
+                        return Err(MediaError::new(
+                            MediaErrorKind::UnsupportedCodec,
+                            "mid-stream MP4 sample-description changes are not supported",
+                            MediaRecovery::None,
+                        ));
+                    }
+                    if std::mem::take(discontinuity) {
+                        packet.discontinuity = true;
+                    }
+                    packet
+                }
+            };
+
+            match decoder.send_packet(packet).map_err(|error| {
+                decv_decode_error("decv failed while decoding an MP4 packet", error)
+            })? {
+                DecodeInputStatus::Accepted => {
+                    let next_sample = cursor.next_sample_index();
+                    if let Err(error) = seek_controller.capture_checkpoint(decoder, cursor) {
+                        log::debug!(
+                            "decv skipped H.264 seek checkpoint at MP4 sample {next_sample}: {error}"
+                        );
+                    }
+                }
+                DecodeInputStatus::NeedOutput(unconsumed) => {
+                    *pending_packet = Some(unconsumed);
+                }
+                status => {
+                    return Err(decv_decode_message(format!(
+                        "decv returned an unsupported input status: {status:?}"
+                    )));
+                }
+            }
+            Ok(VideoDecodeStep::Progress)
+        }
+        output => Err(decv_decode_message(format!(
+            "decv returned an unsupported decoder output: {output:?}"
+        ))),
     }
 }
 
 struct DecvAudioPlayback<'demuxer> {
     cursor: AudioPacketCursor<'demuxer, File>,
-    decoder: AacDecoder,
+    decoder: SoftwareAudioDecoder,
     pending_packet: Option<EncodedAudioPacket>,
     first_description: usize,
     draining: bool,
@@ -905,8 +1013,8 @@ impl<'demuxer> DecvAudioPlayback<'demuxer> {
             .first()
             .ok_or_else(|| decv_container_message("MP4 audio track has no samples"))?
             .description_index();
-        let format = decv_core::AudioFormat::new(config.sample_rate, config.channel_layout);
-        let mut decoder = AacDecoder::new();
+        let format = AudioFormat::new(config.sample_rate, config.channel_layout);
+        let mut decoder = SoftwareAudioDecoder::new();
         decoder.configure(config).map_err(|error| {
             MediaError::new(
                 MediaErrorKind::UnsupportedCodec,
@@ -1170,7 +1278,7 @@ fn convert_frame(
     ))
 }
 
-fn surface_color_info(color: decv_core::ColorInfo, coded_height: u32) -> SurfaceColorInfo {
+fn surface_color_info(color: ColorInfo, coded_height: u32) -> SurfaceColorInfo {
     let matrix = match color.matrix {
         DecvColorMatrix::Bt601 | DecvColorMatrix::Bt470Bg | DecvColorMatrix::Smpte170M => {
             YuvMatrix::Bt601
@@ -1264,7 +1372,7 @@ fn video_sample_time(
     Ok(MediaTime::new(value, cursor.track().media_timescale()))
 }
 
-fn track_presentation_duration(track: &decv_mp4::Track) -> MediaResult<Option<Duration>> {
+fn track_presentation_duration(track: &Track) -> MediaResult<Option<Duration>> {
     let offset = track.presentation_time_offset().map_err(|error| {
         decv_container_error(
             "failed to map MP4 track duration to the movie timeline",
@@ -1332,7 +1440,7 @@ fn audio_clock_wait(
     Some(video_timestamp.saturating_sub(audio_position))
 }
 
-fn device_size(value: decv_core::Size) -> MediaResult<gpui::Size<DevicePixels>> {
+fn device_size(value: DecvSize) -> MediaResult<gpui::Size<DevicePixels>> {
     Ok(size(
         device_pixel(value.width)?,
         device_pixel(value.height)?,
@@ -1478,12 +1586,16 @@ impl<T> MutexExt<T> for Mutex<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DecvBackend, DecvBackendOptions, DecvParallelism, TimelineState, audio_clock_wait,
+        Command, DecvBackend, DecvBackendOptions, DecvParallelism, TimelineState, audio_clock_wait,
+        coalesce_seek_command, seek_generation_is_current,
     };
     use std::{
         num::NonZeroUsize,
+        sync::mpsc,
         time::{Duration, Instant},
     };
+
+    use crate::SeekMode;
 
     #[test]
     fn backend_parallelism_defaults_to_auto_and_is_configurable() {
@@ -1551,5 +1663,48 @@ mod tests {
             timeline.snapshot(start + Duration::from_secs(7)).position(),
             Duration::from_secs(12)
         );
+    }
+
+    #[test]
+    fn consecutive_seek_commands_collapse_to_the_latest_generation() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Command::Seek {
+                position: Duration::from_secs(2),
+                mode: SeekMode::Accurate,
+                generation: 2,
+            })
+            .unwrap();
+        sender.send(Command::Pause).unwrap();
+        sender
+            .send(Command::Seek {
+                position: Duration::from_secs(3),
+                mode: SeekMode::Accurate,
+                generation: 3,
+            })
+            .unwrap();
+
+        let mut deferred = None;
+        let command = coalesce_seek_command(
+            Command::Seek {
+                position: Duration::from_secs(1),
+                mode: SeekMode::Accurate,
+                generation: 1,
+            },
+            &receiver,
+            &mut deferred,
+        );
+        assert!(matches!(command, Command::Seek { generation: 2, .. }));
+        assert!(matches!(deferred, Some(Command::Pause)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            Command::Seek { generation: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn stale_seek_generation_cannot_complete_preroll() {
+        assert!(seek_generation_is_current(4, 4));
+        assert!(!seek_generation_is_current(3, 4));
     }
 }

@@ -47,8 +47,6 @@ H.264 video, CPU-backed NV12 output, and AAC-LC mono/stereo audio. Its audio
 path keeps a bounded decoded-PCM queue, converts the source rate and channel
 layout to the default CPAL device, and uses samples consumed by the device
 callback as the A/V master clock. Network transport is not implemented yet.
-The dependency is pinned to one pre-1.0 commit and kept behind an internal
-adapter:
 
 ```toml
 gpui_media = {
@@ -58,8 +56,8 @@ gpui_media = {
 }
 ```
 
-Parallelism is selected per backend instance without exposing `decv_h264`
-types through the public API. `Auto` remains the default:
+Parallelism is selected per backend instance without exposing `decv` types
+through the public API. `Auto` remains the default:
 
 ```rust
 use gpui_media::{DecvBackend, DecvParallelism};

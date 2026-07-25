@@ -11,7 +11,7 @@ use cpal::{
     FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use decv_core::{AudioFormat, DecodedAudioFrame};
+use decv::{AudioFormat, DecodedAudioFrame, MediaTime};
 
 use crate::{MediaError, MediaErrorKind, MediaRecovery, MediaResult};
 
@@ -489,7 +489,7 @@ fn duration_for_samples(samples: u64, channels: u16, sample_rate: u32) -> Durati
     Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
 }
 
-fn signed_media_time_nanos(time: Option<decv_core::MediaTime>) -> Option<i128> {
+fn signed_media_time_nanos(time: Option<MediaTime>) -> Option<i128> {
     let time = time?;
     Some(i128::from(time.value).saturating_mul(1_000_000_000) / i128::from(time.timescale.get()))
 }
