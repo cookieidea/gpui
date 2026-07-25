@@ -46,6 +46,43 @@ pub(crate) fn configure_playbin_network(playbin: &gst::Element, options: &Networ
     });
 }
 
+pub(crate) fn configure_playbin_progressive_download(
+    playbin: &gst::Element,
+    uri: &str,
+    options: &NetworkSourceOptions,
+) {
+    let enabled = options
+        .progressive_download()
+        .unwrap_or_else(|| is_http_uri(uri));
+    set_playbin_flag(playbin, "download", enabled);
+}
+
+fn is_http_uri(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|uri| matches!(uri.scheme(), "http" | "https"))
+}
+
+fn set_playbin_flag(playbin: &gst::Element, nick: &str, enabled: bool) {
+    let current = playbin.property_value("flags");
+    let Some(flags_class) = gst::glib::FlagsClass::with_type(current.type_()) else {
+        log::debug!("playbin flags property is not a GLib flags type");
+        return;
+    };
+    let Some(builder) = flags_class.builder_with_value(current) else {
+        log::debug!("failed to read playbin flags");
+        return;
+    };
+    let updated = if enabled {
+        builder.set_by_nick(nick)
+    } else {
+        builder.unset_by_nick(nick)
+    };
+    let Some(updated) = updated.build() else {
+        log::debug!("playbin does not expose the {nick:?} flag");
+        return;
+    };
+    playbin.set_property_from_value("flags", &updated);
+}
+
 fn apply_network_source_options(source: &gst::Element, options: &NetworkSourceOptions) {
     if !options.headers().is_empty() && source.find_property("extra-headers").is_some() {
         source.set_property("extra-headers", extra_headers(options));
@@ -116,7 +153,10 @@ mod tests {
 
     use gst::prelude::*;
 
-    use super::{apply_network_source_options, duration_seconds_ceil, extra_headers};
+    use super::{
+        apply_network_source_options, configure_playbin_progressive_download,
+        duration_seconds_ceil, extra_headers,
+    };
     use crate::NetworkSourceOptions;
 
     #[test]
@@ -176,5 +216,36 @@ mod tests {
         assert!(!source.property::<bool>("automatic-redirect"));
         assert!(!source.property::<bool>("keep-alive"));
         assert!(source.property::<bool>("ssl-strict"));
+    }
+
+    #[test]
+    fn http_playback_enables_progressive_download_by_default() {
+        crate::init().unwrap();
+        let playbin = gst::ElementFactory::make("playbin3").build().unwrap();
+
+        configure_playbin_progressive_download(
+            &playbin,
+            "https://example.com/video.mp4",
+            &NetworkSourceOptions::default(),
+        );
+
+        assert!(playbin_flag_is_set(&playbin, "download"));
+    }
+
+    #[test]
+    fn progressive_download_can_be_disabled() {
+        crate::init().unwrap();
+        let playbin = gst::ElementFactory::make("playbin3").build().unwrap();
+        let options = NetworkSourceOptions::default().with_progressive_download(false);
+
+        configure_playbin_progressive_download(&playbin, "https://example.com/live", &options);
+
+        assert!(!playbin_flag_is_set(&playbin, "download"));
+    }
+
+    fn playbin_flag_is_set(playbin: &gst::Element, nick: &str) -> bool {
+        let value = playbin.property_value("flags");
+        gst::glib::FlagsValue::from_value(&value)
+            .is_some_and(|(_, flags)| flags.into_iter().any(|flag| flag.nick() == nick))
     }
 }

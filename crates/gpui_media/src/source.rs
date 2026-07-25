@@ -47,6 +47,7 @@ pub struct NetworkSourceOptions {
     buffer_duration: Option<Duration>,
     buffer_size: Option<u32>,
     connection_speed_kbps: Option<u64>,
+    progressive_download: Option<bool>,
 }
 
 impl NetworkSourceOptions {
@@ -146,6 +147,18 @@ impl NetworkSourceOptions {
         self
     }
 
+    /// Controls sparse progressive download for seekable HTTP media.
+    ///
+    /// The GStreamer playback backend enables this by default for HTTP(S)
+    /// sources so fragmented MP4 can seek through Range requests. Frame
+    /// extraction remains on the direct source path to keep first-frame
+    /// preparation fast. Disable this for live streams or when temporary
+    /// on-disk buffering is undesirable.
+    pub fn with_progressive_download(mut self, enabled: bool) -> Self {
+        self.progressive_download = Some(enabled);
+        self
+    }
+
     pub fn headers(&self) -> &BTreeMap<String, String> {
         &self.headers
     }
@@ -207,6 +220,10 @@ impl NetworkSourceOptions {
     pub fn connection_speed_kbps(&self) -> Option<u64> {
         self.connection_speed_kbps
     }
+
+    pub fn progressive_download(&self) -> Option<bool> {
+        self.progressive_download
+    }
 }
 
 impl fmt::Debug for NetworkSourceOptions {
@@ -230,6 +247,7 @@ impl fmt::Debug for NetworkSourceOptions {
             .field("buffer_duration", &self.buffer_duration)
             .field("buffer_size", &self.buffer_size)
             .field("connection_speed_kbps", &self.connection_speed_kbps)
+            .field("progressive_download", &self.progressive_download)
             .finish()
     }
 }

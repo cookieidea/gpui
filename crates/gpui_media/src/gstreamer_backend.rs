@@ -17,7 +17,8 @@ use crate::{
     FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
     MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind, MediaOutputSink,
     MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult, MediaSource,
-    PlaybackTimeline, SeekMode, TransportChange, VideoFrame, network::configure_playbin_network,
+    PlaybackTimeline, SeekMode, TransportChange, VideoFrame,
+    network::{configure_playbin_network, configure_playbin_progressive_download},
 };
 
 #[cfg(target_os = "macos")]
@@ -136,6 +137,7 @@ impl GstreamerPlayback {
         configure_playbin_network(&playbin, source.network_options());
         playbin.set_property("uri", source.uri());
         playbin.set_property("video-sink", &appsink);
+        configure_playbin_progressive_download(&playbin, source.uri(), source.network_options());
 
         let bus = playbin
             .bus()
