@@ -43,8 +43,11 @@ gpui_media = {
 ```
 
 The opt-in pure-Rust `decv` prototype currently supports local MP4 files with
-H.264 video and CPU-backed NV12 output. It has no audio or network transport
-yet. The dependency is pinned to one pre-1.0 commit and kept behind an internal
+H.264 video, CPU-backed NV12 output, and AAC-LC mono/stereo audio. Its audio
+path keeps a bounded decoded-PCM queue, converts the source rate and channel
+layout to the default CPAL device, and uses samples consumed by the device
+callback as the A/V master clock. Network transport is not implemented yet.
+The dependency is pinned to one pre-1.0 commit and kept behind an internal
 adapter:
 
 ```toml

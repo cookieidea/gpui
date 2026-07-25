@@ -15,6 +15,8 @@ backend-gstreamer = [
     "dep:core-video",
 ]
 backend-decv = [
+    "dep:cpal",
+    "dep:decv-aac",
     "dep:decv-core",
     "dep:decv-h264",
     "dep:decv-mp4",
@@ -22,9 +24,11 @@ backend-decv = [
 
 [dependencies]
 async-channel.workspace = true
-decv-core = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
-decv-h264 = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
-decv-mp4 = { git = "https://github.com/cradiy/decv", rev = "f7b52a0fc5c975c869238cd9c446536890864abb", optional = true }
+cpal = { workspace = true, optional = true }
+decv-aac = { git = "https://github.com/cradiy/decv", rev = "b20c34f85a72fb3f5c58e823b8f37a525a556684", optional = true }
+decv-core = { git = "https://github.com/cradiy/decv", rev = "b20c34f85a72fb3f5c58e823b8f37a525a556684", optional = true }
+decv-h264 = { git = "https://github.com/cradiy/decv", rev = "b20c34f85a72fb3f5c58e823b8f37a525a556684", optional = true }
+decv-mp4 = { git = "https://github.com/cradiy/decv", rev = "b20c34f85a72fb3f5c58e823b8f37a525a556684", optional = true }
 gpui.workspace = true
 gst = { package = "gstreamer", version = "0.25", optional = true }
 gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"], optional = true }
