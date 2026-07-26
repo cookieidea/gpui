@@ -7,6 +7,11 @@ use crate::{
     stats::PlaybackCounters,
 };
 
+// One queued frame is the current presentation candidate and the second
+// absorbs a single slow GPUI render/upload interval. A larger queue would turn
+// sustained stalls into visible A/V latency.
+const VIDEO_FRAME_QUEUE_CAPACITY: usize = 2;
+
 /// A backend-independent event produced by a media playback session.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -71,10 +76,10 @@ pub struct FrameExtractorBackendRequest {
 
 /// Thread-safe publisher shared with a media playback backend.
 ///
-/// Video frames use a latest-only bounded queue. Publishing while the queue is
-/// full discards the older frame and records that drop in the common player
-/// stats. Audio output remains owned by the media backend so it can preserve a
-/// single playback clock and sample-accurate A/V synchronization.
+/// Video frames use a small bounded queue. Publishing while the queue is full
+/// discards the oldest frame and records that drop in the common player stats.
+/// Audio output remains owned by the media backend so it can preserve a single
+/// playback clock and sample-accurate A/V synchronization.
 #[derive(Clone)]
 pub struct MediaOutputSink {
     video_frames: async_channel::Sender<Arc<VideoFrame>>,
@@ -91,7 +96,7 @@ pub(crate) struct MediaOutput {
 
 impl MediaOutputSink {
     pub(crate) fn channel() -> (Self, MediaOutput) {
-        let (frame_tx, frame_rx) = async_channel::bounded(1);
+        let (frame_tx, frame_rx) = async_channel::bounded(VIDEO_FRAME_QUEUE_CAPACITY);
         let (event_tx, event_rx) = async_channel::unbounded();
         let counters = Arc::new(PlaybackCounters::default());
 
@@ -277,18 +282,23 @@ mod tests {
     }
 
     #[test]
-    fn output_sink_keeps_only_the_latest_frame() {
+    fn output_sink_absorbs_one_frame_of_jitter_then_drops_the_oldest() {
         let (sink, output) = MediaOutputSink::channel();
 
         assert!(!sink.publish_video_frame(frame(1)));
-        assert!(sink.publish_video_frame(frame(2)));
+        assert!(!sink.publish_video_frame(frame(2)));
+        assert!(sink.publish_video_frame(frame(3)));
         assert_eq!(
             output.video_frames.try_recv().unwrap().surface().sequence(),
             2
         );
+        assert_eq!(
+            output.video_frames.try_recv().unwrap().surface().sequence(),
+            3
+        );
 
         let stats = output.counters.snapshot(0);
-        assert_eq!(stats.decoded_frames(), 2);
+        assert_eq!(stats.decoded_frames(), 3);
         assert_eq!(stats.dropped_frames(), 1);
     }
 }
