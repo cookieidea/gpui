@@ -220,11 +220,13 @@ impl VideoPlayer {
                     if player.state_after_seek.is_none()
                         && let Some(timestamp) = frame.timestamp()
                     {
-                        player.timeline = PlaybackTimeline::new(
+                        let frame_timeline = PlaybackTimeline::new(
                             timestamp,
                             player.timeline.duration(),
                             player.timeline.is_seekable(),
                         );
+                        player.timeline =
+                            timeline_without_regression(player.timeline, frame_timeline);
                     }
                     let transport = frame.transport();
                     if player.frame_transport != Some(transport) {
@@ -437,6 +439,15 @@ impl VideoPlayer {
         self.play_when_ready = true;
         if self.state == PlaybackState::Ended {
             self.playback.restart()?;
+            self.state_after_seek = Some(PlaybackState::Playing);
+            self.timeline = PlaybackTimeline::new(
+                Duration::ZERO,
+                self.timeline.duration(),
+                self.timeline.is_seekable(),
+            );
+            self.set_state(PlaybackState::Seeking, cx);
+            cx.emit(VideoPlayerEvent::TimelineChanged(self.timeline));
+            return Ok(());
         } else if self.is_buffering() {
             self.playback.pause()?;
         } else {
@@ -622,7 +633,7 @@ impl VideoPlayer {
             return;
         }
 
-        let timeline = self.playback.timeline();
+        let timeline = timeline_without_regression(self.timeline, self.playback.timeline());
         if timeline != self.timeline {
             self.timeline = timeline;
             cx.emit(VideoPlayerEvent::TimelineChanged(timeline));
@@ -734,17 +745,60 @@ fn accept_backend_timeline(state: &PlaybackState) -> bool {
     state != &PlaybackState::Seeking
 }
 
+fn timeline_without_regression(
+    current: PlaybackTimeline,
+    candidate: PlaybackTimeline,
+) -> PlaybackTimeline {
+    if candidate.position() >= current.position() {
+        return candidate;
+    }
+
+    PlaybackTimeline::new(
+        current.position(),
+        candidate.duration(),
+        candidate.is_seekable(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{PlaybackState, accept_backend_timeline, multiply_duration, normalize_volume};
+    use super::{
+        PlaybackState, PlaybackTimeline, accept_backend_timeline, multiply_duration,
+        normalize_volume, timeline_without_regression,
+    };
 
     #[test]
     fn backend_timeline_is_suspended_while_seeking() {
         assert!(!accept_backend_timeline(&PlaybackState::Seeking));
         assert!(accept_backend_timeline(&PlaybackState::Playing));
         assert!(accept_backend_timeline(&PlaybackState::Paused));
+    }
+
+    #[test]
+    fn playback_timeline_does_not_move_backward_between_discontinuities() {
+        let current = PlaybackTimeline::new(
+            Duration::from_millis(5_200),
+            Some(Duration::from_secs(10)),
+            true,
+        );
+        let stale_frame = PlaybackTimeline::new(
+            Duration::from_millis(5_150),
+            Some(Duration::from_secs(10)),
+            true,
+        );
+        let next_clock = PlaybackTimeline::new(
+            Duration::from_millis(5_250),
+            Some(Duration::from_secs(10)),
+            true,
+        );
+
+        assert_eq!(
+            timeline_without_regression(current, stale_frame).position(),
+            current.position()
+        );
+        assert_eq!(timeline_without_regression(current, next_clock), next_clock);
     }
 
     #[test]

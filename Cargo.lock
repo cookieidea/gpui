@@ -763,7 +763,7 @@ dependencies = [
 [[package]]
 name = "bit-readers"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
 
 [[package]]
 name = "bit-set"
@@ -1746,18 +1746,19 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "decv"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
 dependencies = [
  "decv-audio",
  "decv-core",
  "decv-h264",
  "decv-mp4",
+ "decv-network",
 ]
 
 [[package]]
 name = "decv-audio"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
 dependencies = [
  "decv-core",
  "symphonia",
@@ -1766,15 +1767,19 @@ dependencies = [
 [[package]]
 name = "decv-core"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+dependencies = [
+ "aligned-vec",
+]
 
 [[package]]
 name = "decv-h264"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
 dependencies = [
  "bit-readers",
  "decv-core",
+ "memchr",
  "rayon",
  "smallvec",
 ]
@@ -1782,9 +1787,18 @@ dependencies = [
 [[package]]
 name = "decv-mp4"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=a41fbb5fe75604d64973560d702c5f7885104992#a41fbb5fe75604d64973560d702c5f7885104992"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
 dependencies = [
  "decv-core",
+]
+
+[[package]]
+name = "decv-network"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+dependencies = [
+ "decv-core",
+ "ureq",
 ]
 
 [[package]]
@@ -2935,6 +2949,7 @@ name = "gpui_media"
 version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
+ "base64 0.22.1",
  "core-foundation 0.10.0",
  "core-video",
  "cpal",
@@ -6160,6 +6175,7 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -7724,6 +7740,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
+dependencies = [
+ "base64 0.22.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
+dependencies = [
+ "base64 0.22.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7767,6 +7811,12 @@ name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -8226,6 +8276,15 @@ name = "webpki-root-certs"
 version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d46a5a140e6f7afeccd8eae97eff335163939eac8b929834875168b29b3d267"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]

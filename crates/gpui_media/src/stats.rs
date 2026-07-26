@@ -48,8 +48,8 @@ impl PlaybackCounters {
         self.decoded_frames.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_dropped_frame(&self) {
-        self.dropped_frames.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_dropped_frame(&self) -> u64 {
+        self.dropped_frames.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub(crate) fn snapshot(&self, delivered_frames: u64) -> VideoPlaybackStats {

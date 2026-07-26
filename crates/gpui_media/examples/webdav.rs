@@ -1,6 +1,8 @@
 use std::{env, time::Duration};
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
+#[cfg(feature = "backend-decv")]
+use gpui_media::DecvBackend;
 use gpui_media::{
     MediaSource, NetworkSourceOptions, PlaybackState, VideoPlayer, VideoPlayerEvent,
     VideoPlayerOptions,
@@ -49,7 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             move |window, cx| {
                 window.set_window_title(&title);
                 let player = cx.new(|cx| {
-                    VideoPlayer::new_in_window(source, VideoPlayerOptions::default(), window, cx)
+                    let builder =
+                        VideoPlayer::builder(source).options(VideoPlayerOptions::default());
+                    #[cfg(feature = "backend-decv")]
+                    let builder = builder.backend(DecvBackend::new());
+                    builder
+                        .build_in_window(window, cx)
                         .expect("failed to create WebDAV video player")
                 });
                 cx.subscribe(&player, |_, event, _| match event {

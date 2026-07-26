@@ -7,26 +7,30 @@ edition.workspace = true
 [features]
 default = ["backend-gstreamer"]
 backend-gstreamer = [
-    "dep:gst",
-    "dep:gst-app",
-    "dep:gst-video",
-    "dep:gst-allocators",
-    "dep:core-foundation",
-    "dep:core-video",
+  "dep:gst",
+  "dep:gst-app",
+  "dep:gst-video",
+  "dep:gst-allocators",
+  "dep:core-foundation",
+  "dep:core-video",
 ]
-backend-decv = [
-    "dep:cpal",
-    "dep:decv",
-]
+backend-decv = ["dep:base64", "dep:cpal", "dep:decv"]
 
 [dependencies]
 async-channel.workspace = true
+base64 = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
-decv = { git = "https://github.com/cradiy/decv", rev = "a41fbb5fe75604d64973560d702c5f7885104992", optional = true }
+decv = { git = "https://github.com/cradiy/decv", rev = "ed65c978a12badce65c37e27c7bcd64d63dcf6ce", features = [
+  "network",
+], optional = true }
 gpui.workspace = true
 gst = { package = "gstreamer", version = "0.25", optional = true }
-gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"], optional = true }
-gst-video = { package = "gstreamer-video", version = "0.25", features = ["v1_24"], optional = true }
+gst-app = { package = "gstreamer-app", version = "0.25", features = [
+  "v1_24",
+], optional = true }
+gst-video = { package = "gstreamer-video", version = "0.25", features = [
+  "v1_24",
+], optional = true }
 log.workspace = true
 url.workspace = true
 

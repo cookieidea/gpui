@@ -167,12 +167,12 @@ impl NetworkSourceOptions {
         self.user_agent.as_deref()
     }
 
-    #[cfg(feature = "backend-gstreamer")]
+    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv"))]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
 
-    #[cfg(feature = "backend-gstreamer")]
+    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv"))]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
     }
@@ -338,7 +338,7 @@ impl MediaSource {
         &self.network
     }
 
-    #[cfg(any(feature = "backend-gstreamer", test))]
+    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv", test))]
     pub(crate) fn redact_error_message(&self, message: &str) -> String {
         let mut redacted = message.replace(&self.uri, &redacted_uri(&self.uri));
         for secret in self.network.sensitive_values() {
@@ -356,7 +356,7 @@ impl MediaSource {
 }
 
 impl NetworkSourceOptions {
-    #[cfg(any(feature = "backend-gstreamer", test))]
+    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv", test))]
     fn sensitive_values(&self) -> impl Iterator<Item = &str> {
         self.headers
             .values()

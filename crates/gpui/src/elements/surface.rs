@@ -668,9 +668,28 @@ pub struct SurfaceColorInfo {
 /// One CPU-backed image plane.
 #[derive(Clone)]
 pub struct SurfacePlane {
-    bytes: Arc<[u8]>,
+    bytes: SurfacePlaneBytes,
     offset: usize,
     stride: u32,
+}
+
+#[derive(Clone)]
+enum SurfacePlaneBytes {
+    Slice(Arc<[u8]>),
+    Shared(Arc<dyn SharedSurfaceBytes>),
+}
+
+trait SharedSurfaceBytes: Send + Sync {
+    fn as_bytes(&self) -> &[u8];
+}
+
+impl<T> SharedSurfaceBytes for T
+where
+    T: AsRef<[u8]> + Send + Sync,
+{
+    fn as_bytes(&self) -> &[u8] {
+        self.as_ref()
+    }
 }
 
 /// An owned reference to a macOS CoreVideo allocation.
@@ -736,7 +755,7 @@ impl SurfacePlane {
     /// Creates a plane from shared bytes and a byte stride.
     pub fn new(bytes: impl Into<Arc<[u8]>>, stride: u32) -> Self {
         Self {
-            bytes: bytes.into(),
+            bytes: SurfacePlaneBytes::Slice(bytes.into()),
             offset: 0,
             stride,
         }
@@ -748,7 +767,22 @@ impl SurfacePlane {
     /// plane into a separate tightly based buffer.
     pub fn with_offset(bytes: impl Into<Arc<[u8]>>, offset: usize, stride: u32) -> Self {
         Self {
-            bytes: bytes.into(),
+            bytes: SurfacePlaneBytes::Slice(bytes.into()),
+            offset,
+            stride,
+        }
+    }
+
+    /// Creates a plane backed by another immutable, reference-counted byte owner.
+    ///
+    /// This lets software decoders preserve specialized allocations such as
+    /// cache-line-aligned frame buffers without copying them into `Arc<[u8]>`.
+    pub fn with_shared_offset<T>(bytes: Arc<T>, offset: usize, stride: u32) -> Self
+    where
+        T: AsRef<[u8]> + Send + Sync + 'static,
+    {
+        Self {
+            bytes: SurfacePlaneBytes::Shared(bytes),
             offset,
             stride,
         }
@@ -756,7 +790,10 @@ impl SurfacePlane {
 
     /// Returns the plane bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        match &self.bytes {
+            SurfacePlaneBytes::Slice(bytes) => bytes,
+            SurfacePlaneBytes::Shared(bytes) => bytes.as_bytes(),
+        }
     }
 
     /// Returns the byte offset of the first row in the shared allocation.
@@ -773,7 +810,7 @@ impl SurfacePlane {
 impl fmt::Debug for SurfacePlane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SurfacePlane")
-            .field("len", &self.bytes.len())
+            .field("len", &self.bytes().len())
             .field("offset", &self.offset)
             .field("stride", &self.stride)
             .finish()
@@ -1309,10 +1346,10 @@ fn validate_frame(
             .and_then(|preceding_rows| preceding_rows.checked_add(minimum_stride as usize))
             .and_then(|plane_len| plane.offset.checked_add(plane_len))
             .ok_or(SurfaceFrameError::PlaneLayoutOverflow)?;
-        if plane.bytes.len() < minimum_len {
+        if plane.bytes().len() < minimum_len {
             return Err(SurfaceFrameError::PlaneTooShort {
                 plane: plane_index,
-                actual: plane.bytes.len(),
+                actual: plane.bytes().len(),
                 minimum: minimum_len,
             });
         }
@@ -1748,6 +1785,17 @@ mod tests {
         let planes = frame.cpu_planes().unwrap();
         assert_eq!(planes[0].offset(), 0);
         assert_eq!(planes[1].offset(), 32);
+    }
+
+    #[test]
+    fn preserves_specialized_shared_plane_allocations_without_copying() {
+        let allocation = Arc::new(vec![0; 48]);
+        let allocation_pointer = allocation.as_ptr();
+        let plane = SurfacePlane::with_shared_offset(allocation, 16, 8);
+
+        assert_eq!(plane.bytes().as_ptr(), allocation_pointer);
+        assert_eq!(plane.offset(), 16);
+        assert_eq!(plane.stride(), 8);
     }
 
     #[test]

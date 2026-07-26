@@ -1,10 +1,10 @@
 use std::{
+    collections::VecDeque,
     fs::File,
     num::NonZeroUsize,
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -14,12 +14,14 @@ use std::{
 mod audio_output;
 
 use audio_output::{AudioClock, AudioOutput};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use decv::{
     AudioDecodeInputStatus, AudioDecodeOutput, AudioDecoder, AudioFormat, AudioPacketCursor,
-    ColorInfo, ColorMatrix as DecvColorMatrix, ColorRange as DecvColorRange, DecodeInputStatus,
-    DecodeOutput, DecodedVideoFrame, EncodedAudioPacket, EncodedVideoPacket, FrameStorage,
-    H264Decoder, H264Mp4SeekController, H264Parallelism, MediaTime, Mp4Demuxer, PacketCursor,
-    PixelFormat, Size as DecvSize, SoftwareAudioDecoder, Track, TrackKind, VideoDecoder,
+    ColorInfo, ColorMatrix as DecvColorMatrix, ColorRange as DecvColorRange, CpuBuffer,
+    DecodeInputStatus, DecodeOutput, DecodedVideoFrame, EncodedAudioPacket, EncodedVideoPacket,
+    FrameStorage, H264Decoder, H264Mp4SeekController, H264Parallelism, HttpRangeInput, MediaInput,
+    MediaTime, Mp4Demuxer, PacketCursor, PixelFormat, RangeCacheConfig, Size as DecvSize,
+    SoftwareAudioDecoder, Track, TrackKind, VideoDecoder,
 };
 use gpui::{
     Bounds, ColorRange, DevicePixels, SurfaceColorInfo, SurfaceFormat, SurfaceFrame, SurfaceHandle,
@@ -27,9 +29,10 @@ use gpui::{
 };
 
 use crate::{
-    MediaBackend, MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind,
-    MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult,
-    MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
+    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaBackendEvent,
+    MediaCapabilities, MediaError, MediaErrorKind, MediaOutputSink, MediaPlaybackRequest,
+    MediaPlaybackSession, MediaRecovery, MediaResult, MediaSource, PlaybackTimeline, SeekMode,
+    VideoFrame,
 };
 
 const MEDIA_TIME_SCALE: u32 = 1_000_000_000;
@@ -39,6 +42,18 @@ const AUDIO_CLOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const VIDEO_SEEK_CHECKPOINT_LIMIT: usize = 4;
 const VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES: usize = 12;
+// Keep decv's cross-picture work fed while the front frame waits for presentation.
+const VIDEO_DECODE_QUEUE_CAPACITY: usize = 4;
+// Avoid synchronous request churn and A/V cursor cache thrashing during HTTP playback.
+const HTTP_CACHE_BLOCK_BYTES: usize = 1024 * 1024;
+const HTTP_CACHE_MAXIMUM_BLOCKS: usize = 64;
+// Keep enough compressed media ahead to hide ordinary HTTP Range latency without
+// reserving a large span that makes a reader wait for an oversized response.
+const HTTP_PREFETCH_WINDOW_BYTES: usize = 8 * 1024 * 1024;
+const HTTP_PREFETCH_REARM_BYTES: u64 = 4 * 1024 * 1024;
+
+type DecvMediaInput = Arc<dyn MediaInput>;
+type DecvDemuxer = Mp4Demuxer<DecvMediaInput>;
 
 /// Reconstruction parallelism used by the built-in `decv` H.264 decoder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -151,13 +166,24 @@ impl MediaBackend for DecvBackend {
         DecvSession::open(request.source, output, self.options)
             .map(|session| Box::new(session) as Box<dyn MediaPlaybackSession>)
     }
+
+    fn open_frame_extractor(
+        &self,
+        request: FrameExtractorBackendRequest,
+    ) -> MediaResult<Box<dyn FrameExtractionSession>> {
+        Ok(Box::new(DecvFrameExtractionSession::new(
+            request.source,
+            request.timeout,
+            self.options,
+        )))
+    }
 }
 
 struct DecvSession {
     commands: mpsc::Sender<Command>,
     timeline: Arc<Mutex<TimelineState>>,
     latest_seek_generation: Arc<AtomicU64>,
-    has_audio: bool,
+    has_audio: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -167,33 +193,48 @@ impl DecvSession {
         output: MediaOutputSink,
         options: DecvBackendOptions,
     ) -> MediaResult<Self> {
-        let path = local_path(&source)?;
-        let probe = probe_mp4(&path)?;
-        let timeline = Arc::new(Mutex::new(TimelineState::new(probe.duration)));
-        let video_track_index = probe.video_track_index;
-        let audio_track_index = probe.audio_track_index;
+        let timeline = Arc::new(Mutex::new(TimelineState::new(None)));
         let (commands, receiver) = mpsc::channel();
         let worker_timeline = timeline.clone();
         let latest_seek_generation = Arc::new(AtomicU64::new(0));
         let worker_latest_seek_generation = latest_seek_generation.clone();
-        let worker_path = path;
+        let has_audio = Arc::new(AtomicBool::new(false));
+        let worker_has_audio = has_audio.clone();
+        let worker_source = source;
         let worker = thread::Builder::new()
             .name("gpui-video-decv".to_owned())
             .spawn(move || {
-                if let Err(error) = playback_worker(
-                    &worker_path,
-                    video_track_index,
-                    audio_track_index,
-                    receiver,
-                    &worker_timeline,
-                    &worker_latest_seek_generation,
-                    &output,
-                    options.parallelism,
-                    options.interactive_seek_maximum_input_samples,
-                ) {
+                let result = (|| {
+                    let prepared = probe_mp4(&worker_source)?;
+                    worker_timeline
+                        .lock_unpoisoned()
+                        .set_duration(prepared.probe.duration);
+                    worker_has_audio.store(
+                        prepared.probe.audio_track_index.is_some(),
+                        Ordering::Release,
+                    );
+                    playback_worker(
+                        prepared.demuxer,
+                        prepared.probe.video_track_index,
+                        prepared.probe.audio_track_index,
+                        prepared.network,
+                        receiver,
+                        &worker_timeline,
+                        worker_latest_seek_generation,
+                        &output,
+                        options.parallelism,
+                        options.interactive_seek_maximum_input_samples,
+                    )
+                })();
+                if let Err(error) = result {
+                    let error = MediaError::new(
+                        error.kind,
+                        worker_source.redact_error_message(&error.message),
+                        error.recovery,
+                    );
                     log::error!(
                         "decv playback failed for {}: {error}",
-                        worker_path.display()
+                        worker_source.display_name()
                     );
                     output.emit(MediaBackendEvent::Error(Arc::new(error)));
                 }
@@ -204,7 +245,7 @@ impl DecvSession {
             commands,
             timeline,
             latest_seek_generation,
-            has_audio: audio_track_index.is_some(),
+            has_audio,
             worker: Some(worker),
         })
     }
@@ -224,9 +265,10 @@ impl MediaPlaybackSession for DecvSession {
     fn capabilities(&self) -> MediaCapabilities {
         MediaCapabilities {
             video: true,
-            audio: self.has_audio,
+            audio: self.has_audio.load(Ordering::Acquire),
             seeking: true,
             accurate_seeking: true,
+            frame_extraction: true,
             ..MediaCapabilities::default()
         }
     }
@@ -301,6 +343,255 @@ impl Drop for DecvSession {
     }
 }
 
+struct DecvFrameExtractionSession {
+    source: MediaSource,
+    timeout: Duration,
+    options: DecvBackendOptions,
+    state: Option<DecvFrameExtractorState>,
+}
+
+impl DecvFrameExtractionSession {
+    fn new(source: MediaSource, timeout: Duration, options: DecvBackendOptions) -> Self {
+        Self {
+            source,
+            timeout,
+            options,
+            state: None,
+        }
+    }
+
+    fn state(&mut self) -> MediaResult<&mut DecvFrameExtractorState> {
+        if self.state.is_none() {
+            self.state = Some(DecvFrameExtractorState::open(
+                &self.source,
+                self.timeout,
+                self.options,
+            )?);
+        }
+        Ok(self
+            .state
+            .as_mut()
+            .expect("decv frame extractor state was initialized"))
+    }
+
+    fn redact_error(&self, mut error: MediaError) -> MediaError {
+        error.message = self.source.redact_error_message(&error.message).into();
+        error
+    }
+}
+
+impl FrameExtractionSession for DecvFrameExtractionSession {
+    fn initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>> {
+        let result = self.state().and_then(|state| state.extract_initial_frame());
+        result.map_err(|error| self.redact_error(error))
+    }
+
+    fn frame_at(
+        &mut self,
+        position: Duration,
+        seek_mode: SeekMode,
+    ) -> MediaResult<Arc<VideoFrame>> {
+        let result = self.state().and_then(|state| {
+            if position.is_zero() {
+                state.extract_initial_frame()
+            } else {
+                state.extract_frame(position, Some(seek_mode))
+            }
+        });
+        result.map_err(|error| self.redact_error(error))
+    }
+}
+
+struct DecvFrameExtractorState {
+    demuxer: DecvDemuxer,
+    video_track_index: usize,
+    duration: Option<Duration>,
+    surface_handle: SurfaceHandle,
+    sequence: u64,
+    timeout: Duration,
+    decoder: H264Decoder,
+    seek_controller: H264Mp4SeekController,
+    first_description: usize,
+    interactive_seek_maximum_input_samples: usize,
+    initial_frame: Option<Arc<VideoFrame>>,
+}
+
+impl DecvFrameExtractorState {
+    fn open(
+        source: &MediaSource,
+        timeout: Duration,
+        options: DecvBackendOptions,
+    ) -> MediaResult<Self> {
+        let prepared = probe_mp4(source)?;
+        let (decoder_config, first_description) = {
+            let cursor = prepared
+                .demuxer
+                .packet_cursor(prepared.probe.video_track_index)
+                .map_err(|error| decv_container_error("failed to open MP4 packet cursor", error))?;
+            let decoder_config = cursor
+                .decoder_config()
+                .map_err(|error| {
+                    decv_container_error("failed to read MP4 decoder configuration", error)
+                })?
+                .ok_or_else(|| {
+                    MediaError::new(
+                        MediaErrorKind::UnsupportedCodec,
+                        "MP4 video track has no decoder configuration",
+                        MediaRecovery::None,
+                    )
+                })?;
+            let first_description = cursor
+                .track()
+                .samples()
+                .first()
+                .ok_or_else(|| decv_container_message("MP4 video track has no samples"))?
+                .description_index();
+            (decoder_config, first_description)
+        };
+        let mut decoder = H264Decoder::new();
+        decoder
+            .set_parallelism(options.parallelism.into())
+            .map_err(|error| {
+                decv_decode_error("failed to configure decv H.264 parallelism", error)
+            })?;
+        decoder.configure(decoder_config).map_err(|error| {
+            MediaError::new(
+                MediaErrorKind::UnsupportedCodec,
+                format!("failed to configure decv H.264 decoder: {error:?}"),
+                MediaRecovery::None,
+            )
+        })?;
+        Ok(Self {
+            demuxer: prepared.demuxer,
+            video_track_index: prepared.probe.video_track_index,
+            duration: prepared.probe.duration,
+            surface_handle: SurfaceHandle::new(),
+            sequence: 0,
+            timeout,
+            decoder,
+            seek_controller: H264Mp4SeekController::new(
+                prepared.probe.video_track_index,
+                VIDEO_SEEK_CHECKPOINT_LIMIT,
+                VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
+            ),
+            first_description,
+            interactive_seek_maximum_input_samples: options.interactive_seek_maximum_input_samples,
+            initial_frame: None,
+        })
+    }
+
+    fn extract_frame(
+        &mut self,
+        requested: Duration,
+        seek_mode: Option<SeekMode>,
+    ) -> MediaResult<Arc<VideoFrame>> {
+        let started = Instant::now();
+        let mut cursor = self
+            .demuxer
+            .packet_cursor(self.video_track_index)
+            .map_err(|error| decv_container_error("failed to open MP4 packet cursor", error))?;
+
+        let mut minimum_pts = None;
+        let mut discontinuity = false;
+        if let Some(seek_mode) = seek_mode {
+            let requested = self.duration.map_or(requested, |duration| {
+                requested.min(duration.saturating_sub(Duration::from_millis(1)))
+            });
+            let target = duration_to_media_time(requested)?;
+            match seek_mode {
+                SeekMode::Accurate => {
+                    let outcome = self
+                        .seek_controller
+                        .begin_exact_seek(&mut self.decoder, &mut cursor, target, false)
+                        .map_err(|error| {
+                            decv_decode_error(
+                                "failed to coordinate exact H.264 MP4 frame extraction",
+                                error,
+                            )
+                        })?;
+                    discontinuity = outcome.requires_discontinuity();
+                    minimum_pts = Some(requested);
+                }
+                SeekMode::Interactive => {
+                    let decision = self
+                        .seek_controller
+                        .begin_interactive_seek(
+                            &mut self.decoder,
+                            &mut cursor,
+                            target,
+                            false,
+                            self.interactive_seek_maximum_input_samples,
+                        )
+                        .map_err(|error| {
+                            decv_decode_error(
+                                "failed to coordinate interactive H.264 MP4 frame extraction",
+                                error,
+                            )
+                        })?;
+                    discontinuity = decision.requires_discontinuity();
+                    minimum_pts = decision.is_exact().then_some(requested);
+                }
+                SeekMode::KeyFrame => {
+                    self.seek_controller
+                        .begin_nearest_preview(&mut self.decoder, &mut cursor, target)
+                        .map_err(|error| {
+                            decv_decode_error(
+                                "failed to coordinate H.264 MP4 keyframe extraction",
+                                error,
+                            )
+                        })?;
+                    discontinuity = true;
+                }
+            }
+        }
+
+        let mut pending_packet = None;
+        let mut draining = false;
+        loop {
+            if started.elapsed() >= self.timeout {
+                return Err(MediaError::timeout(format!(
+                    "timed out waiting for a decv video frame at {requested:?}"
+                )));
+            }
+            match decode_video_step(
+                &mut self.decoder,
+                &mut cursor,
+                &mut self.seek_controller,
+                &mut pending_packet,
+                &mut draining,
+                &mut discontinuity,
+                self.first_description,
+            )? {
+                VideoDecodeStep::Progress => {}
+                VideoDecodeStep::Frame(frame) => {
+                    let timestamp = media_time_to_duration(frame.pts);
+                    if minimum_pts.is_some_and(|minimum| timestamp.is_some_and(|pts| pts < minimum))
+                    {
+                        continue;
+                    }
+                    self.sequence = self.sequence.wrapping_add(1).max(1);
+                    return convert_frame(frame, self.surface_handle.clone(), self.sequence)
+                        .map(Arc::new);
+                }
+                VideoDecodeStep::EndOfStream => {
+                    return Err(decv_decode_message(format!(
+                        "decv reached the end of the video before extracting a frame at {requested:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn extract_initial_frame(&mut self) -> MediaResult<Arc<VideoFrame>> {
+        if let Some(frame) = &self.initial_frame {
+            return Ok(frame.clone());
+        }
+        let frame = self.extract_frame(Duration::ZERO, None)?;
+        self.initial_frame = Some(frame.clone());
+        Ok(frame)
+    }
+}
+
 #[derive(Debug)]
 enum Command {
     Play,
@@ -344,6 +635,154 @@ fn coalesce_seek_command(
 
 fn seek_generation_is_current(handled: u64, latest: u64) -> bool {
     handled == latest
+}
+
+fn network_prefetch_is_due(
+    last_request: Option<(u64, u64)>,
+    generation: u64,
+    sample_offset: u64,
+) -> bool {
+    !last_request.is_some_and(|(requested_generation, requested_offset)| {
+        requested_generation == generation
+            && sample_offset >= requested_offset
+            && sample_offset - requested_offset < HTTP_PREFETCH_REARM_BYTES
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NetworkPrefetchRequest {
+    track_index: usize,
+    first_sample_index: usize,
+    generation: u64,
+}
+
+struct NetworkPrefetcher {
+    requests: Option<mpsc::SyncSender<NetworkPrefetchRequest>>,
+    shutdown: Arc<AtomicBool>,
+    last_request: Option<(u64, u64)>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl NetworkPrefetcher {
+    fn start(demuxer: &DecvDemuxer, latest_seek_generation: Arc<AtomicU64>) -> MediaResult<Self> {
+        let worker_demuxer = Mp4Demuxer::open(demuxer.input().clone()).map_err(|error| {
+            decv_container_error("failed to prepare MP4 network prefetch", error)
+        })?;
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        let worker = thread::Builder::new()
+            .name("gpui-video-decv-io".to_owned())
+            .spawn(move || {
+                network_prefetch_worker(
+                    worker_demuxer,
+                    receiver,
+                    worker_shutdown,
+                    latest_seek_generation,
+                )
+            })
+            .map_err(|error| {
+                MediaError::io("failed to start decv network prefetch thread", error)
+            })?;
+        Ok(Self {
+            requests: Some(requests),
+            shutdown,
+            last_request: None,
+            worker: Some(worker),
+        })
+    }
+
+    fn request_now(&mut self, cursor: &PacketCursor<'_, DecvMediaInput>, generation: u64) {
+        self.last_request = None;
+        self.request_if_needed(cursor, generation);
+    }
+
+    fn mark_current_as_prefetched(
+        &mut self,
+        cursor: &PacketCursor<'_, DecvMediaInput>,
+        generation: u64,
+    ) {
+        self.last_request = cursor
+            .track()
+            .samples()
+            .get(cursor.next_sample_index())
+            .map(|sample| (generation, sample.offset()));
+    }
+
+    fn request_if_needed(&mut self, cursor: &PacketCursor<'_, DecvMediaInput>, generation: u64) {
+        let first_sample_index = cursor.next_sample_index();
+        let Some(sample) = cursor.track().samples().get(first_sample_index) else {
+            return;
+        };
+        let sample_offset = sample.offset();
+        if !network_prefetch_is_due(self.last_request, generation, sample_offset) {
+            return;
+        }
+
+        let request = NetworkPrefetchRequest {
+            track_index: cursor.track_index(),
+            first_sample_index,
+            generation,
+        };
+        let Some(requests) = self.requests.as_ref() else {
+            return;
+        };
+        match requests.try_send(request) {
+            Ok(()) => self.last_request = Some((generation, sample_offset)),
+            Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.requests = None;
+            }
+        }
+    }
+}
+
+impl Drop for NetworkPrefetcher {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.requests.take();
+        // A blocking Range request cannot be interrupted through MediaInput.
+        // Detach and let the I/O worker notice shutdown after that request.
+        self.worker.take();
+    }
+}
+
+fn network_prefetch_worker(
+    demuxer: DecvDemuxer,
+    requests: mpsc::Receiver<NetworkPrefetchRequest>,
+    shutdown: Arc<AtomicBool>,
+    latest_seek_generation: Arc<AtomicU64>,
+) {
+    while !shutdown.load(Ordering::Acquire) {
+        let Ok(mut request) = requests.recv() else {
+            break;
+        };
+        while let Ok(newer) = requests.try_recv() {
+            request = newer;
+        }
+        if shutdown.load(Ordering::Acquire)
+            || !seek_generation_is_current(
+                request.generation,
+                latest_seek_generation.load(Ordering::Acquire),
+            )
+        {
+            continue;
+        }
+        if let Err(error) = demuxer.prefetch_track_bytes(
+            request.track_index,
+            request.first_sample_index,
+            HTTP_PREFETCH_WINDOW_BYTES,
+        ) && seek_generation_is_current(
+            request.generation,
+            latest_seek_generation.load(Ordering::Acquire),
+        ) {
+            log::warn!(
+                target: "gpui_media::decv_network",
+                "decv network prefetch failed at video sample {}: {error}",
+                request.first_sample_index,
+            );
+        }
+    }
 }
 
 struct SeekPlaybackState {
@@ -395,6 +834,12 @@ struct Probe {
     duration: Option<Duration>,
 }
 
+struct PreparedMedia {
+    demuxer: DecvDemuxer,
+    probe: Probe,
+    network: bool,
+}
+
 fn decv_container_error(
     context: impl std::fmt::Display,
     error: impl std::fmt::Debug,
@@ -437,14 +882,20 @@ fn decv_video_output_error(
     )
 }
 
-fn probe_mp4(path: &Path) -> MediaResult<Probe> {
-    let demuxer =
-        Mp4Demuxer::open(File::open(path).map_err(|error| {
-            MediaError::io(format!("failed to open {}", path.display()), error)
-        })?)
-        .map_err(|error| {
-            decv_container_error(format!("failed to parse MP4 {}", path.display()), error)
-        })?;
+fn probe_mp4(source: &MediaSource) -> MediaResult<PreparedMedia> {
+    let network = matches!(
+        url::Url::parse(source.uri())
+            .ok()
+            .as_ref()
+            .map(url::Url::scheme),
+        Some("http" | "https")
+    );
+    let demuxer = Mp4Demuxer::open(open_media_input(source)?).map_err(|error| {
+        decv_container_error(
+            format!("failed to parse MP4 {}", source.display_name()),
+            error,
+        )
+    })?;
     let video_track_index = video_track_index(&demuxer)?;
     let audio_track_index = audio_track_index(&demuxer);
     let declared_duration = demuxer
@@ -461,31 +912,29 @@ fn probe_mp4(path: &Path) -> MediaResult<Probe> {
         .into_iter()
         .flatten()
         .max();
-    Ok(Probe {
-        video_track_index,
-        audio_track_index,
-        duration,
+    Ok(PreparedMedia {
+        demuxer,
+        probe: Probe {
+            video_track_index,
+            audio_track_index,
+            duration,
+        },
+        network,
     })
 }
 
 fn playback_worker(
-    path: &Path,
+    demuxer: DecvDemuxer,
     video_track_index: usize,
     audio_track_index: Option<usize>,
+    network: bool,
     commands: mpsc::Receiver<Command>,
     shared_timeline: &Mutex<TimelineState>,
-    latest_seek_generation: &AtomicU64,
+    latest_seek_generation: Arc<AtomicU64>,
     output: &MediaOutputSink,
     parallelism: DecvParallelism,
     interactive_seek_maximum_input_samples: usize,
 ) -> MediaResult<()> {
-    let demuxer =
-        Mp4Demuxer::open(File::open(path).map_err(|error| {
-            MediaError::io(format!("failed to open {}", path.display()), error)
-        })?)
-        .map_err(|error| {
-            decv_container_error(format!("failed to parse MP4 {}", path.display()), error)
-        })?;
     if video_track_index >= demuxer.movie().tracks().len() {
         return Err(decv_container_message(
             "video track changed after probing the MP4",
@@ -531,12 +980,30 @@ fn playback_worker(
         .map(|track_index| DecvAudioPlayback::open(&demuxer, track_index))
         .transpose()?;
     shared_timeline.lock_unpoisoned().audio_clock = audio.as_ref().map(DecvAudioPlayback::clock);
+    let initial_prefetch_complete = if network {
+        match cursor.prefetch_next_bytes(HTTP_PREFETCH_WINDOW_BYTES) {
+            Ok(covered_samples) => covered_samples != 0,
+            Err(error) => {
+                log::warn!(
+                    target: "gpui_media::decv_network",
+                    "decv initial network prefetch failed: {error}",
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let mut network_prefetch = network
+        .then(|| NetworkPrefetcher::start(&demuxer, latest_seek_generation.clone()))
+        .transpose()?;
 
     let surface_handle = SurfaceHandle::new();
     let mut sequence = 0u64;
     let mut pending_packet = None;
-    let mut pending_frame = None;
+    let mut pending_frames = VecDeque::with_capacity(VIDEO_DECODE_QUEUE_CAPACITY);
     let mut draining = false;
+    let mut video_decode_complete = false;
     let mut discontinuity = false;
     let mut playing = false;
     let mut preroll = false;
@@ -545,8 +1012,20 @@ fn playback_worker(
     let mut seek_state = SeekPlaybackState::new(latest_seek_generation.load(Ordering::Acquire));
     let mut deferred_command = None;
     let mut clock = PresentationClock::new(Duration::ZERO);
+    let mut seek_preroll_skipped_frames = 0u64;
+    let mut stale_seek_skipped_frames = 0u64;
+    if let Some(prefetch) = network_prefetch.as_mut() {
+        if initial_prefetch_complete {
+            prefetch.mark_current_as_prefetched(&cursor, seek_state.handled_generation);
+        } else {
+            prefetch.request_now(&cursor, seek_state.handled_generation);
+        }
+    }
 
     loop {
+        if let Some(prefetch) = network_prefetch.as_mut() {
+            prefetch.request_if_needed(&cursor, seek_state.handled_generation);
+        }
         if let Some((position, generation)) = seek_state.ready_without_frame.take() {
             if seek_generation_is_current(
                 generation,
@@ -587,8 +1066,9 @@ fn playback_worker(
                 &mut seek_state,
                 interactive_seek_maximum_input_samples,
                 &mut pending_packet,
-                &mut pending_frame,
+                &mut pending_frames,
                 &mut draining,
+                &mut video_decode_complete,
                 &mut discontinuity,
                 &mut audio,
                 &mut playing,
@@ -614,8 +1094,9 @@ fn playback_worker(
                 &mut seek_state,
                 interactive_seek_maximum_input_samples,
                 &mut pending_packet,
-                &mut pending_frame,
+                &mut pending_frames,
                 &mut draining,
+                &mut video_decode_complete,
                 &mut discontinuity,
                 &mut audio,
                 &mut playing,
@@ -649,9 +1130,8 @@ fn playback_worker(
                 }
             }
         }
-
-        if pending_frame.is_none() {
-            match decode_video_step(
+        if pending_frames.is_empty() && !video_decode_complete {
+            let decode_step = decode_video_step(
                 &mut decoder,
                 &mut cursor,
                 &mut seek_controller,
@@ -659,59 +1139,14 @@ fn playback_worker(
                 &mut draining,
                 &mut discontinuity,
                 first_description,
-            )? {
+            )?;
+            match decode_step {
                 VideoDecodeStep::Progress => continue,
-                VideoDecodeStep::Frame(frame) => pending_frame = Some(frame),
+                VideoDecodeStep::Frame(frame) => {
+                    pending_frames.push_back(frame);
+                }
                 VideoDecodeStep::EndOfStream => {
-                    let audio_pending = audio
-                        .as_ref()
-                        .is_some_and(|audio| !audio.is_decode_complete() || !audio.is_drained());
-                    if audio_pending {
-                        match commands.recv_timeout(AUDIO_CLOCK_POLL_INTERVAL) {
-                            Ok(command) => {
-                                let command = coalesce_seek_command(
-                                    command,
-                                    &commands,
-                                    &mut deferred_command,
-                                );
-                                if apply_command(
-                                    command,
-                                    &mut cursor,
-                                    &mut decoder,
-                                    &mut seek_controller,
-                                    &mut seek_state,
-                                    interactive_seek_maximum_input_samples,
-                                    &mut pending_packet,
-                                    &mut pending_frame,
-                                    &mut draining,
-                                    &mut discontinuity,
-                                    &mut audio,
-                                    &mut playing,
-                                    &mut preroll,
-                                    &mut ended,
-                                    &mut minimum_pts,
-                                    &mut clock,
-                                    shared_timeline,
-                                )? {
-                                    return Ok(());
-                                }
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        }
-                        continue;
-                    }
-                    if !ended {
-                        ended = true;
-                        if let Some(audio) = audio.as_ref() {
-                            audio.pause()?;
-                        }
-                        playing = false;
-                        let now = Instant::now();
-                        shared_timeline.lock_unpoisoned().finish(now);
-                        output.emit(MediaBackendEvent::Ended);
-                    }
-                    continue;
+                    video_decode_complete = true;
                 }
             }
             let command = deferred_command.take().or_else(|| commands.try_recv().ok());
@@ -725,8 +1160,9 @@ fn playback_worker(
                     &mut seek_state,
                     interactive_seek_maximum_input_samples,
                     &mut pending_packet,
-                    &mut pending_frame,
+                    &mut pending_frames,
                     &mut draining,
+                    &mut video_decode_complete,
                     &mut discontinuity,
                     &mut audio,
                     &mut playing,
@@ -742,12 +1178,68 @@ fn playback_worker(
             }
         }
 
-        let frame = pending_frame
-            .as_ref()
+        if pending_frames.is_empty() && video_decode_complete {
+            let audio_pending = audio
+                .as_ref()
+                .is_some_and(|audio| !audio.is_decode_complete() || !audio.is_drained());
+            if audio_pending {
+                match commands.recv_timeout(AUDIO_CLOCK_POLL_INTERVAL) {
+                    Ok(command) => {
+                        let command =
+                            coalesce_seek_command(command, &commands, &mut deferred_command);
+                        if apply_command(
+                            command,
+                            &mut cursor,
+                            &mut decoder,
+                            &mut seek_controller,
+                            &mut seek_state,
+                            interactive_seek_maximum_input_samples,
+                            &mut pending_packet,
+                            &mut pending_frames,
+                            &mut draining,
+                            &mut video_decode_complete,
+                            &mut discontinuity,
+                            &mut audio,
+                            &mut playing,
+                            &mut preroll,
+                            &mut ended,
+                            &mut minimum_pts,
+                            &mut clock,
+                            shared_timeline,
+                        )? {
+                            return Ok(());
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                continue;
+            }
+            if !ended {
+                ended = true;
+                if let Some(audio) = audio.as_ref() {
+                    audio.pause()?;
+                }
+                playing = false;
+                let now = Instant::now();
+                shared_timeline.lock_unpoisoned().finish(now);
+                output.emit(MediaBackendEvent::Ended);
+            }
+            continue;
+        }
+
+        let frame = pending_frames
+            .front()
             .expect("the decoder produced a pending frame");
         let timestamp = media_time_to_duration(frame.pts);
         if minimum_pts.is_some_and(|minimum| timestamp.is_some_and(|pts| pts < minimum)) {
-            pending_frame = None;
+            seek_preroll_skipped_frames = seek_preroll_skipped_frames.saturating_add(1);
+            log::debug!(
+                target: "gpui_media::decv_frame",
+                "decv seek-preroll-skip: count={seek_preroll_skipped_frames} \
+                 frame_pts={timestamp:?} minimum_pts={minimum_pts:?}",
+            );
+            pending_frames.pop_front();
             continue;
         }
         minimum_pts = None;
@@ -775,6 +1267,31 @@ fn playback_worker(
                 .deadline(timestamp)
                 .saturating_duration_since(Instant::now())
         };
+        if !wait.is_zero()
+            && !preroll
+            && !video_decode_complete
+            && pending_frames.len() < VIDEO_DECODE_QUEUE_CAPACITY
+        {
+            match decode_video_step(
+                &mut decoder,
+                &mut cursor,
+                &mut seek_controller,
+                &mut pending_packet,
+                &mut draining,
+                &mut discontinuity,
+                first_description,
+            )? {
+                VideoDecodeStep::Progress => continue,
+                VideoDecodeStep::Frame(frame) => {
+                    pending_frames.push_back(frame);
+                    continue;
+                }
+                VideoDecodeStep::EndOfStream => {
+                    video_decode_complete = true;
+                    continue;
+                }
+            }
+        }
         if !wait.is_zero() {
             match commands.recv_timeout(wait) {
                 Ok(command) => {
@@ -787,8 +1304,9 @@ fn playback_worker(
                         &mut seek_state,
                         interactive_seek_maximum_input_samples,
                         &mut pending_packet,
-                        &mut pending_frame,
+                        &mut pending_frames,
                         &mut draining,
+                        &mut video_decode_complete,
                         &mut discontinuity,
                         &mut audio,
                         &mut playing,
@@ -811,8 +1329,8 @@ fn playback_worker(
             }
         }
 
-        let frame = pending_frame
-            .take()
+        let frame = pending_frames
+            .pop_front()
             .expect("the scheduled frame remains pending");
         let completed_preroll = preroll;
         let completed_interactive_preroll = seek_state.interactive_preroll;
@@ -820,6 +1338,15 @@ fn playback_worker(
             seek_state.handled_generation,
             latest_seek_generation.load(Ordering::Acquire),
         ) {
+            stale_seek_skipped_frames = stale_seek_skipped_frames.saturating_add(1);
+            log::debug!(
+                target: "gpui_media::decv_frame",
+                "decv stale-seek-frame-skip: count={stale_seek_skipped_frames} \
+                 frame_pts={:?} handled_generation={} latest_generation={}",
+                media_time_to_duration(frame.pts),
+                seek_state.handled_generation,
+                latest_seek_generation.load(Ordering::Acquire),
+            );
             continue;
         }
         sequence = sequence.wrapping_add(1);
@@ -870,14 +1397,15 @@ fn playback_worker(
 #[allow(clippy::too_many_arguments)]
 fn apply_command(
     command: Command,
-    cursor: &mut PacketCursor<'_, File>,
+    cursor: &mut PacketCursor<'_, DecvMediaInput>,
     decoder: &mut H264Decoder,
     seek_controller: &mut H264Mp4SeekController,
     seek_state: &mut SeekPlaybackState,
     interactive_seek_maximum_input_samples: usize,
     pending_packet: &mut Option<EncodedVideoPacket>,
-    pending_frame: &mut Option<DecodedVideoFrame>,
+    pending_frames: &mut VecDeque<DecodedVideoFrame>,
     draining: &mut bool,
+    video_decode_complete: &mut bool,
     discontinuity: &mut bool,
     audio: &mut Option<DecvAudioPlayback<'_>>,
     playing: &mut bool,
@@ -911,14 +1439,20 @@ fn apply_command(
             }
             *playing = false;
             *preroll = seek_state.interactive_preroll
-                || (pending_frame.is_none() && cursor.next_sample_index() == 0 && !*ended);
+                || (pending_frames.is_empty() && cursor.next_sample_index() == 0 && !*ended);
         }
         Command::Reload {
             autoplay,
             generation,
         } => {
             cursor.rewind();
-            reset_decode_timeline(decoder, pending_packet, pending_frame, draining);
+            reset_decode_timeline(
+                decoder,
+                pending_packet,
+                pending_frames,
+                draining,
+                video_decode_complete,
+            );
             seek_controller.clear();
             seek_state.reset_interactive();
             seek_state.handled_generation = generation;
@@ -933,10 +1467,13 @@ fn apply_command(
             *clock = PresentationClock::new(Duration::ZERO);
         }
         Command::Seek {
-            position,
+            mut position,
             mode,
             generation,
         } => {
+            if let Some(duration) = shared_timeline.lock_unpoisoned().duration {
+                position = position.min(duration);
+            }
             if seek_state.can_reuse_interactive_exact(position)
                 && matches!(mode, SeekMode::Accurate | SeekMode::Interactive)
             {
@@ -1012,8 +1549,9 @@ fn apply_command(
             let seek_position = media_time_to_duration(Some(seek_time)).unwrap_or(Duration::ZERO);
             let timeline_position = if interactive { position } else { seek_position };
             *pending_packet = None;
-            *pending_frame = None;
+            pending_frames.clear();
             *draining = false;
+            *video_decode_complete = false;
             *discontinuity = requires_discontinuity;
             *minimum_pts = exact.then_some(position);
             *ended = false;
@@ -1055,13 +1593,15 @@ fn apply_command(
 fn reset_decode_timeline(
     decoder: &mut H264Decoder,
     pending_packet: &mut Option<EncodedVideoPacket>,
-    pending_frame: &mut Option<DecodedVideoFrame>,
+    pending_frames: &mut VecDeque<DecodedVideoFrame>,
     draining: &mut bool,
+    video_decode_complete: &mut bool,
 ) {
     decoder.flush();
     *pending_packet = None;
-    *pending_frame = None;
+    pending_frames.clear();
     *draining = false;
+    *video_decode_complete = false;
 }
 
 enum VideoDecodeStep {
@@ -1072,7 +1612,7 @@ enum VideoDecodeStep {
 
 fn decode_video_step(
     decoder: &mut H264Decoder,
-    cursor: &mut PacketCursor<'_, File>,
+    cursor: &mut PacketCursor<'_, DecvMediaInput>,
     seek_controller: &mut H264Mp4SeekController,
     pending_packet: &mut Option<EncodedVideoPacket>,
     draining: &mut bool,
@@ -1156,7 +1696,7 @@ fn decode_video_step(
 }
 
 struct DecvAudioPlayback<'demuxer> {
-    cursor: AudioPacketCursor<'demuxer, File>,
+    cursor: AudioPacketCursor<'demuxer, DecvMediaInput>,
     decoder: SoftwareAudioDecoder,
     pending_packet: Option<EncodedAudioPacket>,
     first_description: usize,
@@ -1168,7 +1708,7 @@ struct DecvAudioPlayback<'demuxer> {
 }
 
 impl<'demuxer> DecvAudioPlayback<'demuxer> {
-    fn open(demuxer: &'demuxer Mp4Demuxer<File>, track_index: usize) -> MediaResult<Self> {
+    fn open(demuxer: &'demuxer DecvDemuxer, track_index: usize) -> MediaResult<Self> {
         let cursor = demuxer.audio_packet_cursor(track_index).map_err(|error| {
             decv_container_error("failed to open MP4 audio packet cursor", error)
         })?;
@@ -1422,6 +1962,8 @@ fn convert_frame(
         ),
     };
     let display_size = device_size(frame.format.display_size)?;
+    let y = surface_plane(y, "Y")?;
+    let uv = surface_plane(uv, "UV")?;
     let surface = SurfaceFrame::new(
         handle,
         sequence,
@@ -1429,21 +1971,7 @@ fn convert_frame(
         visible_rect,
         display_size,
         SurfaceFormat::Nv12,
-        [
-            SurfacePlane::with_offset(
-                y.bytes.clone(),
-                y.offset,
-                u32::try_from(y.stride)
-                    .map_err(|error| decv_video_output_error("decv Y stride exceeds u32", error))?,
-            ),
-            SurfacePlane::with_offset(
-                uv.bytes.clone(),
-                uv.offset,
-                u32::try_from(uv.stride).map_err(|error| {
-                    decv_video_output_error("decv UV stride exceeds u32", error)
-                })?,
-            ),
-        ],
+        [y, uv],
         surface_color_info(frame.format.color, frame.format.coded_size.height),
     )
     .map_err(|error| decv_video_output_error("GPUI rejected the decv NV12 frame", error))?;
@@ -1453,6 +1981,18 @@ fn convert_frame(
         media_time_to_duration(frame.pts),
         media_time_to_duration(frame.duration),
     ))
+}
+
+fn surface_plane(plane: &decv::CpuPlane, name: &str) -> MediaResult<SurfacePlane> {
+    let stride = u32::try_from(plane.stride).map_err(|error| {
+        decv_video_output_error(format!("decv {name} stride exceeds u32"), error)
+    })?;
+    Ok(match &plane.bytes {
+        CpuBuffer::Bytes(bytes) => SurfacePlane::with_offset(bytes.clone(), plane.offset, stride),
+        CpuBuffer::Aligned(bytes) => {
+            SurfacePlane::with_shared_offset(bytes.clone(), plane.offset, stride)
+        }
+    })
 }
 
 fn surface_color_info(color: ColorInfo, coded_height: u32) -> SurfaceColorInfo {
@@ -1482,7 +2022,7 @@ fn surface_color_info(color: ColorInfo, coded_height: u32) -> SurfaceColorInfo {
     SurfaceColorInfo { matrix, range }
 }
 
-fn local_path(source: &MediaSource) -> MediaResult<PathBuf> {
+fn open_media_input(source: &MediaSource) -> MediaResult<DecvMediaInput> {
     let uri = url::Url::parse(source.uri()).map_err(|error| {
         MediaError::from_error(
             MediaErrorKind::InvalidInput,
@@ -1491,21 +2031,95 @@ fn local_path(source: &MediaSource) -> MediaResult<PathBuf> {
             error,
         )
     })?;
-    if uri.scheme() != "file" {
-        return Err(MediaError::new(
+    match uri.scheme() {
+        "file" => {
+            let path = uri.to_file_path().map_err(|_| {
+                MediaError::invalid_input("cannot convert media URI to a local path")
+            })?;
+            File::open(&path)
+                .map(|file| Arc::new(file) as DecvMediaInput)
+                .map_err(|error| {
+                    MediaError::io(format!("failed to open {}", path.display()), error)
+                })
+        }
+        "http" | "https" => open_http_input(source),
+        scheme => Err(MediaError::new(
             MediaErrorKind::UnsupportedOperation,
-            format!(
-                "decv currently accepts local MP4 files only; unsupported URI scheme {:?}",
-                uri.scheme()
-            ),
+            format!("decv does not support media URI scheme {scheme:?}"),
             MediaRecovery::None,
-        ));
+        )),
     }
-    uri.to_file_path()
-        .map_err(|_| MediaError::invalid_input("cannot convert media URI to a local path"))
 }
 
-fn video_track_index(demuxer: &Mp4Demuxer<File>) -> MediaResult<usize> {
+fn open_http_input(source: &MediaSource) -> MediaResult<DecvMediaInput> {
+    let options = source.network_options();
+    let mut builder = HttpRangeInput::builder(source.uri()).cache_config(http_range_cache_config());
+    for (name, value) in options.headers() {
+        builder = builder
+            .header(name, value)
+            .map_err(|error| decv_network_configuration_error(source, error))?;
+    }
+    if let Some(user_agent) = options.user_agent()
+        && !options
+            .headers()
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("user-agent"))
+    {
+        builder = builder
+            .header("User-Agent", user_agent)
+            .map_err(|error| decv_network_configuration_error(source, error))?;
+    }
+    if !options
+        .headers()
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+        && (options.user_id().is_some() || options.user_password().is_some())
+    {
+        let credentials = format!(
+            "{}:{}",
+            options.user_id().unwrap_or_default(),
+            options.user_password().unwrap_or_default()
+        );
+        builder = builder
+            .header(
+                "Authorization",
+                format!("Basic {}", BASE64_STANDARD.encode(credentials)),
+            )
+            .map_err(|error| decv_network_configuration_error(source, error))?;
+    }
+    builder
+        .build()
+        .map(|input| Arc::new(input) as DecvMediaInput)
+        .map_err(|error| {
+            MediaError::from_error(
+                MediaErrorKind::Network { status: None },
+                MediaRecovery::Retry,
+                format!("failed to open HTTP Range media {}", source.display_name()),
+                source.redact_error_message(&error.to_string()),
+            )
+        })
+}
+
+fn http_range_cache_config() -> RangeCacheConfig {
+    RangeCacheConfig::new(
+        NonZeroUsize::new(HTTP_CACHE_BLOCK_BYTES).unwrap(),
+        NonZeroUsize::new(HTTP_CACHE_MAXIMUM_BLOCKS).unwrap(),
+    )
+}
+
+fn decv_network_configuration_error(source: &MediaSource, error: std::io::Error) -> MediaError {
+    MediaError::from_error(
+        MediaErrorKind::InvalidInput,
+        MediaRecovery::None,
+        format!(
+            "invalid decv HTTP configuration for {}",
+            source.display_name()
+        ),
+        source.redact_error_message(&error.to_string()),
+    )
+}
+
+fn video_track_index(demuxer: &DecvDemuxer) -> MediaResult<usize> {
     demuxer
         .movie()
         .tracks()
@@ -1516,7 +2130,7 @@ fn video_track_index(demuxer: &Mp4Demuxer<File>) -> MediaResult<usize> {
         .ok_or_else(|| decv_container_message("MP4 contains no non-empty video track"))
 }
 
-fn audio_track_index(demuxer: &Mp4Demuxer<File>) -> Option<usize> {
+fn audio_track_index(demuxer: &DecvDemuxer) -> Option<usize> {
     demuxer
         .movie()
         .tracks()
@@ -1531,7 +2145,7 @@ fn audio_track_index(demuxer: &Mp4Demuxer<File>) -> Option<usize> {
 }
 
 fn video_sample_time(
-    cursor: &PacketCursor<'_, File>,
+    cursor: &PacketCursor<'_, DecvMediaInput>,
     sample_index: usize,
 ) -> MediaResult<MediaTime> {
     let sample = cursor
@@ -1672,6 +2286,13 @@ impl TimelineState {
         }
     }
 
+    fn set_duration(&mut self, duration: Option<Duration>) {
+        self.duration = duration;
+        if let Some(duration) = duration {
+            self.position = self.position.min(duration);
+        }
+    }
+
     fn current_position(&self, now: Instant) -> Duration {
         let position = if self.seeking {
             self.position
@@ -1765,15 +2386,22 @@ mod tests {
     use super::{
         Command, DEFAULT_INTERACTIVE_SEEK_MAXIMUM_INPUT_SAMPLES, DecvBackend, DecvBackendOptions,
         DecvParallelism, SeekPlaybackState, TimelineState, audio_clock_wait, coalesce_seek_command,
+        http_range_cache_config, network_prefetch_is_due, open_media_input,
         seek_generation_is_current,
     };
     use std::{
+        io::{Read, Write},
+        net::TcpListener,
         num::NonZeroUsize,
-        sync::mpsc,
+        sync::{Arc, mpsc},
+        thread,
         time::{Duration, Instant},
     };
 
-    use crate::SeekMode;
+    use crate::{
+        FrameExtractorBackendRequest, MediaBackend, MediaErrorKind, MediaSource,
+        NetworkSourceOptions, SeekMode,
+    };
 
     #[test]
     fn backend_parallelism_defaults_to_auto_and_is_configurable() {
@@ -1810,6 +2438,43 @@ mod tests {
                 .selected_interactive_seek_maximum_input_samples(),
             8
         );
+    }
+
+    #[test]
+    fn backend_opens_a_lazy_network_frame_extractor() {
+        let source = MediaSource::from_uri("http://127.0.0.1:9/video.mp4").unwrap();
+        let extractor = DecvBackend::new().open_frame_extractor(FrameExtractorBackendRequest {
+            source,
+            timeout: Duration::from_secs(1),
+        });
+
+        assert!(extractor.is_ok());
+    }
+
+    #[test]
+    fn http_cache_uses_playback_sized_blocks_and_capacity() {
+        let config = http_range_cache_config();
+        assert_eq!(config.block_size().get(), 1024 * 1024);
+        assert_eq!(config.maximum_cached_bytes(), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn network_prefetch_rearms_at_low_water_or_after_seek() {
+        let initial = 10 * 1024 * 1024;
+        let last_request = Some((4, initial));
+
+        assert!(!network_prefetch_is_due(
+            last_request,
+            4,
+            initial + 3 * 1024 * 1024
+        ));
+        assert!(network_prefetch_is_due(
+            last_request,
+            4,
+            initial + 4 * 1024 * 1024
+        ));
+        assert!(network_prefetch_is_due(last_request, 5, initial));
+        assert!(network_prefetch_is_due(last_request, 4, initial - 1));
     }
 
     #[test]
@@ -1914,5 +2579,97 @@ mod tests {
 
         state.reset_interactive();
         assert!(!state.can_reuse_interactive_exact(target));
+    }
+
+    #[test]
+    fn http_input_forwards_credentials_and_reads_ranges() {
+        let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind HTTP Range test server: {error}"),
+        };
+        let address = listener.local_addr().unwrap();
+        let server_contents: Arc<[u8]> = Arc::from(*b"0123456789abcdef");
+        let (requests, received_requests) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    assert_ne!(count, 0, "client closed before completing HTTP headers");
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let range = request
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Range: bytes=")
+                            .or_else(|| line.strip_prefix("range: bytes="))
+                    })
+                    .unwrap();
+                let (start, end) = range.split_once('-').unwrap();
+                let start = start.parse::<usize>().unwrap();
+                let end = end.parse::<usize>().unwrap();
+                let body = &server_contents[start..=end];
+                requests.send(request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 206 Partial Content\r\n\
+                     Content-Range: bytes {start}-{end}/{}\r\n\
+                     Content-Length: {}\r\n\
+                     ETag: \"gpui-media-test\"\r\n\
+                     Connection: close\r\n\r\n",
+                    server_contents.len(),
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+
+        let source = MediaSource::from_uri(format!("http://{address}/private/video.mp4"))
+            .unwrap()
+            .with_network_options(
+                NetworkSourceOptions::default()
+                    .with_bearer_token("range-secret")
+                    .unwrap()
+                    .with_user_agent("gpui-media-network-test"),
+            );
+        let input = open_media_input(&source).unwrap();
+        let mut buffer = [0; 5];
+        assert_eq!(input.read_at(6, &mut buffer).unwrap(), buffer.len());
+        assert_eq!(&buffer, b"6789a");
+        drop(input);
+
+        let requests = [
+            received_requests.recv().unwrap(),
+            received_requests.recv().unwrap(),
+        ];
+        server.join().unwrap();
+        for request in requests {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer range-secret"));
+            assert!(request.contains("user-agent: gpui-media-network-test"));
+        }
+    }
+
+    #[test]
+    fn http_input_rejects_headers_managed_by_decv() {
+        let source = MediaSource::from_uri("http://127.0.0.1:9/video.mp4")
+            .unwrap()
+            .with_network_options(
+                NetworkSourceOptions::default()
+                    .with_header("Range", "bytes=0-1")
+                    .unwrap(),
+            );
+
+        let error = match open_media_input(&source) {
+            Ok(_) => panic!("decv accepted an HTTP header it must manage internally"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, MediaErrorKind::InvalidInput);
+        assert!(error.message.contains("managed by decv-network"));
     }
 }

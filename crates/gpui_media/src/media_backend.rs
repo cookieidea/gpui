@@ -119,12 +119,22 @@ impl MediaOutputSink {
         match self.video_frames.try_send(frame) {
             Ok(()) | Err(async_channel::TrySendError::Closed(_)) => false,
             Err(async_channel::TrySendError::Full(frame)) => {
-                let dropped = self.video_frame_drain.try_recv().is_ok();
-                if dropped {
-                    self.counters.record_dropped_frame();
+                let dropped = self.video_frame_drain.try_recv().ok();
+                if let Some(dropped) = &dropped {
+                    let dropped_count = self.counters.record_dropped_frame();
+                    log::debug!(
+                        target: "gpui_media::frame_drop",
+                        "video output-queue-drop: count={dropped_count} \
+                         dropped_sequence={} dropped_pts={:?} \
+                         replacement_sequence={} replacement_pts={:?}",
+                        dropped.surface().sequence(),
+                        dropped.timestamp(),
+                        frame.surface().sequence(),
+                        frame.timestamp(),
+                    );
                 }
                 let _ = self.video_frames.try_send(frame);
-                dropped
+                dropped.is_some()
             }
         }
     }

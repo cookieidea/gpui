@@ -8,7 +8,7 @@ use gpui_media::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (input, parallelism) = parse_arguments()?;
-    let source = MediaSource::from_path(input)?;
+    let source = MediaSource::parse(input)?;
     let title = format!("gpui_media · decv · {}", source.display_name());
 
     gpui_platform::application().run(move |cx: &mut App| {
@@ -109,7 +109,7 @@ fn parse_arguments() -> Result<(String, DecvParallelism), std::io::Error> {
         invalid_argument(
             "Usage: cargo run -p gpui_media --no-default-features \
              --features backend-decv --example decv_play -- \
-             [--parallelism auto|serial|THREADS] <local MP4>",
+             [--parallelism auto|serial|THREADS] <MP4 path or HTTP(S) URL>",
         )
     })?;
     Ok((input, parallelism))
