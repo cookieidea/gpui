@@ -5,7 +5,7 @@ publish.workspace = true
 edition.workspace = true
 
 [features]
-default = ["backend-gstreamer"]
+default = ["backend-decv"]
 backend-gstreamer = [
   "dep:gst",
   "dep:gst-app",

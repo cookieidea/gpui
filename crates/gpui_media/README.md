@@ -2,10 +2,11 @@
 
 `gpui_media` is a reusable GPUI media playback core with pluggable backends.
 One media session owns demuxing, video/audio decoding, audio output and the
-shared playback clock. GStreamer is enabled by default, while applications can
-compile another built-in backend or inject their own implementation. Video
-frame rendering and extraction remain separate from player chrome so
-applications can build different interfaces on top of the same core.
+shared playback clock. The pure-Rust decv backend is enabled by default, while
+applications can compile another built-in backend or inject their own
+implementation. Video frame rendering and extraction remain separate from
+player chrome so applications can build different interfaces on top of the
+same core.
 
 ## Public capabilities
 
@@ -27,13 +28,14 @@ applications can build different interfaces on top of the same core.
 
 ## Select a playback backend
 
-The default Cargo feature enables the built-in GStreamer backend:
+The default Cargo feature enables the built-in decv backend:
 
 ```toml
 gpui_media = { path = ".../gpui_media" }
 ```
 
-Applications that provide their own backend can omit GStreamer entirely:
+Applications that provide their own backend can omit built-in backends
+entirely:
 
 ```toml
 gpui_media = {
@@ -42,17 +44,15 @@ gpui_media = {
 }
 ```
 
-The opt-in pure-Rust `decv` prototype currently supports local MP4 files with
-H.264 video, CPU-backed NV12 output, and AAC-LC mono/stereo audio. Its audio
-path keeps a bounded decoded-PCM queue, converts the source rate and channel
-layout to the default CPAL device, and uses samples consumed by the device
-callback as the A/V master clock. Network transport is not implemented yet.
+The decv backend supports local and HTTP/WebDAV MP4 files with H.264 video,
+CPU-backed NV12 output, and AAC-LC audio. GStreamer remains available as an
+opt-in backend:
 
 ```toml
 gpui_media = {
     path = ".../gpui_media",
     default-features = false,
-    features = ["backend-decv"],
+    features = ["backend-gstreamer"],
 }
 ```
 
@@ -68,8 +68,7 @@ let backend = DecvBackend::new().parallelism(DecvParallelism::Serial);
 Run the dedicated comparison example with:
 
 ```sh
-cargo run -p gpui_media --no-default-features \
-  --features backend-decv --example decv_play -- \
+cargo run -p gpui_media --example decv_play -- \
   --parallelism serial /path/to/video.mp4
 ```
 
