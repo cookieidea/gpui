@@ -1,4 +1,4 @@
-//! GStreamer-backed still-frame extraction for Linux `SystemBackend`.
+//! GStreamer-backed still-frame extraction for `SystemBackend`.
 
 use std::{sync::Arc, time::Duration};
 

@@ -8,8 +8,8 @@ built-in backend or inject their own implementation. Video frame rendering and
 extraction remain separate from player chrome so applications can build
 different interfaces on top of the same core.
 
-`SystemBackend` uses GStreamer on Linux, AVFoundation on macOS, and Media
-Foundation on Windows.
+`SystemBackend` uses GStreamer on Linux and macOS, and Media Foundation on
+Windows.
 
 ## Public capabilities
 
@@ -25,7 +25,7 @@ Foundation on Windows.
 - state, timeline, buffering, frame, transport, rate and volume events
 - cumulative decoded, delivered and dropped-frame statistics
 - coded size, crop rectangle and pixel-aspect-ratio aware presentation geometry
-- CPU, macOS CoreVideo/VideoToolbox and Linux DMA-BUF frame transport
+- CPU, macOS CoreVideo and Linux DMA-BUF frame transport
 - HTTP request headers, authentication, proxy, timeout and source retry options
 - network buffering progress and an explicit host-controlled reload operation
 

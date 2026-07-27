@@ -28,8 +28,9 @@ impl fmt::Debug for MediaSource {
 
 /// HTTP-oriented options available to playback backends.
 ///
-/// The Linux `SystemBackend` applies supported properties to its GStreamer URI
-/// source elements. Other system or custom backends may support a subset.
+/// The Linux and macOS `SystemBackend` applies supported properties to its
+/// GStreamer URI source elements. Other system or custom backends may support
+/// a subset.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct NetworkSourceOptions {
     headers: BTreeMap<String, String>,
@@ -149,11 +150,11 @@ impl NetworkSourceOptions {
 
     /// Controls sparse progressive download for seekable HTTP media.
     ///
-    /// The Linux `SystemBackend` enables this by default for HTTP(S) sources so
+    /// The GStreamer `SystemBackend` can enable this for HTTP(S) sources so
     /// fragmented MP4 can seek through Range requests. Frame extraction
     /// remains on the direct source path to keep first-frame preparation fast.
-    /// Disable this for live streams or when temporary on-disk buffering is
-    /// undesirable.
+    /// Leave this disabled for live streams or when temporary on-disk
+    /// buffering is undesirable.
     pub fn with_progressive_download(mut self, enabled: bool) -> Self {
         self.progressive_download = Some(enabled);
         self
@@ -169,7 +170,10 @@ impl NetworkSourceOptions {
 
     #[cfg(any(
         feature = "backend-decv",
-        all(feature = "backend-system", target_os = "linux")
+        all(
+            feature = "backend-system",
+            any(target_os = "linux", target_os = "macos")
+        )
     ))]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
@@ -177,7 +181,10 @@ impl NetworkSourceOptions {
 
     #[cfg(any(
         feature = "backend-decv",
-        all(feature = "backend-system", target_os = "linux")
+        all(
+            feature = "backend-system",
+            any(target_os = "linux", target_os = "macos")
+        )
     ))]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
@@ -354,7 +361,10 @@ impl MediaSource {
 
     #[cfg(any(
         feature = "backend-decv",
-        all(feature = "backend-system", target_os = "linux"),
+        all(
+            feature = "backend-system",
+            any(target_os = "linux", target_os = "macos")
+        ),
         test
     ))]
     pub(crate) fn redact_error_message(&self, message: &str) -> String {
@@ -376,7 +386,10 @@ impl MediaSource {
 impl NetworkSourceOptions {
     #[cfg(any(
         feature = "backend-decv",
-        all(feature = "backend-system", target_os = "linux"),
+        all(
+            feature = "backend-system",
+            any(target_os = "linux", target_os = "macos")
+        ),
         test
     ))]
     fn sensitive_values(&self) -> impl Iterator<Item = &str> {

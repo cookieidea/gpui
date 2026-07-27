@@ -1,4 +1,4 @@
-//! GStreamer implementation used internally by Linux `SystemBackend`.
+//! GStreamer implementation used by the Linux and macOS `SystemBackend`.
 
 use std::{
     sync::{
@@ -23,15 +23,17 @@ use crate::{
 };
 use network::{configure_playbin_network, configure_playbin_progressive_download};
 
+#[cfg(target_os = "macos")]
+mod core_video;
 #[cfg(target_os = "linux")]
 mod dma_buf;
 mod frame_extractor;
 mod iso_bmff;
 mod network;
 
-/// Internal Linux system playback implementation.
+/// Internal GStreamer system playback implementation.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct LinuxSystemBackend;
+pub(crate) struct GstreamerSystemBackend;
 
 pub(crate) fn initialize() -> MediaResult<()> {
     gst::init().map_err(|error| {
@@ -373,7 +375,7 @@ fn publish_appsink_sample(
     Ok(gst::FlowSuccess::Ok)
 }
 
-impl MediaBackend for LinuxSystemBackend {
+impl MediaBackend for GstreamerSystemBackend {
     fn name(&self) -> &'static str {
         "gstreamer"
     }
@@ -503,6 +505,7 @@ fn gst_video_output_error(
     )
 }
 
+#[cfg(target_os = "linux")]
 fn gst_video_output_message(message: impl Into<gpui::SharedString>) -> MediaError {
     MediaError::new(MediaErrorKind::VideoOutput, message, MediaRecovery::Retry)
 }

@@ -1,10 +1,12 @@
-//! Platform-native media backend selected for the current operating system.
+//! Platform-selected system media backend.
 
 use crate::{
     FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaOutputSink,
     MediaPlaybackRequest, MediaPlaybackSession, MediaResult,
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod gstreamer;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -23,11 +25,11 @@ use unsupported as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
-/// The default backend, implemented by the native media stack for the current
-/// operating system.
+/// The default backend, implemented by the selected system media stack for the
+/// current operating system.
 ///
-/// Linux uses the system GStreamer registry, macOS uses AVFoundation and
-/// VideoToolbox, and Windows uses Media Foundation.
+/// Linux and macOS use the system GStreamer registry, while Windows uses Media
+/// Foundation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemBackend;
 

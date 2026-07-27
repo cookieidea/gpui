@@ -1,4 +1,4 @@
-//! GStreamer network-source configuration for Linux `SystemBackend`.
+//! GStreamer network-source configuration for `SystemBackend`.
 
 use std::time::Duration;
 

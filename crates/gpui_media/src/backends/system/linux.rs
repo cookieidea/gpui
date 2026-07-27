@@ -3,9 +3,7 @@ use crate::{
     MediaPlaybackRequest, MediaPlaybackSession, MediaResult,
 };
 
-mod gstreamer;
-
-use gstreamer::LinuxSystemBackend;
+use super::gstreamer::{self, GstreamerSystemBackend};
 
 pub(super) fn initialize() -> MediaResult<()> {
     gstreamer::initialize()
@@ -15,11 +13,11 @@ pub(super) fn open_playback(
     request: MediaPlaybackRequest,
     output: MediaOutputSink,
 ) -> MediaResult<Box<dyn MediaPlaybackSession>> {
-    LinuxSystemBackend.open_playback(request, output)
+    GstreamerSystemBackend.open_playback(request, output)
 }
 
 pub(super) fn open_frame_extractor(
     request: FrameExtractorBackendRequest,
 ) -> MediaResult<Box<dyn FrameExtractionSession>> {
-    LinuxSystemBackend.open_frame_extractor(request)
+    GstreamerSystemBackend.open_frame_extractor(request)
 }
