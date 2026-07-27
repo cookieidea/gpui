@@ -20,7 +20,7 @@ backend-decv = ["dep:base64", "dep:cpal", "dep:decv"]
 async-channel.workspace = true
 base64 = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
-decv = { git = "https://github.com/cradiy/decv", rev = "ed65c978a12badce65c37e27c7bcd64d63dcf6ce", features = [
+decv = { git = "https://github.com/cradiy/decv", rev = "747b168ce9aa13950a17b8b16a947cddd30775ea", features = [
   "network",
 ], optional = true }
 gpui.workspace = true

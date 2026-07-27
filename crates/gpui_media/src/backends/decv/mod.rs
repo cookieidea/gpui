@@ -23,7 +23,8 @@ use decv::{
     DecodeInputStatus, DecodeOutput, DecodedVideoFrame, EncodedAudioPacket, EncodedVideoPacket,
     FrameStorage, H264Decoder, H264Mp4SeekController, H264Parallelism, HttpRangeInput, MediaInput,
     MediaTime, Mp4Demuxer, PacketCursor, PixelFormat, RangeCacheConfig, Size as DecvSize,
-    SoftwareAudioDecoder, Track, TrackKind, VideoDecoder,
+    SoftwareAudioDecoder, Track, TrackKind, VideoCodec, VideoDecoder, VideoDecoderConfig,
+    Vp9Decoder,
 };
 use gpui::{
     Bounds, ColorRange, DevicePixels, SurfaceColorInfo, SurfaceFormat, SurfaceFrame, SurfaceHandle,
@@ -56,6 +57,105 @@ const HTTP_PREFETCH_REARM_BYTES: u64 = 4 * 1024 * 1024;
 
 type DecvMediaInput = Arc<dyn MediaInput>;
 type DecvDemuxer = Mp4Demuxer<DecvMediaInput>;
+
+#[derive(Debug)]
+enum DecvVideoDecoder {
+    H264(H264Decoder),
+    Vp9(Vp9Decoder),
+}
+
+impl DecvVideoDecoder {
+    fn new(config: VideoDecoderConfig, parallelism: DecvParallelism) -> MediaResult<Self> {
+        match config.codec {
+            VideoCodec::H264 => {
+                let mut decoder = H264Decoder::new();
+                decoder
+                    .set_parallelism(parallelism.into())
+                    .map_err(|error| {
+                        decv_decode_error("failed to configure decv H.264 parallelism", error)
+                    })?;
+                decoder.configure(config).map_err(|error| {
+                    MediaError::new(
+                        MediaErrorKind::UnsupportedCodec,
+                        format!("failed to configure decv H.264 decoder: {error:?}"),
+                        MediaRecovery::None,
+                    )
+                })?;
+                Ok(Self::H264(decoder))
+            }
+            VideoCodec::Vp9 => {
+                let mut decoder = Vp9Decoder::new();
+                decoder.configure(config).map_err(|error| {
+                    MediaError::new(
+                        MediaErrorKind::UnsupportedCodec,
+                        format!("failed to configure decv VP9 decoder: {error:?}"),
+                        MediaRecovery::None,
+                    )
+                })?;
+                Ok(Self::Vp9(decoder))
+            }
+            codec => Err(MediaError::new(
+                MediaErrorKind::UnsupportedCodec,
+                format!("decv does not support MP4 video codec {codec:?}"),
+                MediaRecovery::None,
+            )),
+        }
+    }
+
+    fn codec(&self) -> VideoCodec {
+        match self {
+            Self::H264(_) => VideoCodec::H264,
+            Self::Vp9(_) => VideoCodec::Vp9,
+        }
+    }
+
+    fn h264_mut(&mut self) -> Option<&mut H264Decoder> {
+        match self {
+            Self::H264(decoder) => Some(decoder),
+            Self::Vp9(_) => None,
+        }
+    }
+
+    fn receive_frame(&mut self) -> MediaResult<DecodeOutput> {
+        match self {
+            Self::H264(decoder) => decoder.receive_frame().map_err(|error| {
+                decv_decode_error("decv H.264 failed while receiving a frame", error)
+            }),
+            Self::Vp9(decoder) => decoder.receive_frame().map_err(|error| {
+                decv_decode_error("decv VP9 failed while receiving a frame", error)
+            }),
+        }
+    }
+
+    fn send_packet(&mut self, packet: EncodedVideoPacket) -> MediaResult<DecodeInputStatus> {
+        match self {
+            Self::H264(decoder) => decoder
+                .send_packet(packet)
+                .map_err(|error| decv_decode_error("decv H.264 failed to decode a packet", error)),
+            Self::Vp9(decoder) => decoder
+                .send_packet(packet)
+                .map_err(|error| decv_decode_error("decv VP9 failed to decode a packet", error)),
+        }
+    }
+
+    fn flush(&mut self) {
+        match self {
+            Self::H264(decoder) => decoder.flush(),
+            Self::Vp9(decoder) => decoder.flush(),
+        }
+    }
+
+    fn drain(&mut self) -> MediaResult<()> {
+        match self {
+            Self::H264(decoder) => decoder
+                .drain()
+                .map_err(|error| decv_decode_error("decv H.264 failed to drain", error)),
+            Self::Vp9(decoder) => decoder
+                .drain()
+                .map_err(|error| decv_decode_error("decv VP9 failed to drain", error)),
+        }
+    }
+}
 
 /// Reconstruction parallelism used by the built-in `decv` H.264 decoder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -121,7 +221,7 @@ impl DecvBackendOptions {
     }
 }
 
-/// Pure-Rust MP4 H.264/AAC playback backed by `decv`.
+/// Pure-Rust MP4 H.264/VP9 and AAC playback backed by `decv`.
 ///
 /// This backend is intentionally opt-in while `decv` is pre-1.0. Its types
 /// remain confined to this module so applications depend only on
@@ -411,8 +511,8 @@ struct DecvFrameExtractorState {
     surface_handle: SurfaceHandle,
     sequence: u64,
     timeout: Duration,
-    decoder: H264Decoder,
-    seek_controller: H264Mp4SeekController,
+    decoder: DecvVideoDecoder,
+    seek_controller: Option<H264Mp4SeekController>,
     first_description: usize,
     interactive_seek_maximum_input_samples: usize,
     initial_frame: Option<Arc<VideoFrame>>,
@@ -450,19 +550,8 @@ impl DecvFrameExtractorState {
                 .description_index();
             (decoder_config, first_description)
         };
-        let mut decoder = H264Decoder::new();
-        decoder
-            .set_parallelism(options.parallelism.into())
-            .map_err(|error| {
-                decv_decode_error("failed to configure decv H.264 parallelism", error)
-            })?;
-        decoder.configure(decoder_config).map_err(|error| {
-            MediaError::new(
-                MediaErrorKind::UnsupportedCodec,
-                format!("failed to configure decv H.264 decoder: {error:?}"),
-                MediaRecovery::None,
-            )
-        })?;
+        let codec = decoder_config.codec;
+        let decoder = DecvVideoDecoder::new(decoder_config, options.parallelism)?;
         Ok(Self {
             demuxer: prepared.demuxer,
             video_track_index: prepared.probe.video_track_index,
@@ -471,11 +560,13 @@ impl DecvFrameExtractorState {
             sequence: 0,
             timeout,
             decoder,
-            seek_controller: H264Mp4SeekController::new(
-                prepared.probe.video_track_index,
-                VIDEO_SEEK_CHECKPOINT_LIMIT,
-                VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
-            ),
+            seek_controller: (codec == VideoCodec::H264).then(|| {
+                H264Mp4SeekController::new(
+                    prepared.probe.video_track_index,
+                    VIDEO_SEEK_CHECKPOINT_LIMIT,
+                    VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
+                )
+            }),
             first_description,
             interactive_seek_maximum_input_samples: options.interactive_seek_maximum_input_samples,
             initial_frame: None,
@@ -500,51 +591,17 @@ impl DecvFrameExtractorState {
                 requested.min(duration.saturating_sub(Duration::from_millis(1)))
             });
             let target = duration_to_media_time(requested)?;
-            match seek_mode {
-                SeekMode::Accurate => {
-                    let outcome = self
-                        .seek_controller
-                        .begin_exact_seek(&mut self.decoder, &mut cursor, target, false)
-                        .map_err(|error| {
-                            decv_decode_error(
-                                "failed to coordinate exact H.264 MP4 frame extraction",
-                                error,
-                            )
-                        })?;
-                    discontinuity = outcome.requires_discontinuity();
-                    minimum_pts = Some(requested);
-                }
-                SeekMode::Interactive => {
-                    let decision = self
-                        .seek_controller
-                        .begin_interactive_seek(
-                            &mut self.decoder,
-                            &mut cursor,
-                            target,
-                            false,
-                            self.interactive_seek_maximum_input_samples,
-                        )
-                        .map_err(|error| {
-                            decv_decode_error(
-                                "failed to coordinate interactive H.264 MP4 frame extraction",
-                                error,
-                            )
-                        })?;
-                    discontinuity = decision.requires_discontinuity();
-                    minimum_pts = decision.is_exact().then_some(requested);
-                }
-                SeekMode::KeyFrame => {
-                    self.seek_controller
-                        .begin_nearest_preview(&mut self.decoder, &mut cursor, target)
-                        .map_err(|error| {
-                            decv_decode_error(
-                                "failed to coordinate H.264 MP4 keyframe extraction",
-                                error,
-                            )
-                        })?;
-                    discontinuity = true;
-                }
-            }
+            let outcome = begin_video_seek(
+                &mut self.decoder,
+                &mut self.seek_controller,
+                &mut cursor,
+                target,
+                seek_mode,
+                false,
+                self.interactive_seek_maximum_input_samples,
+            )?;
+            discontinuity = outcome.requires_discontinuity;
+            minimum_pts = outcome.exact.then_some(requested);
         }
 
         let mut pending_packet = None;
@@ -884,6 +941,10 @@ fn decv_video_output_error(
     )
 }
 
+fn decv_video_output_message(message: impl Into<gpui::SharedString>) -> MediaError {
+    MediaError::new(MediaErrorKind::VideoOutput, message, MediaRecovery::None)
+}
+
 fn probe_mp4(source: &MediaSource) -> MediaResult<PreparedMedia> {
     let network = matches!(
         url::Url::parse(source.uri())
@@ -962,22 +1023,16 @@ fn playback_worker(
         .ok_or_else(|| decv_container_message("MP4 video track has no samples"))?
         .description_index();
 
-    let mut decoder = H264Decoder::new();
-    decoder
-        .set_parallelism(parallelism.into())
-        .map_err(|error| decv_decode_error("failed to configure decv H.264 parallelism", error))?;
-    decoder.configure(decoder_config).map_err(|error| {
-        MediaError::new(
-            MediaErrorKind::UnsupportedCodec,
-            format!("failed to configure decv H.264 decoder: {error:?}"),
-            MediaRecovery::None,
+    let codec = decoder_config.codec;
+    let mut decoder = DecvVideoDecoder::new(decoder_config, parallelism)?;
+    let mut seek_controller = (codec == VideoCodec::H264).then(|| {
+        H264Mp4SeekController::new(
+            video_track_index,
+            VIDEO_SEEK_CHECKPOINT_LIMIT,
+            VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
         )
-    })?;
-    let mut seek_controller = H264Mp4SeekController::new(
-        video_track_index,
-        VIDEO_SEEK_CHECKPOINT_LIMIT,
-        VIDEO_SEEK_CHECKPOINT_REFERENCE_BYTES,
-    );
+    });
+    log::debug!("decv configured {codec:?} video decoder");
     let mut audio = audio_track_index
         .map(|track_index| DecvAudioPlayback::open(&demuxer, track_index))
         .transpose()?;
@@ -1396,12 +1451,133 @@ fn playback_worker(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct VideoSeekOutcome {
+    seek_time: MediaTime,
+    requires_discontinuity: bool,
+    exact: bool,
+    interactive: bool,
+}
+
+fn begin_video_seek(
+    decoder: &mut DecvVideoDecoder,
+    seek_controller: &mut Option<H264Mp4SeekController>,
+    cursor: &mut PacketCursor<'_, DecvMediaInput>,
+    target: MediaTime,
+    mode: SeekMode,
+    allow_forward_retarget: bool,
+    interactive_seek_maximum_input_samples: usize,
+) -> MediaResult<VideoSeekOutcome> {
+    if decoder.codec() == VideoCodec::H264 {
+        let seek_controller = seek_controller
+            .as_mut()
+            .ok_or_else(|| decv_decode_message("decv H.264 decoder has no MP4 seek controller"))?;
+        let decoder = decoder
+            .h264_mut()
+            .expect("the checked decv decoder is H.264");
+        return match mode {
+            SeekMode::Accurate => {
+                let outcome = seek_controller
+                    .begin_exact_seek(decoder, cursor, target, allow_forward_retarget)
+                    .map_err(|error| {
+                        decv_decode_error("failed to coordinate exact H.264 MP4 seek", error)
+                    })?;
+                Ok(VideoSeekOutcome {
+                    seek_time: target,
+                    requires_discontinuity: outcome.requires_discontinuity(),
+                    exact: true,
+                    interactive: false,
+                })
+            }
+            SeekMode::Interactive => {
+                let decision = seek_controller
+                    .begin_interactive_seek(
+                        decoder,
+                        cursor,
+                        target,
+                        allow_forward_retarget,
+                        interactive_seek_maximum_input_samples,
+                    )
+                    .map_err(|error| {
+                        decv_decode_error("failed to coordinate interactive H.264 MP4 seek", error)
+                    })?;
+                let seek_time = if decision.is_exact() {
+                    target
+                } else {
+                    let sample_index = decision.preview_sample_index().ok_or_else(|| {
+                        decv_decode_message(
+                            "interactive decv seek returned neither an exact nor preview result",
+                        )
+                    })?;
+                    video_sample_time(cursor, sample_index)?
+                };
+                Ok(VideoSeekOutcome {
+                    seek_time,
+                    requires_discontinuity: decision.requires_discontinuity(),
+                    exact: decision.is_exact(),
+                    interactive: true,
+                })
+            }
+            SeekMode::KeyFrame => {
+                let sample_index = seek_controller
+                    .begin_nearest_preview(decoder, cursor, target)
+                    .map_err(|error| {
+                        decv_decode_error("failed to coordinate H.264 MP4 seek preview", error)
+                    })?;
+                Ok(VideoSeekOutcome {
+                    seek_time: video_sample_time(cursor, sample_index)?,
+                    requires_discontinuity: true,
+                    exact: false,
+                    interactive: false,
+                })
+            }
+        };
+    }
+
+    decoder.flush();
+    let (sample_index, exact, interactive) = match mode {
+        SeekMode::Accurate => (
+            cursor
+                .seek_to_keyframe(target)
+                .map_err(|error| decv_container_error("failed to seek VP9 MP4", error))?,
+            true,
+            false,
+        ),
+        SeekMode::Interactive => (
+            cursor
+                .seek_to_nearest_keyframe(target)
+                .map_err(|error| decv_container_error("failed to seek VP9 MP4 preview", error))?,
+            false,
+            true,
+        ),
+        SeekMode::KeyFrame => (
+            cursor.seek_to_nearest_keyframe(target).map_err(|error| {
+                decv_container_error("failed to seek VP9 MP4 keyframe preview", error)
+            })?,
+            false,
+            false,
+        ),
+    };
+    let sample_index =
+        sample_index.ok_or_else(|| decv_decode_message("MP4 has no VP9 keyframe for seek"))?;
+    Ok(VideoSeekOutcome {
+        seek_time: if exact {
+            target
+        } else {
+            video_sample_time(cursor, sample_index)?
+        },
+        requires_discontinuity: true,
+        exact,
+        interactive,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_command(
     command: Command,
     cursor: &mut PacketCursor<'_, DecvMediaInput>,
-    decoder: &mut H264Decoder,
-    seek_controller: &mut H264Mp4SeekController,
+    decoder: &mut DecvVideoDecoder,
+    seek_controller: &mut Option<H264Mp4SeekController>,
     seek_state: &mut SeekPlaybackState,
     interactive_seek_maximum_input_samples: usize,
     pending_packet: &mut Option<EncodedVideoPacket>,
@@ -1455,7 +1631,9 @@ fn apply_command(
                 draining,
                 video_decode_complete,
             );
-            seek_controller.clear();
+            if let Some(seek_controller) = seek_controller {
+                seek_controller.clear();
+            }
             seek_state.reset_interactive();
             seek_state.handled_generation = generation;
             *discontinuity = false;
@@ -1498,56 +1676,21 @@ fn apply_command(
 
             let target = duration_to_media_time(position)?;
             let allow_forward_retarget = *preroll && !*draining && pending_packet.is_none();
-            let (seek_time, requires_discontinuity, exact, interactive) = match mode {
-                SeekMode::Accurate => {
-                    let outcome = seek_controller
-                        .begin_exact_seek(decoder, cursor, target, allow_forward_retarget)
-                        .map_err(|error| {
-                            decv_decode_error("failed to coordinate exact H.264 MP4 seek", error)
-                        })?;
-                    (target, outcome.requires_discontinuity(), true, false)
-                }
-                SeekMode::Interactive => {
-                    let decision = seek_controller
-                        .begin_interactive_seek(
-                            decoder,
-                            cursor,
-                            target,
-                            allow_forward_retarget,
-                            interactive_seek_maximum_input_samples,
-                        )
-                        .map_err(|error| {
-                            decv_decode_error(
-                                "failed to coordinate interactive H.264 MP4 seek",
-                                error,
-                            )
-                        })?;
-                    let seek_time = if decision.is_exact() {
-                        target
-                    } else {
-                        let sample_index = decision.preview_sample_index().ok_or_else(|| {
-                            decv_decode_message(
-                                "interactive decv seek returned neither an exact nor preview result",
-                            )
-                        })?;
-                        video_sample_time(cursor, sample_index)?
-                    };
-                    (
-                        seek_time,
-                        decision.requires_discontinuity(),
-                        decision.is_exact(),
-                        true,
-                    )
-                }
-                SeekMode::KeyFrame => {
-                    let sample_index = seek_controller
-                        .begin_nearest_preview(decoder, cursor, target)
-                        .map_err(|error| {
-                            decv_decode_error("failed to coordinate H.264 MP4 seek preview", error)
-                        })?;
-                    (video_sample_time(cursor, sample_index)?, true, false, false)
-                }
-            };
+            let outcome = begin_video_seek(
+                decoder,
+                seek_controller,
+                cursor,
+                target,
+                mode,
+                allow_forward_retarget,
+                interactive_seek_maximum_input_samples,
+            )?;
+            let VideoSeekOutcome {
+                seek_time,
+                requires_discontinuity,
+                exact,
+                interactive,
+            } = outcome;
             let seek_position = media_time_to_duration(Some(seek_time)).unwrap_or(Duration::ZERO);
             let timeline_position = if interactive { position } else { seek_position };
             *pending_packet = None;
@@ -1593,7 +1736,7 @@ fn apply_command(
 }
 
 fn reset_decode_timeline(
-    decoder: &mut H264Decoder,
+    decoder: &mut DecvVideoDecoder,
     pending_packet: &mut Option<EncodedVideoPacket>,
     pending_frames: &mut VecDeque<DecodedVideoFrame>,
     draining: &mut bool,
@@ -1613,18 +1756,15 @@ enum VideoDecodeStep {
 }
 
 fn decode_video_step(
-    decoder: &mut H264Decoder,
+    decoder: &mut DecvVideoDecoder,
     cursor: &mut PacketCursor<'_, DecvMediaInput>,
-    seek_controller: &mut H264Mp4SeekController,
+    seek_controller: &mut Option<H264Mp4SeekController>,
     pending_packet: &mut Option<EncodedVideoPacket>,
     draining: &mut bool,
     discontinuity: &mut bool,
     first_description: usize,
 ) -> MediaResult<VideoDecodeStep> {
-    match decoder
-        .receive_frame()
-        .map_err(|error| decv_decode_error("decv failed while receiving a frame", error))?
-    {
+    match decoder.receive_frame()? {
         DecodeOutput::Frame(frame) => Ok(VideoDecodeStep::Frame(frame)),
         DecodeOutput::FormatChanged(format) => {
             log::debug!(
@@ -1648,9 +1788,7 @@ fn decode_video_step(
                         decv_container_error("failed to read the next MP4 packet", error)
                     })?
                     else {
-                        decoder
-                            .drain()
-                            .map_err(|error| decv_decode_error("decv failed to drain", error))?;
+                        decoder.drain()?;
                         *draining = true;
                         return Ok(VideoDecodeStep::Progress);
                     };
@@ -1669,12 +1807,13 @@ fn decode_video_step(
                 }
             };
 
-            match decoder.send_packet(packet).map_err(|error| {
-                decv_decode_error("decv failed while decoding an MP4 packet", error)
-            })? {
+            match decoder.send_packet(packet)? {
                 DecodeInputStatus::Accepted => {
                     let next_sample = cursor.next_sample_index();
-                    if let Err(error) = seek_controller.capture_checkpoint(decoder, cursor) {
+                    if let (Some(seek_controller), Some(decoder)) =
+                        (seek_controller.as_mut(), decoder.h264_mut())
+                        && let Err(error) = seek_controller.capture_checkpoint(decoder, cursor)
+                    {
                         log::debug!(
                             "decv skipped H.264 seek checkpoint at MP4 sample {next_sample}: {error}"
                         );
@@ -1926,16 +2065,6 @@ fn convert_frame(
     frame
         .validate()
         .map_err(|error| decv_decode_error("decv produced an invalid frame", error))?;
-    if frame.format.pixel_format != PixelFormat::Nv12 {
-        return Err(MediaError::new(
-            MediaErrorKind::UnsupportedCodec,
-            format!(
-                "decv produced unsupported pixel format {:?}; gpui_media's decv adapter currently accepts NV12",
-                frame.format.pixel_format
-            ),
-            MediaRecovery::None,
-        ));
-    }
     let cpu = match frame.storage {
         FrameStorage::Cpu(cpu) => cpu,
         _ => {
@@ -1945,11 +2074,6 @@ fn convert_frame(
                 MediaRecovery::None,
             ));
         }
-    };
-    let [y, uv] = cpu.planes.as_slice() else {
-        return Err(decv_decode_message(
-            "decv NV12 frame does not contain exactly two planes",
-        ));
     };
 
     let coded_size = device_size(frame.format.coded_size)?;
@@ -1964,8 +2088,67 @@ fn convert_frame(
         ),
     };
     let display_size = device_size(frame.format.display_size)?;
-    let y = surface_plane(y, "Y")?;
-    let uv = surface_plane(uv, "UV")?;
+    let [y, uv] = match frame.format.pixel_format {
+        PixelFormat::Nv12 => {
+            let [y, uv] = cpu.planes.as_slice() else {
+                return Err(decv_decode_message(
+                    "decv NV12 frame does not contain exactly two planes",
+                ));
+            };
+            [surface_plane(y, "Y")?, surface_plane(uv, "UV")?]
+        }
+        format
+        @ (PixelFormat::I420 | PixelFormat::I422 | PixelFormat::I440 | PixelFormat::I444) => {
+            let [y, u, v] = cpu.planes.as_slice() else {
+                return Err(decv_decode_message(
+                    "decv planar YUV frame does not contain exactly three planes",
+                ));
+            };
+            let (subsampling_x, subsampling_y) = format
+                .chroma_subsampling()
+                .expect("planar YUV pixel format has chroma subsampling");
+            [
+                surface_plane(y, "Y")?,
+                planar_chroma_to_nv12(
+                    u,
+                    v,
+                    frame.format.coded_size,
+                    subsampling_x,
+                    subsampling_y,
+                    8,
+                )?,
+            ]
+        }
+        PixelFormat::PlanarYuv16 {
+            bit_depth,
+            subsampling_x,
+            subsampling_y,
+        } => {
+            let [y, u, v] = cpu.planes.as_slice() else {
+                return Err(decv_decode_message(
+                    "decv high-bit-depth planar YUV frame does not contain exactly three planes",
+                ));
+            };
+            [
+                planar_luma_to_8bit(y, frame.format.coded_size, bit_depth)?,
+                planar_chroma_to_nv12(
+                    u,
+                    v,
+                    frame.format.coded_size,
+                    subsampling_x,
+                    subsampling_y,
+                    bit_depth,
+                )?,
+            ]
+        }
+        format => {
+            return Err(MediaError::new(
+                MediaErrorKind::UnsupportedCodec,
+                format!("decv produced unsupported pixel format {format:?}"),
+                MediaRecovery::None,
+            ));
+        }
+    };
     let surface = SurfaceFrame::new(
         handle,
         sequence,
@@ -1994,7 +2177,122 @@ fn surface_plane(plane: &decv::CpuPlane, name: &str) -> MediaResult<SurfacePlane
         CpuBuffer::Aligned(bytes) => {
             SurfacePlane::with_shared_offset(bytes.clone(), plane.offset, stride)
         }
+        CpuBuffer::Words(_) => {
+            return Err(decv_video_output_message(format!(
+                "decv {name} plane uses 16-bit samples where an 8-bit plane was required"
+            )));
+        }
     })
+}
+
+fn planar_luma_to_8bit(
+    plane: &decv::CpuPlane,
+    coded_size: DecvSize,
+    bit_depth: u8,
+) -> MediaResult<SurfacePlane> {
+    let width = usize::try_from(coded_size.width)
+        .map_err(|error| decv_video_output_error("decv frame width exceeds usize", error))?;
+    let height = usize::try_from(coded_size.height)
+        .map_err(|error| decv_video_output_error("decv frame height exceeds usize", error))?;
+    let len = width
+        .checked_mul(height)
+        .ok_or_else(|| decv_video_output_message("decv luma plane size overflowed"))?;
+    let mut output = Vec::with_capacity(len);
+    let shift = bit_depth.saturating_sub(8);
+    for y in 0..height {
+        for x in 0..width {
+            let sample = planar_sample(plane, x, y, bit_depth)?;
+            output.push((sample >> shift).min(u32::from(u8::MAX)) as u8);
+        }
+    }
+    Ok(SurfacePlane::new(output, coded_size.width))
+}
+
+fn planar_chroma_to_nv12(
+    u: &decv::CpuPlane,
+    v: &decv::CpuPlane,
+    coded_size: DecvSize,
+    subsampling_x: u8,
+    subsampling_y: u8,
+    bit_depth: u8,
+) -> MediaResult<SurfacePlane> {
+    let width = usize::try_from(coded_size.width)
+        .map_err(|error| decv_video_output_error("decv frame width exceeds usize", error))?;
+    let height = usize::try_from(coded_size.height)
+        .map_err(|error| decv_video_output_error("decv frame height exceeds usize", error))?;
+    let output_columns = width.div_ceil(2);
+    let output_rows = height.div_ceil(2);
+    let output_stride = output_columns
+        .checked_mul(2)
+        .ok_or_else(|| decv_video_output_message("decv chroma stride overflowed"))?;
+    let output_len = output_stride
+        .checked_mul(output_rows)
+        .ok_or_else(|| decv_video_output_message("decv chroma plane size overflowed"))?;
+    let source_width = width.div_ceil(1usize << subsampling_x);
+    let source_height = height.div_ceil(1usize << subsampling_y);
+    let horizontal_samples = if subsampling_x == 0 { 2 } else { 1 };
+    let vertical_samples = if subsampling_y == 0 { 2 } else { 1 };
+    let shift = bit_depth.saturating_sub(8);
+    let mut output = Vec::with_capacity(output_len);
+
+    for output_y in 0..output_rows {
+        let source_y = if subsampling_y == 0 {
+            output_y * 2
+        } else {
+            output_y
+        };
+        for output_x in 0..output_columns {
+            let source_x = if subsampling_x == 0 {
+                output_x * 2
+            } else {
+                output_x
+            };
+            for plane in [u, v] {
+                let mut sum = 0u32;
+                let mut count = 0u32;
+                for y_offset in 0..vertical_samples {
+                    let y = (source_y + y_offset).min(source_height.saturating_sub(1));
+                    for x_offset in 0..horizontal_samples {
+                        let x = (source_x + x_offset).min(source_width.saturating_sub(1));
+                        sum = sum.saturating_add(planar_sample(plane, x, y, bit_depth)?);
+                        count += 1;
+                    }
+                }
+                let sample = ((sum + count / 2) / count) >> shift;
+                output.push(sample.min(u32::from(u8::MAX)) as u8);
+            }
+        }
+    }
+
+    let output_stride = u32::try_from(output_stride)
+        .map_err(|error| decv_video_output_error("decv chroma stride exceeds u32", error))?;
+    Ok(SurfacePlane::new(output, output_stride))
+}
+
+fn planar_sample(plane: &decv::CpuPlane, x: usize, y: usize, bit_depth: u8) -> MediaResult<u32> {
+    let bytes_per_sample = if bit_depth > 8 { 2 } else { 1 };
+    let row = y
+        .checked_mul(plane.stride)
+        .and_then(|offset| plane.offset.checked_add(offset))
+        .ok_or_else(|| decv_video_output_message("decv planar sample offset overflowed"))?;
+    let index = x
+        .checked_mul(bytes_per_sample)
+        .and_then(|offset| row.checked_add(offset))
+        .ok_or_else(|| decv_video_output_message("decv planar sample index overflowed"))?;
+    if bytes_per_sample == 1 {
+        plane
+            .bytes
+            .get(index)
+            .copied()
+            .map(u32::from)
+            .ok_or_else(|| decv_video_output_message("decv planar sample exceeds its plane"))
+    } else {
+        let bytes = plane
+            .bytes
+            .get(index..index.saturating_add(2))
+            .ok_or_else(|| decv_video_output_message("decv planar sample exceeds its plane"))?;
+        Ok(u32::from(u16::from_ne_bytes([bytes[0], bytes[1]])))
+    }
 }
 
 fn surface_color_info(color: ColorInfo, coded_height: u32) -> SurfaceColorInfo {

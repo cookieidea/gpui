@@ -44,9 +44,9 @@ gpui_media = {
 }
 ```
 
-The decv backend supports local and HTTP/WebDAV MP4 files with H.264 video,
-CPU-backed NV12 output, and AAC-LC audio. GStreamer remains available as an
-opt-in backend:
+The decv backend supports local and HTTP/WebDAV MP4 files with H.264 or VP9
+video, CPU-backed NV12 output, and AAC-LC audio. GStreamer remains available
+as an opt-in backend:
 
 ```toml
 gpui_media = {

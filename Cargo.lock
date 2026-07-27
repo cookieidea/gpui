@@ -763,7 +763,7 @@ dependencies = [
 [[package]]
 name = "bit-readers"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 
 [[package]]
 name = "bit-set"
@@ -1746,19 +1746,20 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 [[package]]
 name = "decv"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "decv-audio",
  "decv-core",
  "decv-h264",
  "decv-mp4",
  "decv-network",
+ "decv-vp9",
 ]
 
 [[package]]
 name = "decv-audio"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "decv-core",
  "symphonia",
@@ -1767,7 +1768,7 @@ dependencies = [
 [[package]]
 name = "decv-core"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "aligned-vec",
 ]
@@ -1775,7 +1776,7 @@ dependencies = [
 [[package]]
 name = "decv-h264"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "bit-readers",
  "decv-core",
@@ -1787,7 +1788,7 @@ dependencies = [
 [[package]]
 name = "decv-mp4"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "decv-core",
 ]
@@ -1795,10 +1796,19 @@ dependencies = [
 [[package]]
 name = "decv-network"
 version = "0.1.0"
-source = "git+https://github.com/cradiy/decv?rev=ed65c978a12badce65c37e27c7bcd64d63dcf6ce#ed65c978a12badce65c37e27c7bcd64d63dcf6ce"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
 dependencies = [
  "decv-core",
  "ureq",
+]
+
+[[package]]
+name = "decv-vp9"
+version = "0.1.0"
+source = "git+https://github.com/cradiy/decv?rev=747b168ce9aa13950a17b8b16a947cddd30775ea#747b168ce9aa13950a17b8b16a947cddd30775ea"
+dependencies = [
+ "bit-readers",
+ "decv-core",
 ]
 
 [[package]]
