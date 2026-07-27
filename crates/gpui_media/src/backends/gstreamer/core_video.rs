@@ -1,3 +1,5 @@
+//! CoreVideo frame adaptation for the GStreamer backend.
+
 use std::ffi::{c_char, c_void};
 
 use core_foundation::base::TCFType as _;

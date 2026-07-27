@@ -1,3 +1,5 @@
+//! Pure-Rust decv playback and frame-extraction backend.
+
 use std::{
     collections::VecDeque,
     fs::File,

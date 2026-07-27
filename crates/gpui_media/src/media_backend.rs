@@ -244,12 +244,12 @@ pub trait MediaBackend: Send + Sync + 'static {
 pub(crate) fn default_media_backend() -> MediaResult<Arc<dyn MediaBackend>> {
     #[cfg(feature = "backend-decv")]
     {
-        return Ok(Arc::new(crate::decv_backend::DecvBackend::default()));
+        return Ok(Arc::new(crate::backends::decv::DecvBackend::default()));
     }
 
     #[cfg(all(not(feature = "backend-decv"), feature = "backend-gstreamer"))]
     {
-        return Ok(Arc::new(crate::gstreamer_backend::GstreamerBackend));
+        return Ok(Arc::new(crate::backends::gstreamer::GstreamerBackend));
     }
 
     #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]

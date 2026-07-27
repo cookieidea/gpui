@@ -1,3 +1,5 @@
+//! GStreamer playback and frame-extraction backend.
+
 use std::{
     sync::{
         Arc,
@@ -18,8 +20,8 @@ use crate::{
     MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind, MediaOutputSink,
     MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult, MediaSource,
     PlaybackTimeline, SeekMode, TransportChange, VideoFrame,
-    network::{configure_playbin_network, configure_playbin_progressive_download},
 };
+use network::{configure_playbin_network, configure_playbin_progressive_download};
 
 #[cfg(target_os = "macos")]
 mod core_video;
@@ -27,6 +29,7 @@ mod core_video;
 mod dma_buf;
 mod frame_extractor;
 mod iso_bmff;
+mod network;
 
 /// Built-in GStreamer playback backend.
 #[derive(Clone, Copy, Debug, Default)]
@@ -946,7 +949,7 @@ mod tests {
 
     #[test]
     fn classifies_http_authentication_and_redacts_diagnostics() {
-        crate::gstreamer_backend::initialize().unwrap();
+        super::initialize().unwrap();
         let source = MediaSource::from_uri("https://example.com/video?token=signed-secret")
             .unwrap()
             .with_network_options(
@@ -977,7 +980,7 @@ mod tests {
 
     #[test]
     fn maps_missing_resources_without_retry() {
-        crate::gstreamer_backend::initialize().unwrap();
+        super::initialize().unwrap();
         let source = MediaSource::from_uri("file:///missing.mp4").unwrap();
         let message =
             gst::message::Error::new(gst::ResourceError::NotFound, "resource was not found");

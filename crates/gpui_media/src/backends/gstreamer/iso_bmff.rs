@@ -1,3 +1,5 @@
+//! ISO BMFF helpers used by the GStreamer backend.
+
 use std::{
     collections::{HashMap, HashSet},
     fs::File,

@@ -1,3 +1,5 @@
+//! CPAL output and device-clock integration for the decv backend.
+
 use std::{
     collections::VecDeque,
     sync::{

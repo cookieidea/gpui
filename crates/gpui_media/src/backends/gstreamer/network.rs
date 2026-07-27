@@ -1,3 +1,5 @@
+//! GStreamer playbin network-source configuration.
+
 use std::time::Duration;
 
 use gst::prelude::*;

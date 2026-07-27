@@ -1,3 +1,5 @@
+//! GStreamer-backed still-frame extraction.
+
 use std::{sync::Arc, time::Duration};
 
 use gpui::SurfaceHandle;
@@ -10,9 +12,8 @@ use crate::{
 
 use super::{
     add_required_allocation_metas, appsink_caps, clock_time, gst_backend_error, gst_decode_error,
-    sample_to_video_frame, seek_flags,
+    network::configure_playbin_network, sample_to_video_frame, seek_flags,
 };
-use crate::network::configure_playbin_network;
 
 pub(super) struct GstreamerFrameExtractionSession {
     playbin: gst::Element,
