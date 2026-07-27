@@ -1,4 +1,4 @@
-//! GStreamer playback and frame-extraction backend.
+//! GStreamer implementation used internally by Linux `SystemBackend`.
 
 use std::{
     sync::{
@@ -23,17 +23,15 @@ use crate::{
 };
 use network::{configure_playbin_network, configure_playbin_progressive_download};
 
-#[cfg(target_os = "macos")]
-mod core_video;
 #[cfg(target_os = "linux")]
 mod dma_buf;
 mod frame_extractor;
 mod iso_bmff;
 mod network;
 
-/// Built-in GStreamer playback backend.
+/// Internal Linux system playback implementation.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct GstreamerBackend;
+pub(crate) struct LinuxSystemBackend;
 
 pub(crate) fn initialize() -> MediaResult<()> {
     gst::init().map_err(|error| {
@@ -44,12 +42,6 @@ pub(crate) fn initialize() -> MediaResult<()> {
             error,
         )
     })
-}
-
-impl GstreamerBackend {
-    pub fn initialize() -> MediaResult<()> {
-        initialize()
-    }
 }
 
 pub(crate) struct GstreamerPlayback {
@@ -381,7 +373,7 @@ fn publish_appsink_sample(
     Ok(gst::FlowSuccess::Ok)
 }
 
-impl MediaBackend for GstreamerBackend {
+impl MediaBackend for LinuxSystemBackend {
     fn name(&self) -> &'static str {
         "gstreamer"
     }

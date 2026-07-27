@@ -242,20 +242,20 @@ pub trait MediaBackend: Send + Sync + 'static {
 }
 
 pub(crate) fn default_media_backend() -> MediaResult<Arc<dyn MediaBackend>> {
-    #[cfg(feature = "backend-decv")]
+    #[cfg(feature = "backend-system")]
+    {
+        return Ok(Arc::new(crate::backends::system::SystemBackend));
+    }
+
+    #[cfg(all(not(feature = "backend-system"), feature = "backend-decv"))]
     {
         return Ok(Arc::new(crate::backends::decv::DecvBackend::default()));
     }
 
-    #[cfg(all(not(feature = "backend-decv"), feature = "backend-gstreamer"))]
-    {
-        return Ok(Arc::new(crate::backends::gstreamer::GstreamerBackend));
-    }
-
-    #[cfg(not(any(feature = "backend-gstreamer", feature = "backend-decv")))]
+    #[cfg(not(any(feature = "backend-system", feature = "backend-decv")))]
     {
         Err(MediaError::backend(
-            "gpui_media has no built-in backend; enable `backend-gstreamer` or `backend-decv`, or pass a custom backend",
+            "gpui_media has no built-in backend; enable `backend-system` or `backend-decv`, or pass a custom backend",
         ))
     }
 }
@@ -267,7 +267,7 @@ mod tests {
     use gpui::{DevicePixels, SurfaceFrame, SurfaceHandle, size};
 
     use super::MediaOutputSink;
-    #[cfg(feature = "backend-decv")]
+    #[cfg(any(feature = "backend-system", feature = "backend-decv"))]
     use super::default_media_backend;
     use crate::VideoFrame;
 
@@ -304,9 +304,15 @@ mod tests {
         assert_eq!(stats.dropped_frames(), 1);
     }
 
-    #[cfg(feature = "backend-decv")]
+    #[cfg(feature = "backend-system")]
     #[test]
-    fn decv_is_the_default_backend() {
+    fn system_is_the_default_backend() {
+        assert_eq!(default_media_backend().unwrap().name(), "system");
+    }
+
+    #[cfg(all(not(feature = "backend-system"), feature = "backend-decv"))]
+    #[test]
+    fn decv_is_the_fallback_default_backend() {
         assert_eq!(default_media_backend().unwrap().name(), "decv");
     }
 }

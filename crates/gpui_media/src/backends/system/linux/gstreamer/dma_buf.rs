@@ -1,4 +1,4 @@
-//! Linux DMA-BUF frame adaptation for the GStreamer backend.
+//! Linux DMA-BUF frame adaptation for the system backend.
 
 use std::{
     collections::HashMap,

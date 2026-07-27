@@ -5,14 +5,22 @@ publish.workspace = true
 edition.workspace = true
 
 [features]
-default = ["backend-decv"]
-backend-gstreamer = [
+default = ["backend-system"]
+backend-system = [
   "dep:gst",
   "dep:gst-app",
   "dep:gst-video",
   "dep:gst-allocators",
   "dep:core-foundation",
   "dep:core-video",
+  "dep:dispatch2",
+  "dep:objc2",
+  "dep:objc2-av-foundation",
+  "dep:objc2-core-media",
+  "dep:objc2-core-video",
+  "dep:objc2-foundation",
+  "dep:windows",
+  "dep:windows-core",
 ]
 backend-decv = ["dep:base64", "dep:cpal", "dep:decv"]
 
@@ -24,22 +32,56 @@ decv = { git = "https://github.com/cradiy/decv", rev = "747b168ce9aa13950a17b8b1
   "network",
 ], optional = true }
 gpui.workspace = true
+log.workspace = true
+url.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 gst = { package = "gstreamer", version = "0.25", optional = true }
+gst-allocators = { package = "gstreamer-allocators", version = "0.25", optional = true }
 gst-app = { package = "gstreamer-app", version = "0.25", features = [
   "v1_24",
 ], optional = true }
 gst-video = { package = "gstreamer-video", version = "0.25", features = [
   "v1_24",
 ], optional = true }
-log.workspace = true
-url.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gst-allocators = { package = "gstreamer-allocators", version = "0.25", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true, optional = true }
 core-video = { workspace = true, optional = true }
+dispatch2 = { version = "0.3.1", optional = true }
+objc2 = { workspace = true, optional = true }
+objc2-av-foundation = { workspace = true, features = [
+  "AVAsset",
+  "AVPlayer",
+  "AVPlayerItem",
+  "AVPlayerItemOutput",
+  "objc2-core-media",
+  "objc2-core-video",
+], optional = true }
+objc2-core-media = { workspace = true, features = ["CMTime"], optional = true }
+objc2-core-video = { workspace = true, features = [
+  "CVBase",
+  "CVBuffer",
+  "CVImageBuffer",
+  "CVPixelBuffer",
+  "objc2",
+], optional = true }
+objc2-foundation = { workspace = true, features = [
+  "NSDictionary",
+  "NSObject",
+  "NSString",
+  "NSURL",
+  "NSValue",
+], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Imaging",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+], optional = true }
+windows-core = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

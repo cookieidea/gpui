@@ -1,4 +1,4 @@
-//! GStreamer playbin network-source configuration.
+//! GStreamer network-source configuration for Linux `SystemBackend`.
 
 use std::time::Duration;
 

@@ -2,11 +2,14 @@
 
 `gpui_media` is a reusable GPUI media playback core with pluggable backends.
 One media session owns demuxing, video/audio decoding, audio output and the
-shared playback clock. The pure-Rust decv backend is enabled by default, while
-applications can compile another built-in backend or inject their own
-implementation. Video frame rendering and extraction remain separate from
-player chrome so applications can build different interfaces on top of the
-same core.
+shared playback clock. The default `SystemBackend` uses the media stack and
+decoder plugins installed on the host. Applications can opt into another
+built-in backend or inject their own implementation. Video frame rendering and
+extraction remain separate from player chrome so applications can build
+different interfaces on top of the same core.
+
+`SystemBackend` uses GStreamer on Linux, AVFoundation on macOS, and Media
+Foundation on Windows.
 
 ## Public capabilities
 
@@ -28,7 +31,7 @@ same core.
 
 ## Select a playback backend
 
-The default Cargo feature enables the built-in decv backend:
+The default Cargo feature enables `SystemBackend`:
 
 ```toml
 gpui_media = { path = ".../gpui_media" }
@@ -44,15 +47,14 @@ gpui_media = {
 }
 ```
 
-The decv backend supports local and HTTP/WebDAV MP4 files with H.264 or VP9
-video, CPU-backed NV12 output, and AAC-LC audio. GStreamer remains available
-as an opt-in backend:
+The pure-Rust decv backend supports local and HTTP/WebDAV MP4 files with H.264
+or VP9 video, CPU-backed NV12 output, and AAC-LC audio. It is opt-in:
 
 ```toml
 gpui_media = {
     path = ".../gpui_media",
     default-features = false,
-    features = ["backend-gstreamer"],
+    features = ["backend-decv"],
 }
 ```
 

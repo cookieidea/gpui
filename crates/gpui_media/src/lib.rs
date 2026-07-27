@@ -21,6 +21,8 @@ mod window_sizing;
 
 #[cfg(feature = "backend-decv")]
 pub use backends::decv::{DecvBackend, DecvBackendOptions, DecvParallelism};
+#[cfg(feature = "backend-system")]
+pub use backends::system::SystemBackend;
 pub use container::{VideoContainer, video_container};
 pub use error::{MediaError, MediaErrorKind, MediaRecovery, MediaResult};
 pub use frame::{FrameTransport, VideoFrame};
@@ -42,21 +44,17 @@ pub use window_sizing::{fit_video_window_bounds, fit_video_window_size};
 
 /// Initializes the default built-in backend, when it requires initialization.
 ///
-/// This is retained for compatibility with applications that initialize the
-/// default GStreamer backend during startup. Custom backends initialize
-/// themselves when opening a session, and this function is a no-op when no
-/// built-in backend feature is enabled.
+/// Custom backends initialize themselves when opening a session, and this
+/// function is a no-op when no built-in backend requiring initialization is
+/// enabled.
 pub fn init() -> MediaResult<()> {
-    #[cfg(feature = "backend-gstreamer")]
+    #[cfg(feature = "backend-system")]
     {
-        return backends::gstreamer::initialize();
+        return SystemBackend::initialize();
     }
 
-    #[cfg(not(feature = "backend-gstreamer"))]
+    #[cfg(not(feature = "backend-system"))]
     {
         Ok(())
     }
 }
-
-#[cfg(feature = "backend-gstreamer")]
-pub use backends::gstreamer::GstreamerBackend;

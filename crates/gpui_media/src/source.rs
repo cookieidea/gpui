@@ -28,8 +28,8 @@ impl fmt::Debug for MediaSource {
 
 /// HTTP-oriented options available to playback backends.
 ///
-/// The built-in GStreamer backend applies supported properties to its URI
-/// source elements. Custom backends may interpret the same options.
+/// The Linux `SystemBackend` applies supported properties to its GStreamer URI
+/// source elements. Other system or custom backends may support a subset.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct NetworkSourceOptions {
     headers: BTreeMap<String, String>,
@@ -149,11 +149,11 @@ impl NetworkSourceOptions {
 
     /// Controls sparse progressive download for seekable HTTP media.
     ///
-    /// The GStreamer playback backend enables this by default for HTTP(S)
-    /// sources so fragmented MP4 can seek through Range requests. Frame
-    /// extraction remains on the direct source path to keep first-frame
-    /// preparation fast. Disable this for live streams or when temporary
-    /// on-disk buffering is undesirable.
+    /// The Linux `SystemBackend` enables this by default for HTTP(S) sources so
+    /// fragmented MP4 can seek through Range requests. Frame extraction
+    /// remains on the direct source path to keep first-frame preparation fast.
+    /// Disable this for live streams or when temporary on-disk buffering is
+    /// undesirable.
     pub fn with_progressive_download(mut self, enabled: bool) -> Self {
         self.progressive_download = Some(enabled);
         self
@@ -167,12 +167,12 @@ impl NetworkSourceOptions {
         self.user_agent.as_deref()
     }
 
-    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv"))]
+    #[cfg(any(feature = "backend-system", feature = "backend-decv"))]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
 
-    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv"))]
+    #[cfg(any(feature = "backend-system", feature = "backend-decv"))]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
     }
@@ -346,7 +346,7 @@ impl MediaSource {
         &self.network
     }
 
-    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv", test))]
+    #[cfg(any(feature = "backend-system", feature = "backend-decv", test))]
     pub(crate) fn redact_error_message(&self, message: &str) -> String {
         let mut redacted = message.replace(&self.uri, &redacted_uri(&self.uri));
         for secret in self.network.sensitive_values() {
@@ -364,7 +364,7 @@ impl MediaSource {
 }
 
 impl NetworkSourceOptions {
-    #[cfg(any(feature = "backend-gstreamer", feature = "backend-decv", test))]
+    #[cfg(any(feature = "backend-system", feature = "backend-decv", test))]
     fn sensitive_values(&self) -> impl Iterator<Item = &str> {
         self.headers
             .values()
