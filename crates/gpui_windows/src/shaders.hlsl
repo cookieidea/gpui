@@ -345,7 +345,25 @@ GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, Lin
     return output;
 }
 
-float4 sample_linear_gradient(Background background, float position, float4 colors[4]) {
+float4 select_gradient_color(
+    uint index,
+    float4 color0,
+    float4 color1,
+    float4 color2,
+    float4 color3) {
+    if (index == 0) return color0;
+    if (index == 1) return color1;
+    if (index == 2) return color2;
+    return color3;
+}
+
+float4 sample_linear_gradient(
+    Background background,
+    float position,
+    float4 color0,
+    float4 color1,
+    float4 color2,
+    float4 color3) {
     uint count = max(background.stop_count, 2u);
     float sample_position = clamp(position, 0.0, 1.0);
     uint left_ix = 0;
@@ -393,7 +411,9 @@ float4 sample_linear_gradient(Background background, float position, float4 colo
 
     float segment = max(right_position - left_position, 0.000001);
     float t = clamp((sample_position - left_position) / segment, 0.0, 1.0);
-    float4 color = lerp(colors[left_ix], colors[right_ix], t);
+    float4 left_color = select_gradient_color(left_ix, color0, color1, color2, color3);
+    float4 right_color = select_gradient_color(right_ix, color0, color1, color2, color3);
+    float4 color = lerp(left_color, right_color, t);
     if (background.gradient_repeating != 0) {
         uint before_ix = left_ix > 0 ? left_ix - 1 : count - 1;
         uint after_ix = right_ix + 1 < count ? right_ix + 1 : 0;
@@ -408,10 +428,10 @@ float4 sample_linear_gradient(Background background, float position, float4 colo
         float weight1 = (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0;
         float weight2 = (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0;
         float weight3 = t3 / 6.0;
-        color = weight0 * colors[before_ix]
-            + weight1 * colors[left_ix]
-            + weight2 * colors[right_ix]
-            + weight3 * colors[after_ix];
+        color = weight0 * select_gradient_color(before_ix, color0, color1, color2, color3)
+            + weight1 * left_color
+            + weight2 * right_color
+            + weight3 * select_gradient_color(after_ix, color0, color1, color2, color3);
     }
     return background.color_space == 1 ? oklab_to_srgb(color) : color;
 }
@@ -425,7 +445,11 @@ float2x2 rotate2d(float angle) {
 float4 gradient_color(Background background,
                       float2 position,
                       Bounds bounds,
-                      float4 solid_color, float4 colors[4]) {
+                      float4 solid_color,
+                      float4 color0,
+                      float4 color1,
+                      float4 color2,
+                      float4 color3) {
     float4 color;
 
     switch (background.tag) {
@@ -457,7 +481,8 @@ float4 gradient_color(Background background,
                 t = (t + half_size.y) / bounds.size.y;
             }
 
-            color = sample_linear_gradient(background, t, colors);
+            color = sample_linear_gradient(
+                background, t, color0, color1, color2, color3);
 
             // Dither to reduce banding in gradients (especially dark/alpha).
             // Triangular-distributed noise breaks up 8-bit quantization steps.
@@ -661,7 +686,7 @@ QuadVertexOutput quad_vertex(uint vertex_id: SV_VertexID, uint quad_id: SV_Insta
 }
 
 float border_perimeter_position(
-    float2 point,
+    float2 local_point,
     float2 size,
     float2 center_to_point,
     float2 corner_center_to_point,
@@ -694,17 +719,23 @@ float border_perimeter_position(
         }
     } else if (corner_center_to_point.x < corner_center_to_point.y) {
         position = center_to_point.y < 0.0
-            ? clamp(point.x - radii.top_left, 0.0, top)
-            : upto_bottom + clamp(size.x - radii.bottom_right - point.x, 0.0, bottom);
+            ? clamp(local_point.x - radii.top_left, 0.0, top)
+            : upto_bottom + clamp(size.x - radii.bottom_right - local_point.x, 0.0, bottom);
     } else {
         position = center_to_point.x >= 0.0
-            ? upto_right + clamp(point.y - radii.top_right, 0.0, right)
-            : upto_left + clamp(size.y - radii.bottom_left - point.y, 0.0, left);
+            ? upto_right + clamp(local_point.y - radii.top_right, 0.0, right)
+            : upto_left + clamp(size.y - radii.bottom_left - local_point.y, 0.0, left);
     }
     return position / perimeter;
 }
 
-float4 sample_border_gradient(BorderGradient gradient, float position, float4 colors[4]) {
+float4 sample_border_gradient(
+    BorderGradient gradient,
+    float position,
+    float4 color0,
+    float4 color1,
+    float4 color2,
+    float4 color3) {
     uint count = gradient.stop_count;
     uint left_ix = count - 1;
     uint right_ix = 0;
@@ -727,19 +758,23 @@ float4 sample_border_gradient(BorderGradient gradient, float position, float4 co
         (sample_position - left_position) / max(0.0001, right_position - left_position),
         0.0,
         1.0);
-    return lerp(colors[left_ix], colors[right_ix], t);
+    return lerp(
+        select_gradient_color(left_ix, color0, color1, color2, color3),
+        select_gradient_color(right_ix, color0, color1, color2, color3),
+        t);
 }
 
 float4 quad_fragment(QuadFragmentInput input): SV_Target {
     Quad quad = quads[input.quad_id];
-    float4 background_colors[4] = {
+    float4 background_color = gradient_color(
+        quad.background,
+        input.position.xy,
+        quad.bounds,
+        input.background_solid,
         input.background_color0,
         input.background_color1,
         input.background_color2,
-        input.background_color3
-    };
-    float4 background_color = gradient_color(
-        quad.background, input.position.xy, quad.bounds, input.background_solid, background_colors);
+        input.background_color3);
 
     bool unrounded = quad.corner_radii.top_left == 0.0 &&
         quad.corner_radii.top_right == 0.0 &&
@@ -854,22 +889,22 @@ float4 quad_fragment(QuadFragmentInput input): SV_Target {
         if (center_to_point.x < 0.0) {
             if (center_to_point.y < 0.0) {
                 float corner_t = smoothstep(
-                    0.0, 1.0, 0.5 + (point.x - point.y) / (2.0 * transition_extent));
+                    0.0, 1.0, 0.5 + (the_point.x - the_point.y) / (2.0 * transition_extent));
                 border_color = lerp(input.border_color_left, input.border_color_top, corner_t);
             } else {
-                float bottom_distance = size.y - point.y;
+                float bottom_distance = size.y - the_point.y;
                 float corner_t = smoothstep(
-                    0.0, 1.0, 0.5 + (point.x - bottom_distance) / (2.0 * transition_extent));
+                    0.0, 1.0, 0.5 + (the_point.x - bottom_distance) / (2.0 * transition_extent));
                 border_color = lerp(input.border_color_left, input.border_color_bottom, corner_t);
             }
         } else {
-            float right_distance = size.x - point.x;
+            float right_distance = size.x - the_point.x;
             if (center_to_point.y < 0.0) {
                 float corner_t = smoothstep(
-                    0.0, 1.0, 0.5 + (right_distance - point.y) / (2.0 * transition_extent));
+                    0.0, 1.0, 0.5 + (right_distance - the_point.y) / (2.0 * transition_extent));
                 border_color = lerp(input.border_color_right, input.border_color_top, corner_t);
             } else {
-                float bottom_distance = size.y - point.y;
+                float bottom_distance = size.y - the_point.y;
                 float corner_t = smoothstep(
                     0.0, 1.0, 0.5 + (right_distance - bottom_distance) / (2.0 * transition_extent));
                 border_color = lerp(input.border_color_right, input.border_color_bottom, corner_t);
@@ -879,17 +914,16 @@ float4 quad_fragment(QuadFragmentInput input): SV_Target {
 
         if (quad.border_gradient.stop_count >= 2) {
             float perimeter_position = border_perimeter_position(
-                point, size, center_to_point, corner_center_to_point,
+                the_point, size, center_to_point, corner_center_to_point,
                 is_near_rounded_corner, quad.corner_radii);
             float gradient_position = frac(perimeter_position + quad.border_gradient.phase);
-            float4 gradient_colors[4] = {
+            border_color = sample_border_gradient(
+                quad.border_gradient,
+                gradient_position,
                 input.border_gradient_color0,
                 input.border_gradient_color1,
                 input.border_gradient_color2,
-                input.border_gradient_color3
-            };
-            border_color = sample_border_gradient(
-                quad.border_gradient, gradient_position, gradient_colors);
+                input.border_gradient_color3);
             if (quad.border_gradient.color_space == 1) {
                 border_color = oklab_to_srgb(border_color);
             }
@@ -1241,7 +1275,14 @@ float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
         background.tag, background.color_space, background.solid, background.colors);
 
     float4 color = gradient_color(
-        background, input.position.xy, bounds, gradient.solid, gradient.colors);
+        background,
+        input.position.xy,
+        bounds,
+        gradient.solid,
+        gradient.colors[0],
+        gradient.colors[1],
+        gradient.colors[2],
+        gradient.colors[3]);
     return float4(color.rgb * color.a * alpha, alpha * color.a);
 }
 
@@ -1432,18 +1473,15 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     MonochromeSprite sprite = mono_sprites[input.sprite_id];
-    float4 colors[4] = {
-        input.background_color0,
-        input.background_color1,
-        input.background_color2,
-        input.background_color3
-    };
     float4 color = gradient_color(
         sprite.background,
         input.local_position,
         sprite.background_bounds,
         input.background_solid,
-        colors
+        input.background_color0,
+        input.background_color1,
+        input.background_color2,
+        input.background_color3
     );
     float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
     float alpha_corrected = apply_contrast_and_gamma_correction(sample, color.rgb, grayscale_enhanced_contrast, gamma_ratios);
@@ -1533,4 +1571,81 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     }
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
+}
+
+/*
+**
+**              Dynamic surfaces
+*/
+
+struct SurfaceInstance {
+    Bounds bounds;
+    Bounds clip_bounds;
+    Bounds content_mask;
+    Bounds uv_bounds;
+    Corners corner_radii;
+    float4 color_rows[3];
+    float opacity;
+    float3 pad;
+};
+
+struct SurfaceVertexOutput {
+    nointerpolation uint surface_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 texture_position: TEXCOORD1;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct SurfaceFragmentInput {
+    nointerpolation uint surface_id: TEXCOORD0;
+    float4 position: SV_Position;
+    float2 texture_position: TEXCOORD1;
+};
+
+StructuredBuffer<SurfaceInstance> surfaces: register(t1);
+Texture2D<float4> t_surface_uv: register(t2);
+
+SurfaceVertexOutput surface_vertex_impl(uint vertex_id, uint surface_id) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    SurfaceInstance surface = surfaces[surface_id];
+
+    SurfaceVertexOutput output;
+    output.surface_id = surface_id;
+    output.position = to_device_position(unit_vertex, surface.bounds);
+    output.texture_position =
+        surface.uv_bounds.origin + unit_vertex * surface.uv_bounds.size;
+    output.clip_distance =
+        distance_from_clip_rect(unit_vertex, surface.bounds, surface.content_mask);
+    return output;
+}
+
+SurfaceVertexOutput surface_rgba_vertex(uint vertex_id: SV_VertexID, uint surface_id: SV_InstanceID) {
+    return surface_vertex_impl(vertex_id, surface_id);
+}
+
+float4 surface_rgba_fragment(SurfaceFragmentInput input): SV_Target {
+    SurfaceInstance surface = surfaces[input.surface_id];
+    float4 color = t_sprite.Sample(s_sprite, input.texture_position);
+    float distance = quad_sdf(input.position.xy, surface.clip_bounds, surface.corner_radii);
+    color.a *= surface.opacity * saturate(0.5 - distance);
+    return color;
+}
+
+SurfaceVertexOutput surface_nv12_vertex(uint vertex_id: SV_VertexID, uint surface_id: SV_InstanceID) {
+    return surface_vertex_impl(vertex_id, surface_id);
+}
+
+float4 surface_nv12_fragment(SurfaceFragmentInput input): SV_Target {
+    SurfaceInstance surface = surfaces[input.surface_id];
+    float4 yuv = float4(
+        t_sprite.Sample(s_sprite, input.texture_position).r,
+        t_surface_uv.Sample(s_sprite, input.texture_position).rg,
+        1.0);
+    float3 rgb = float3(
+        dot(surface.color_rows[0], yuv),
+        dot(surface.color_rows[1], yuv),
+        dot(surface.color_rows[2], yuv));
+    float distance = quad_sdf(input.position.xy, surface.clip_bounds, surface.corner_radii);
+    float alpha = surface.opacity * saturate(0.5 - distance);
+    return float4(rgb, alpha);
 }

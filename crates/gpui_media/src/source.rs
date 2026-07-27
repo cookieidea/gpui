@@ -315,6 +315,14 @@ impl MediaSource {
     /// local filesystem paths.
     pub fn parse(input: impl AsRef<str>) -> MediaResult<Self> {
         let input = input.as_ref();
+        #[cfg(windows)]
+        if matches!(
+            Path::new(input).components().next(),
+            Some(std::path::Component::Prefix(_))
+        ) {
+            return Self::from_path(input);
+        }
+
         match url::Url::parse(input) {
             Ok(url) if !url.scheme().is_empty() => Self::from_uri(url.to_string()),
             _ => Self::from_path(PathBuf::from(input)),
@@ -449,6 +457,25 @@ mod tests {
         let source = MediaSource::parse("https://example.com/media/movie.mp4").unwrap();
         assert_eq!(source.uri(), "https://example.com/media/movie.mp4");
         assert_eq!(source.display_name(), "movie.mp4");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_windows_path_as_file_uri() {
+        let path =
+            std::env::temp_dir().join(format!("gpui-media-source-test-{}.mp4", std::process::id()));
+        std::fs::File::create(&path).unwrap();
+
+        let source = MediaSource::parse(path.to_string_lossy()).unwrap();
+        let parsed = url::Url::parse(source.uri()).unwrap();
+
+        assert_eq!(parsed.scheme(), "file");
+        assert_eq!(
+            parsed.to_file_path().unwrap().canonicalize().unwrap(),
+            path.canonicalize().unwrap()
+        );
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

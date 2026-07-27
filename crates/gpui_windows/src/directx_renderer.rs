@@ -46,6 +46,7 @@ pub(crate) struct DirectXRenderer {
     pipelines: DirectXRenderPipelines,
     effect_pipelines: HashMap<u64, EffectPipeline>,
     failed_effect_pipelines: HashSet<u64>,
+    surfaces: HashMap<SurfaceId, CachedSurface>,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -94,6 +95,42 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    surface_rgba: PipelineState<SurfaceInstance>,
+    surface_nv12: PipelineState<SurfaceInstance>,
+}
+
+#[derive(Clone, Debug)]
+#[repr(C)]
+struct SurfaceInstance {
+    bounds: Bounds<ScaledPixels>,
+    clip_bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    uv_bounds: Bounds<f32>,
+    corner_radii: Corners<ScaledPixels>,
+    color_rows: [[f32; 4]; 3],
+    opacity: f32,
+    _pad: [f32; 3],
+}
+
+struct DirectXSurfacePlane {
+    texture: ID3D11Texture2D,
+    view: Option<ID3D11ShaderResourceView>,
+}
+
+enum DirectXSurfaceTextures {
+    Rgba(DirectXSurfacePlane),
+    Nv12 {
+        y: DirectXSurfacePlane,
+        uv: DirectXSurfacePlane,
+    },
+}
+
+struct CachedSurface {
+    sequence: u64,
+    format: SurfaceFormat,
+    size: Size<DevicePixels>,
+    textures: DirectXSurfaceTextures,
+    owner: WeakSurfaceHandle,
 }
 
 struct DirectXGlobalElements {
@@ -176,6 +213,7 @@ impl DirectXRenderer {
             pipelines,
             effect_pipelines: HashMap::default(),
             failed_effect_pipelines: HashSet::default(),
+            surfaces: HashMap::default(),
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -314,6 +352,7 @@ impl DirectXRenderer {
         self.pipelines = pipelines;
         self.effect_pipelines.clear();
         self.failed_effect_pipelines.clear();
+        self.surfaces.clear();
         self.direct_composition = direct_composition;
         self.skip_draws = true;
         Ok(())
@@ -846,6 +885,71 @@ impl DirectXRenderer {
         if surfaces.is_empty() {
             return Ok(());
         }
+
+        self.surfaces.retain(|_, cached| cached.owner.is_alive());
+
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        for surface in surfaces {
+            let Some(frame) = surface.source.frame() else {
+                continue;
+            };
+            let id = frame.handle().id();
+            let recreate = self.surfaces.get(&id).is_none_or(|cached| {
+                cached.format != frame.format() || cached.size != frame.coded_size()
+            });
+
+            if recreate {
+                let textures = create_surface_textures(&devices.device, frame)?;
+                upload_surface(&devices.device_context, &textures, frame)?;
+                self.surfaces.insert(
+                    id,
+                    CachedSurface {
+                        sequence: frame.sequence(),
+                        format: frame.format(),
+                        size: frame.coded_size(),
+                        textures,
+                        owner: frame.handle().downgrade(),
+                    },
+                );
+            } else if self.surfaces[&id].sequence != frame.sequence() {
+                let cached = self.surfaces.get_mut(&id).unwrap();
+                upload_surface(&devices.device_context, &cached.textures, frame)?;
+                cached.sequence = frame.sequence();
+            }
+
+            let instance = surface_instance(surface, frame);
+            let cached = &self.surfaces[&id];
+            let pipeline = match &cached.textures {
+                DirectXSurfaceTextures::Rgba(_) => &mut self.pipelines.surface_rgba,
+                DirectXSurfaceTextures::Nv12 { .. } => &mut self.pipelines.surface_nv12,
+            };
+            pipeline.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                slice::from_ref(&instance),
+            )?;
+
+            match &cached.textures {
+                DirectXSurfaceTextures::Rgba(texture) => pipeline.draw_surface(
+                    &devices.device_context,
+                    slice::from_ref(&texture.view),
+                    None,
+                    slice::from_ref(&resources.viewport),
+                    slice::from_ref(&self.globals.global_params_buffer),
+                    slice::from_ref(&self.globals.sampler),
+                )?,
+                DirectXSurfaceTextures::Nv12 { y, uv } => pipeline.draw_surface(
+                    &devices.device_context,
+                    slice::from_ref(&y.view),
+                    Some(slice::from_ref(&uv.view)),
+                    slice::from_ref(&resources.viewport),
+                    slice::from_ref(&self.globals.global_params_buffer),
+                    slice::from_ref(&self.globals.sampler),
+                )?,
+            }
+        }
+
         Ok(())
     }
 
@@ -898,6 +1002,191 @@ impl DirectXRenderer {
 
     pub(crate) fn mark_drawable(&mut self) {
         self.skip_draws = false;
+    }
+}
+
+fn surface_instance(surface: &PaintSurface, frame: &SurfaceFrame) -> SurfaceInstance {
+    let coded_size = frame.coded_size();
+    let visible_rect = frame.visible_rect();
+    SurfaceInstance {
+        bounds: surface.bounds,
+        clip_bounds: surface.clip_bounds,
+        content_mask: surface.content_mask.bounds,
+        uv_bounds: Bounds {
+            origin: Point {
+                x: visible_rect.origin.x.0 as f32 / coded_size.width.0 as f32,
+                y: visible_rect.origin.y.0 as f32 / coded_size.height.0 as f32,
+            },
+            size: Size {
+                width: visible_rect.size.width.0 as f32 / coded_size.width.0 as f32,
+                height: visible_rect.size.height.0 as f32 / coded_size.height.0 as f32,
+            },
+        },
+        corner_radii: surface.corner_radii,
+        color_rows: yuv_to_rgb_rows(frame.color()),
+        opacity: surface.opacity,
+        _pad: [0.0; 3],
+    }
+}
+
+fn yuv_to_rgb_rows(color: SurfaceColorInfo) -> [[f32; 4]; 3] {
+    let (y_scale, y_offset, chroma_center, r_cr, g_cb, g_cr, b_cb) =
+        match (color.matrix, color.range) {
+            (YuvMatrix::Bt601, ColorRange::Limited) => (
+                255.0 / 219.0,
+                16.0 / 255.0,
+                128.0 / 255.0,
+                1.596_027,
+                -0.391_762,
+                -0.812_968,
+                2.017_232,
+            ),
+            (YuvMatrix::Bt709, ColorRange::Limited) => (
+                255.0 / 219.0,
+                16.0 / 255.0,
+                128.0 / 255.0,
+                1.792_741,
+                -0.213_249,
+                -0.532_909,
+                2.112_402,
+            ),
+            (YuvMatrix::Bt601, ColorRange::Full) => (
+                1.0,
+                0.0,
+                128.0 / 255.0,
+                1.402,
+                -0.344_136,
+                -0.714_136,
+                1.772,
+            ),
+            (YuvMatrix::Bt709, ColorRange::Full) => (
+                1.0,
+                0.0,
+                128.0 / 255.0,
+                1.5748,
+                -0.187_324,
+                -0.468_124,
+                1.8556,
+            ),
+        };
+
+    [
+        [
+            y_scale,
+            0.0,
+            r_cr,
+            -y_scale * y_offset - r_cr * chroma_center,
+        ],
+        [
+            y_scale,
+            g_cb,
+            g_cr,
+            -y_scale * y_offset - (g_cb + g_cr) * chroma_center,
+        ],
+        [
+            y_scale,
+            b_cb,
+            0.0,
+            -y_scale * y_offset - b_cb * chroma_center,
+        ],
+    ]
+}
+
+fn create_surface_textures(
+    device: &ID3D11Device,
+    frame: &SurfaceFrame,
+) -> Result<DirectXSurfaceTextures> {
+    let size = frame.coded_size();
+    let width = size.width.0 as u32;
+    let height = size.height.0 as u32;
+    match frame.format() {
+        SurfaceFormat::Bgra8 => Ok(DirectXSurfaceTextures::Rgba(create_surface_plane(
+            device,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+        )?)),
+        SurfaceFormat::Rgba8 => Ok(DirectXSurfaceTextures::Rgba(create_surface_plane(
+            device,
+            width,
+            height,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+        )?)),
+        SurfaceFormat::Nv12 => Ok(DirectXSurfaceTextures::Nv12 {
+            y: create_surface_plane(device, width, height, DXGI_FORMAT_R8_UNORM)?,
+            uv: create_surface_plane(
+                device,
+                width.div_ceil(2),
+                height.div_ceil(2),
+                DXGI_FORMAT_R8G8_UNORM,
+            )?,
+        }),
+    }
+}
+
+fn create_surface_plane(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    format: DXGI_FORMAT,
+) -> Result<DirectXSurfacePlane> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }?;
+    let texture = texture.context("Direct3D did not create a surface texture")?;
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }?;
+    Ok(DirectXSurfacePlane { texture, view })
+}
+
+fn upload_surface(
+    device_context: &ID3D11DeviceContext,
+    textures: &DirectXSurfaceTextures,
+    frame: &SurfaceFrame,
+) -> Result<()> {
+    let planes = frame
+        .cpu_planes()
+        .context("DirectX surface upload requires CPU-backed planes")?;
+    match textures {
+        DirectXSurfaceTextures::Rgba(texture) => {
+            upload_surface_plane(device_context, texture, &planes[0]);
+        }
+        DirectXSurfaceTextures::Nv12 { y, uv } => {
+            upload_surface_plane(device_context, y, &planes[0]);
+            upload_surface_plane(device_context, uv, &planes[1]);
+        }
+    }
+    Ok(())
+}
+
+fn upload_surface_plane(
+    device_context: &ID3D11DeviceContext,
+    texture: &DirectXSurfacePlane,
+    plane: &SurfacePlane,
+) {
+    unsafe {
+        device_context.UpdateSubresource(
+            &texture.texture,
+            0,
+            None,
+            plane.bytes().as_ptr().add(plane.offset()).cast(),
+            plane.stride(),
+            0,
+        );
     }
 }
 
@@ -1028,6 +1317,20 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let surface_rgba = PipelineState::new(
+            device,
+            "surface_rgba_pipeline",
+            ShaderModule::SurfaceRgba,
+            1,
+            create_blend_state(device)?,
+        )?;
+        let surface_nv12 = PipelineState::new(
+            device,
+            "surface_nv12_pipeline",
+            ShaderModule::SurfaceNv12,
+            1,
+            create_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1038,6 +1341,8 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surface_rgba,
+            surface_nv12,
         })
     }
 }
@@ -1322,6 +1627,36 @@ impl<T> PipelineState<T> {
         Ok(())
     }
 
+    fn draw_surface(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        first_texture: &[Option<ID3D11ShaderResourceView>],
+        second_texture: Option<&[Option<ID3D11ShaderResourceView>]>,
+        viewport: &[D3D11_VIEWPORT],
+        global_params: &[Option<ID3D11Buffer>],
+        sampler: &[Option<ID3D11SamplerState>],
+    ) -> Result<()> {
+        set_pipeline_state(
+            device_context,
+            slice::from_ref(&self.view),
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            viewport,
+            &self.vertex,
+            &self.fragment,
+            global_params,
+            &self.blend_state,
+        );
+        unsafe {
+            device_context.PSSetSamplers(0, Some(sampler));
+            device_context.PSSetShaderResources(0, Some(first_texture));
+            if let Some(second_texture) = second_texture {
+                device_context.PSSetShaderResources(2, Some(second_texture));
+            }
+            device_context.DrawInstanced(4, 1, 0, 0);
+        }
+        Ok(())
+    }
+
     fn draw_range(
         &self,
         device: &ID3D11Device,
@@ -1583,7 +1918,7 @@ fn compile_hlsl(source: &str, entry: &str, target: &str) -> Result<ID3DBlob> {
             source.len(),
             PCSTR::null(),
             None,
-            None::<ID3DInclude>,
+            None::<&ID3DInclude>,
             PCSTR::from_raw(entry.as_ptr() as *const u8),
             PCSTR::from_raw(target.as_ptr() as *const u8),
             0,
@@ -2093,6 +2428,8 @@ pub(crate) mod shader_resources {
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
+        SurfaceRgba,
+        SurfaceNv12,
         EmojiRasterization,
     }
 
@@ -2166,6 +2503,14 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::SurfaceRgba => match target {
+                    ShaderTarget::Vertex => SURFACE_RGBA_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_RGBA_FRAGMENT_BYTES,
+                },
+                ShaderModule::SurfaceNv12 => match target {
+                    ShaderTarget::Vertex => SURFACE_NV12_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_NV12_FRAGMENT_BYTES,
                 },
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
@@ -2257,6 +2602,8 @@ pub(crate) mod shader_resources {
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                ShaderModule::SurfaceRgba => "surface_rgba",
+                ShaderModule::SurfaceNv12 => "surface_nv12",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }
