@@ -22,13 +22,12 @@ use windows::{
             CLSID_MFMediaEngineClassFactory, IMFMediaEngine, IMFMediaEngineClassFactory,
             IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
             MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_EVENT_BUFFERINGENDED,
-            MF_MEDIA_ENGINE_EVENT_BUFFERINGSTARTED, MF_MEDIA_ENGINE_EVENT_CANPLAY,
-            MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH, MF_MEDIA_ENGINE_EVENT_ENDED,
-            MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_EVENT_FIRSTFRAMEREADY,
-            MF_MEDIA_ENGINE_EVENT_LOADEDDATA, MF_MEDIA_ENGINE_EVENT_PLAYING,
-            MF_MEDIA_ENGINE_EVENT_SEEKED, MF_MEDIA_ENGINE_EVENT_STALLED,
-            MF_MEDIA_ENGINE_EVENT_WAITING, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFARGB,
-            MFCreateAttributes, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoNormalizedRect,
+            MF_MEDIA_ENGINE_EVENT_CANPLAY, MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH,
+            MF_MEDIA_ENGINE_EVENT_ENDED, MF_MEDIA_ENGINE_EVENT_ERROR,
+            MF_MEDIA_ENGINE_EVENT_FIRSTFRAMEREADY, MF_MEDIA_ENGINE_EVENT_LOADEDDATA,
+            MF_MEDIA_ENGINE_EVENT_PLAYING, MF_MEDIA_ENGINE_EVENT_SEEKED,
+            MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFARGB, MFCreateAttributes,
+            MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoNormalizedRect,
         },
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
@@ -118,7 +117,7 @@ impl WindowsPlayback {
             .map_err(|error| MediaError::io("failed to start Media Foundation worker", error))?;
 
         initialized_rx.recv().map_err(|error| {
-            MediaError::io(
+            worker_channel_error(
                 "Media Foundation worker stopped during initialization",
                 error,
             )
@@ -134,10 +133,10 @@ impl WindowsPlayback {
         let (response_tx, response_rx) = mpsc::channel();
         self.commands
             .send(command(response_tx))
-            .map_err(|error| MediaError::io("Media Foundation worker stopped", error))?;
+            .map_err(|error| worker_channel_error("Media Foundation worker stopped", error))?;
         response_rx
             .recv()
-            .map_err(|error| MediaError::io("Media Foundation worker stopped", error))?
+            .map_err(|error| worker_channel_error("Media Foundation worker stopped", error))?
     }
 }
 
@@ -476,14 +475,6 @@ impl MediaFoundationWorker {
         {
             self.output.emit(MediaBackendEvent::Ready);
         } else if [
-            MF_MEDIA_ENGINE_EVENT_WAITING.0,
-            MF_MEDIA_ENGINE_EVENT_STALLED.0,
-            MF_MEDIA_ENGINE_EVENT_BUFFERINGSTARTED.0,
-        ]
-        .contains(&event_code)
-        {
-            self.output.emit(MediaBackendEvent::Buffering(0));
-        } else if [
             MF_MEDIA_ENGINE_EVENT_PLAYING.0,
             MF_MEDIA_ENGINE_EVENT_BUFFERINGENDED.0,
         ]
@@ -497,7 +488,7 @@ impl MediaFoundationWorker {
                 .emit(MediaBackendEvent::Error(Arc::new(MediaError::new(
                     MediaErrorKind::Decode,
                     format!("Media Foundation playback error {:#010x}", event.param1),
-                    MediaRecovery::Reload,
+                    MediaRecovery::ReloadSource,
                 ))));
         }
     }
@@ -731,8 +722,23 @@ fn seconds_duration(seconds: f64) -> Option<Duration> {
     (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
 }
 
-fn windows_backend_error(context: impl Into<String>, error: windows::core::Error) -> MediaError {
+fn windows_backend_error(
+    context: impl std::fmt::Display,
+    error: windows::core::Error,
+) -> MediaError {
     MediaError::from_error(MediaErrorKind::Backend, MediaRecovery::None, context, error)
+}
+
+fn worker_channel_error(
+    context: impl std::fmt::Display,
+    error: impl std::fmt::Display,
+) -> MediaError {
+    MediaError::from_error(
+        MediaErrorKind::Backend,
+        MediaRecovery::Retry,
+        context,
+        error,
+    )
 }
 
 fn reject_unsupported_network_options(request: &MediaPlaybackRequest) -> MediaResult<()> {

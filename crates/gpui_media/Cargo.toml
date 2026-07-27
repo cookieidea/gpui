@@ -6,6 +6,9 @@ edition.workspace = true
 
 [features]
 default = ["backend-system"]
+# Cargo features are target-independent, so this feature activates every
+# optional system dependency by name. The target dependency tables below
+# ensure that Cargo only resolves and builds the current OS's media stack.
 backend-system = [
   "dep:gst",
   "dep:gst-app",

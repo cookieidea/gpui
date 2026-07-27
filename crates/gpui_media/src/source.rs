@@ -167,12 +167,18 @@ impl NetworkSourceOptions {
         self.user_agent.as_deref()
     }
 
-    #[cfg(any(feature = "backend-system", feature = "backend-decv"))]
+    #[cfg(any(
+        feature = "backend-decv",
+        all(feature = "backend-system", target_os = "linux")
+    ))]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
 
-    #[cfg(any(feature = "backend-system", feature = "backend-decv"))]
+    #[cfg(any(
+        feature = "backend-decv",
+        all(feature = "backend-system", target_os = "linux")
+    ))]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
     }
@@ -346,7 +352,11 @@ impl MediaSource {
         &self.network
     }
 
-    #[cfg(any(feature = "backend-system", feature = "backend-decv", test))]
+    #[cfg(any(
+        feature = "backend-decv",
+        all(feature = "backend-system", target_os = "linux"),
+        test
+    ))]
     pub(crate) fn redact_error_message(&self, message: &str) -> String {
         let mut redacted = message.replace(&self.uri, &redacted_uri(&self.uri));
         for secret in self.network.sensitive_values() {
@@ -364,7 +374,11 @@ impl MediaSource {
 }
 
 impl NetworkSourceOptions {
-    #[cfg(any(feature = "backend-system", feature = "backend-decv", test))]
+    #[cfg(any(
+        feature = "backend-decv",
+        all(feature = "backend-system", target_os = "linux"),
+        test
+    ))]
     fn sensitive_values(&self) -> impl Iterator<Item = &str> {
         self.headers
             .values()
