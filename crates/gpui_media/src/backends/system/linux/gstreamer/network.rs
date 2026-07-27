@@ -50,17 +50,11 @@ pub(crate) fn configure_playbin_network(playbin: &gst::Element, options: &Networ
 
 pub(crate) fn configure_playbin_progressive_download(
     playbin: &gst::Element,
-    uri: &str,
+    _uri: &str,
     options: &NetworkSourceOptions,
 ) {
-    let enabled = options
-        .progressive_download()
-        .unwrap_or_else(|| is_http_uri(uri));
+    let enabled = options.progressive_download().unwrap_or(false);
     set_playbin_flag(playbin, "download", enabled);
-}
-
-fn is_http_uri(uri: &str) -> bool {
-    url::Url::parse(uri).is_ok_and(|uri| matches!(uri.scheme(), "http" | "https"))
 }
 
 fn set_playbin_flag(playbin: &gst::Element, nick: &str, enabled: bool) {
@@ -221,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn http_playback_enables_progressive_download_by_default() {
+    fn http_playback_disables_progressive_download_by_default() {
         crate::init().unwrap();
         let playbin = gst::ElementFactory::make("playbin3").build().unwrap();
 
@@ -231,18 +225,18 @@ mod tests {
             &NetworkSourceOptions::default(),
         );
 
-        assert!(playbin_flag_is_set(&playbin, "download"));
+        assert!(!playbin_flag_is_set(&playbin, "download"));
     }
 
     #[test]
-    fn progressive_download_can_be_disabled() {
+    fn progressive_download_can_be_enabled() {
         crate::init().unwrap();
         let playbin = gst::ElementFactory::make("playbin3").build().unwrap();
-        let options = NetworkSourceOptions::default().with_progressive_download(false);
+        let options = NetworkSourceOptions::default().with_progressive_download(true);
 
-        configure_playbin_progressive_download(&playbin, "https://example.com/live", &options);
+        configure_playbin_progressive_download(&playbin, "https://example.com/video.mp4", &options);
 
-        assert!(!playbin_flag_is_set(&playbin, "download"));
+        assert!(playbin_flag_is_set(&playbin, "download"));
     }
 
     fn playbin_flag_is_set(playbin: &gst::Element, nick: &str) -> bool {
