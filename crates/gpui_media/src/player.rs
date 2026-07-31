@@ -9,9 +9,10 @@ use gpui::{DmaBufImportStatus, SurfaceFrameBacking};
 
 use crate::{
     FrameTransport, FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities,
-    MediaError, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession, MediaResult,
-    MediaSource, PlaybackTimeline, SeekMode, TransportChange, VideoFrame, VideoFrameExtractor,
-    VideoPlaybackStats, media_backend::default_media_backend, stats::PlaybackCounters,
+    MediaError, MediaInfo, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession,
+    MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode, SubtitleEvent,
+    TransportChange, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
+    media_backend::default_media_backend, stats::PlaybackCounters,
 };
 
 /// Initial behavior for a [`VideoPlayer`].
@@ -96,6 +97,8 @@ pub enum VideoPlayerEvent {
     StateChanged(PlaybackState),
     TimelineChanged(PlaybackTimeline),
     BufferingChanged(u8),
+    MediaInfoChanged(Arc<MediaInfo>),
+    Subtitle(SubtitleEvent),
     FrameReady(Arc<VideoFrame>),
     FrameTransportChanged(FrameTransport),
     DmaBufImportFailed(SharedString),
@@ -120,6 +123,7 @@ pub struct VideoPlayer {
     state: PlaybackState,
     state_after_seek: Option<PlaybackState>,
     timeline: PlaybackTimeline,
+    media_info: Option<Arc<MediaInfo>>,
     buffering_percent: Option<u8>,
     play_when_ready: bool,
     playback_rate: f64,
@@ -205,6 +209,7 @@ impl VideoPlayer {
         let initial_volume = normalize_volume(options.volume);
         playback.set_volume(initial_volume);
         playback.set_muted(options.muted);
+        let media_info = playback.media_info();
 
         let frames = output.video_frames;
         cx.spawn(async move |this, cx| {
@@ -285,8 +290,18 @@ impl VideoPlayer {
                             }
                         }
                     }
+                    MediaBackendEvent::MediaInfoChanged(info) => {
+                        player.media_info = Some(info.clone());
+                        cx.emit(VideoPlayerEvent::MediaInfoChanged(info));
+                        cx.notify();
+                    }
+                    MediaBackendEvent::Subtitle(event) => {
+                        cx.emit(VideoPlayerEvent::Subtitle(event));
+                        cx.notify();
+                    }
                     MediaBackendEvent::Ended => {
                         player.play_when_ready = false;
+                        cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
                         if let Some(duration) = player.timeline.duration() {
                             player.timeline = PlaybackTimeline::new(
                                 duration,
@@ -340,6 +355,7 @@ impl VideoPlayer {
             },
             state_after_seek: None,
             timeline: PlaybackTimeline::default(),
+            media_info,
             buffering_percent: None,
             play_when_ready: options.autoplay,
             playback_rate: 1.0,
@@ -381,6 +397,10 @@ impl VideoPlayer {
 
     pub fn duration(&self) -> Option<Duration> {
         self.timeline.duration()
+    }
+
+    pub fn media_info(&self) -> Option<&MediaInfo> {
+        self.media_info.as_deref()
     }
 
     pub fn position(&self) -> Duration {
@@ -439,6 +459,7 @@ impl VideoPlayer {
         self.play_when_ready = true;
         if self.state == PlaybackState::Ended {
             self.playback.restart()?;
+            cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
             self.state_after_seek = Some(PlaybackState::Playing);
             self.timeline = PlaybackTimeline::new(
                 Duration::ZERO,
@@ -475,6 +496,7 @@ impl VideoPlayer {
         self.play_when_ready = false;
         self.playback.pause()?;
         self.playback.seek_to(Duration::ZERO, SeekMode::KeyFrame)?;
+        cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
         self.state_after_seek = Some(PlaybackState::Paused);
         self.timeline = PlaybackTimeline::new(
             Duration::ZERO,
@@ -506,12 +528,14 @@ impl VideoPlayer {
         self.frame_transport = None;
         self.state_after_seek = None;
         self.timeline = PlaybackTimeline::default();
+        self.media_info = self.playback.media_info();
         self.buffering_percent = None;
         self.play_when_ready = autoplay;
         self.delivered_frames = 0;
         self.playback_rate = 1.0;
         cx.emit(VideoPlayerEvent::TimelineChanged(self.timeline));
         cx.emit(VideoPlayerEvent::PlaybackRateChanged(self.playback_rate));
+        cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
         self.set_state(
             if autoplay {
                 PlaybackState::Loading
@@ -539,6 +563,7 @@ impl VideoPlayer {
             PlaybackState::Paused
         };
         self.playback.seek_to(target, mode)?;
+        cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
         self.state_after_seek = Some(resume_state);
         self.timeline = PlaybackTimeline::new(
             target,
@@ -590,6 +615,27 @@ impl VideoPlayer {
         self.playback.pause()?;
         self.set_state(PlaybackState::Paused, cx);
         self.skip_backward(amount, SeekMode::Accurate, cx)
+    }
+
+    pub fn select_audio_stream(
+        &mut self,
+        id: &MediaStreamId,
+        cx: &mut Context<Self>,
+    ) -> MediaResult<()> {
+        self.playback.select_audio_stream(id)?;
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn select_subtitle_stream(
+        &mut self,
+        id: Option<&MediaStreamId>,
+        cx: &mut Context<Self>,
+    ) -> MediaResult<()> {
+        self.playback.select_subtitle_stream(id)?;
+        cx.emit(VideoPlayerEvent::Subtitle(SubtitleEvent::Reset));
+        cx.notify();
+        Ok(())
     }
 
     pub fn set_playback_rate(&mut self, rate: f64, cx: &mut Context<Self>) -> MediaResult<()> {

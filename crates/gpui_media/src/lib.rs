@@ -13,9 +13,11 @@ mod error;
 mod frame;
 mod frame_extractor;
 mod media_backend;
+mod media_info;
 mod player;
 mod source;
 mod stats;
+mod subtitles;
 mod timeline;
 mod window_sizing;
 
@@ -34,11 +36,18 @@ pub use media_backend::{
     MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
     MediaPlaybackSession, TransportChange,
 };
+pub use media_info::{
+    AudioStreamInfo, MediaInfo, MediaStreamId, SubtitleStreamInfo, VideoStreamInfo,
+};
 pub use player::{
     PlaybackState, VideoPlayer, VideoPlayerBuilder, VideoPlayerEvent, VideoPlayerOptions,
 };
 pub use source::{MediaSource, NetworkSourceOptions};
 pub use stats::VideoPlaybackStats;
+pub use subtitles::{
+    ParsedSubtitles, SubtitleCue, SubtitleEvent, SubtitleFormat, detect_subtitle_format,
+    parse_subtitles,
+};
 pub use timeline::{PlaybackTimeline, SeekMode};
 pub use window_sizing::{fit_video_window_bounds, fit_video_window_size};
 

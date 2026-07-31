@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, RwLock,
         mpsc::{self, Receiver, Sender},
     },
     thread::JoinHandle,
@@ -20,27 +20,35 @@ use windows::{
         },
         Media::MediaFoundation::{
             CLSID_MFMediaEngineClassFactory, IMFMediaEngine, IMFMediaEngineClassFactory,
-            IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
+            IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, IMFTimedText,
+            IMFTimedTextCue, IMFTimedTextNotify, IMFTimedTextNotify_Impl, IMFTimedTextTrackList,
             MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_EVENT_BUFFERINGENDED,
             MF_MEDIA_ENGINE_EVENT_CANPLAY, MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH,
             MF_MEDIA_ENGINE_EVENT_ENDED, MF_MEDIA_ENGINE_EVENT_ERROR,
             MF_MEDIA_ENGINE_EVENT_FIRSTFRAMEREADY, MF_MEDIA_ENGINE_EVENT_LOADEDDATA,
             MF_MEDIA_ENGINE_EVENT_PLAYING, MF_MEDIA_ENGINE_EVENT_SEEKED,
-            MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFARGB, MFCreateAttributes,
+            MF_MEDIA_ENGINE_EVENT_TRACKSCHANGE, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+            MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
+            MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SD_LANGUAGE, MF_SD_STREAM_NAME,
+            MF_TIMED_TEXT_CUE_EVENT, MF_TIMED_TEXT_CUE_EVENT_ACTIVE, MF_VERSION, MFARGB,
+            MFCreateAttributes, MFMediaType_Audio, MFMediaType_Subtitle, MFMediaType_Video,
             MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoNormalizedRect,
         },
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-            CoUninitialize,
+            CoTaskMemFree, CoUninitialize,
         },
+        System::Variant::VT_CLSID,
     },
-    core::{BSTR, Interface, implement},
+    core::{BSTR, GUID, Interface, PWSTR, implement},
 };
 
 use crate::{
-    FrameExtractionSession, FrameExtractorBackendRequest, MediaBackendEvent, MediaCapabilities,
-    MediaError, MediaErrorKind, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession,
-    MediaRecovery, MediaResult, PlaybackTimeline, SeekMode, VideoFrame,
+    AudioStreamInfo, FrameExtractionSession, FrameExtractorBackendRequest, MediaBackendEvent,
+    MediaCapabilities, MediaError, MediaErrorKind, MediaInfo, MediaOutputSink,
+    MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult, MediaStreamId,
+    PlaybackTimeline, SeekMode, SubtitleCue, SubtitleEvent, SubtitleFormat, SubtitleStreamInfo,
+    VideoFrame, VideoStreamInfo,
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -86,12 +94,22 @@ enum Command {
     },
     Volume(f64),
     Muted(bool),
+    SelectAudio {
+        id: MediaStreamId,
+        response: Sender<MediaResult<()>>,
+    },
+    SelectSubtitle {
+        id: Option<MediaStreamId>,
+        response: Sender<MediaResult<()>>,
+    },
     Shutdown,
 }
 
 struct WindowsPlayback {
     commands: Sender<Command>,
     worker: Option<JoinHandle<()>>,
+    media_info: Arc<RwLock<Option<Arc<MediaInfo>>>>,
+    subtitles: bool,
 }
 
 impl WindowsPlayback {
@@ -100,13 +118,16 @@ impl WindowsPlayback {
         let (commands, command_rx) = mpsc::channel();
         let (initialized_tx, initialized_rx) = mpsc::sync_channel(1);
         let source_uri = request.source.uri().to_owned();
+        let media_info = Arc::new(RwLock::new(None));
+        let media_info_for_worker = media_info.clone();
         let worker = std::thread::Builder::new()
             .name("gpui-video-media-foundation".into())
             .spawn(move || {
-                let result = MediaFoundationWorker::new(&source_uri, output);
+                let result = MediaFoundationWorker::new(&source_uri, output, media_info_for_worker);
                 match result {
                     Ok(mut worker) => {
-                        let _ = initialized_tx.send(Ok(()));
+                        let subtitles = worker.timed_text.is_some();
+                        let _ = initialized_tx.send(Ok(subtitles));
                         worker.run(command_rx);
                     }
                     Err(error) => {
@@ -116,7 +137,7 @@ impl WindowsPlayback {
             })
             .map_err(|error| MediaError::io("failed to start Media Foundation worker", error))?;
 
-        initialized_rx.recv().map_err(|error| {
+        let subtitles = initialized_rx.recv().map_err(|error| {
             worker_channel_error(
                 "Media Foundation worker stopped during initialization",
                 error,
@@ -126,6 +147,8 @@ impl WindowsPlayback {
         Ok(Self {
             commands,
             worker: Some(worker),
+            media_info,
+            subtitles,
         })
     }
 
@@ -154,12 +177,13 @@ impl MediaPlaybackSession for WindowsPlayback {
         MediaCapabilities {
             video: true,
             audio: true,
+            subtitles: self.subtitles,
             seeking: true,
             accurate_seeking: true,
             playback_rate: true,
             frame_stepping: true,
             frame_extraction: true,
-            ..MediaCapabilities::default()
+            transport_switching: false,
         }
     }
 
@@ -212,6 +236,24 @@ impl MediaPlaybackSession for WindowsPlayback {
     fn set_muted(&mut self, muted: bool) {
         let _ = self.commands.send(Command::Muted(muted));
     }
+
+    fn media_info(&self) -> Option<Arc<MediaInfo>> {
+        self.media_info.read().ok().and_then(|info| info.clone())
+    }
+
+    fn select_audio_stream(&mut self, id: &MediaStreamId) -> MediaResult<()> {
+        self.request(|response| Command::SelectAudio {
+            id: id.clone(),
+            response,
+        })
+    }
+
+    fn select_subtitle_stream(&mut self, id: Option<&MediaStreamId>) -> MediaResult<()> {
+        self.request(|response| Command::SelectSubtitle {
+            id: id.cloned(),
+            response,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -238,11 +280,81 @@ impl IMFMediaEngineNotify_Impl for MediaEngineNotify_Impl {
     }
 }
 
+#[implement(IMFTimedTextNotify)]
+struct TimedTextNotify {
+    output: MediaOutputSink,
+    tracks_changed: Sender<()>,
+}
+
+#[allow(non_snake_case)]
+impl IMFTimedTextNotify_Impl for TimedTextNotify_Impl {
+    fn TrackAdded(&self, _trackid: u32) {
+        let _ = self.tracks_changed.send(());
+    }
+
+    fn TrackRemoved(&self, _trackid: u32) {
+        let _ = self.tracks_changed.send(());
+    }
+
+    fn TrackSelected(&self, _trackid: u32, _selected: windows::core::BOOL) {
+        let _ = self.tracks_changed.send(());
+    }
+
+    fn TrackReadyStateChanged(&self, _trackid: u32) {
+        let _ = self.tracks_changed.send(());
+    }
+
+    fn Error(
+        &self,
+        errorcode: windows::Win32::Media::MediaFoundation::MF_TIMED_TEXT_ERROR_CODE,
+        extendederrorcode: windows::core::HRESULT,
+        sourcetrackid: u32,
+    ) {
+        log::warn!(
+            "Media Foundation timed-text error: code={errorcode:?} extended={extendederrorcode:?} track={sourcetrackid}"
+        );
+    }
+
+    fn Cue(
+        &self,
+        cueevent: MF_TIMED_TEXT_CUE_EVENT,
+        _currenttime: f64,
+        cue: windows::core::Ref<'_, IMFTimedTextCue>,
+    ) {
+        if cueevent != MF_TIMED_TEXT_CUE_EVENT_ACTIVE {
+            return;
+        }
+        let Some(cue) = cue.as_ref() else {
+            return;
+        };
+        match subtitle_cue_from_media_foundation(cue) {
+            Ok(Some((stream_id, cue))) => {
+                self.output
+                    .emit(MediaBackendEvent::Subtitle(SubtitleEvent::Cue {
+                        stream_id,
+                        cue: Arc::new(cue),
+                    }));
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("failed to read Media Foundation subtitle cue: {error}"),
+        }
+    }
+
+    fn Reset(&self) {
+        self.output
+            .emit(MediaBackendEvent::Subtitle(SubtitleEvent::Reset));
+    }
+}
+
 struct MediaFoundationWorker {
     engine: IMFMediaEngine,
     imaging_factory: IWICImagingFactory,
     native_events: Receiver<NativeEvent>,
     output: MediaOutputSink,
+    media_info: Arc<RwLock<Option<Arc<MediaInfo>>>>,
+    timed_text: Option<IMFTimedText>,
+    _timed_text_notify: Option<IMFTimedTextNotify>,
+    timed_text_changes: Receiver<()>,
     bitmap: Option<(u32, u32, IWICBitmap)>,
     surface_handle: SurfaceHandle,
     sequence: u64,
@@ -251,7 +363,11 @@ struct MediaFoundationWorker {
 }
 
 impl MediaFoundationWorker {
-    fn new(source_uri: &str, output: MediaOutputSink) -> MediaResult<Self> {
+    fn new(
+        source_uri: &str,
+        output: MediaOutputSink,
+        media_info: Arc<RwLock<Option<Arc<MediaInfo>>>>,
+    ) -> MediaResult<Self> {
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
@@ -282,6 +398,7 @@ impl MediaFoundationWorker {
                 )?;
 
             let (event_tx, native_events) = mpsc::channel();
+            let (timed_text_change_tx, timed_text_changes) = mpsc::channel();
             let notify: IMFMediaEngineNotify = MediaEngineNotify { events: event_tx }.into();
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 2).map_err(|error| {
@@ -306,6 +423,29 @@ impl MediaFoundationWorker {
             let engine = factory.CreateInstance(0, &attributes).map_err(|error| {
                 windows_backend_error("failed to create Media Foundation media engine", error)
             })?;
+            let timed_text = engine.cast::<IMFTimedText>().ok();
+            let timed_text_notify = if let Some(timed_text) = &timed_text {
+                timed_text.SetInBandEnabled(true).map_err(|error| {
+                    windows_backend_error(
+                        "failed to enable Media Foundation embedded subtitles",
+                        error,
+                    )
+                })?;
+                let notify: IMFTimedTextNotify = TimedTextNotify {
+                    output: output.clone(),
+                    tracks_changed: timed_text_change_tx,
+                }
+                .into();
+                timed_text.RegisterNotifications(&notify).map_err(|error| {
+                    windows_backend_error(
+                        "failed to register Media Foundation subtitle notifications",
+                        error,
+                    )
+                })?;
+                Some(notify)
+            } else {
+                None
+            };
             engine.SetSource(&BSTR::from(source_uri)).map_err(|error| {
                 windows_backend_error("Media Foundation rejected the media source", error)
             })?;
@@ -318,6 +458,10 @@ impl MediaFoundationWorker {
                 imaging_factory,
                 native_events,
                 output,
+                media_info,
+                timed_text,
+                _timed_text_notify: timed_text_notify,
+                timed_text_changes,
                 bitmap: None,
                 surface_handle: SurfaceHandle::new(),
                 sequence: 1,
@@ -345,6 +489,11 @@ impl MediaFoundationWorker {
 
             while let Ok(event) = self.native_events.try_recv() {
                 self.handle_native_event(event);
+            }
+            while self.timed_text_changes.try_recv().is_ok() {
+                if let Err(error) = self.refresh_media_info() {
+                    log::warn!("failed to refresh Media Foundation stream metadata: {error}");
+                }
             }
             if self.output.is_closed() {
                 break;
@@ -445,6 +594,12 @@ impl MediaFoundationWorker {
             Command::Muted(muted) => {
                 let _ = unsafe { self.engine.SetMuted(muted) };
             }
+            Command::SelectAudio { id, response } => {
+                let _ = response.send(self.select_audio_stream(&id));
+            }
+            Command::SelectSubtitle { id, response } => {
+                let _ = response.send(self.select_subtitle_stream(id.as_ref()));
+            }
             Command::Shutdown => {}
         }
     }
@@ -462,8 +617,176 @@ impl MediaFoundationWorker {
         PlaybackTimeline::new(position, duration, seekable)
     }
 
-    fn handle_native_event(&self, event: NativeEvent) {
+    fn refresh_media_info(&mut self) -> MediaResult<()> {
+        let engine: IMFMediaEngineEx = self.engine.cast().map_err(|error| {
+            windows_backend_error("Media Foundation stream metadata is unavailable", error)
+        })?;
+        let mut info = MediaInfo::default();
+        let stream_count = unsafe { engine.GetNumberOfStreams() }.map_err(|error| {
+            windows_backend_error("failed to count Media Foundation streams", error)
+        })?;
+        for index in 0..stream_count {
+            let Some(major_type) = media_foundation_stream_guid(&engine, index, &MF_MT_MAJOR_TYPE)
+            else {
+                continue;
+            };
+            let selected = unsafe { engine.GetStreamSelection(index) }
+                .map(|selected| selected.as_bool())
+                .unwrap_or(false);
+            let id = MediaStreamId::new(format!("mf-stream-{index}"));
+            let codec = media_foundation_stream_guid(&engine, index, &MF_MT_SUBTYPE)
+                .map(|codec| format!("{codec:?}").into());
+            let language =
+                media_foundation_stream_string(&engine, index, &MF_SD_LANGUAGE).map(Into::into);
+            let title =
+                media_foundation_stream_string(&engine, index, &MF_SD_STREAM_NAME).map(Into::into);
+            let bitrate =
+                media_foundation_stream_u32(&engine, index, &MF_MT_AVG_BITRATE).map(u64::from);
+            if major_type == MFMediaType_Audio {
+                info.audio_streams.push(AudioStreamInfo {
+                    id,
+                    codec,
+                    channels: media_foundation_stream_u32(
+                        &engine,
+                        index,
+                        &MF_MT_AUDIO_NUM_CHANNELS,
+                    ),
+                    sample_rate: media_foundation_stream_u32(
+                        &engine,
+                        index,
+                        &MF_MT_AUDIO_SAMPLES_PER_SECOND,
+                    ),
+                    bitrate,
+                    language,
+                    title,
+                    selected,
+                });
+            } else if major_type == MFMediaType_Video {
+                info.video_streams.push(VideoStreamInfo {
+                    id,
+                    codec,
+                    coded_size: None,
+                    display_size: None,
+                    frame_rate: None,
+                    bitrate,
+                    language,
+                    selected,
+                });
+            } else if major_type == MFMediaType_Subtitle {
+                // Timed-text tracks below provide richer identifiers and labels.
+            }
+        }
+
+        if let Some(timed_text) = &self.timed_text {
+            let active_ids = unsafe { timed_text.GetActiveTracks() }
+                .ok()
+                .map(|tracks| timed_text_track_ids(&tracks))
+                .unwrap_or_default();
+            if let Ok(tracks) = unsafe { timed_text.GetTextTracks() } {
+                for index in 0..unsafe { tracks.GetLength() } {
+                    let Ok(track) = (unsafe { tracks.GetTrack(index) }) else {
+                        continue;
+                    };
+                    let track_id = unsafe { track.GetId() };
+                    info.subtitle_streams.push(SubtitleStreamInfo {
+                        id: MediaStreamId::new(format!("mf-subtitle-{track_id}")),
+                        codec: Some("timed-text".into()),
+                        language: unsafe { track.GetLanguage() }
+                            .ok()
+                            .and_then(pwstr_to_string)
+                            .map(Into::into),
+                        title: unsafe { track.GetLabel() }
+                            .ok()
+                            .and_then(pwstr_to_string)
+                            .map(Into::into),
+                        forced: false,
+                        selected: active_ids.contains(&track_id),
+                    });
+                }
+            }
+        }
+
+        let info = Arc::new(info);
+        if let Ok(mut current) = self.media_info.write() {
+            *current = Some(info.clone());
+        }
+        self.output.emit(MediaBackendEvent::MediaInfoChanged(info));
+        Ok(())
+    }
+
+    fn select_audio_stream(&mut self, id: &MediaStreamId) -> MediaResult<()> {
+        let index = parse_media_foundation_stream_id(id, "mf-stream-")?;
+        let engine: IMFMediaEngineEx = self.engine.cast().map_err(|error| {
+            windows_backend_error("Media Foundation audio selection is unavailable", error)
+        })?;
+        let info = self
+            .media_info
+            .read()
+            .ok()
+            .and_then(|info| info.clone())
+            .ok_or_else(|| MediaError::unsupported("audio streams are not available yet"))?;
+        if !info.audio_streams.iter().any(|stream| &stream.id == id) {
+            return Err(MediaError::invalid_input(format!(
+                "unknown audio stream {id}"
+            )));
+        }
+        for stream in &info.audio_streams {
+            let stream_index = parse_media_foundation_stream_id(&stream.id, "mf-stream-")?;
+            unsafe { engine.SetStreamSelection(stream_index, stream_index == index) }.map_err(
+                |error| windows_backend_error("failed to select Media Foundation audio", error),
+            )?;
+        }
+        unsafe { engine.ApplyStreamSelections() }.map_err(|error| {
+            windows_backend_error("failed to apply Media Foundation audio selection", error)
+        })?;
+        self.refresh_media_info()
+    }
+
+    fn select_subtitle_stream(&mut self, id: Option<&MediaStreamId>) -> MediaResult<()> {
+        let timed_text = self
+            .timed_text
+            .as_ref()
+            .ok_or_else(|| MediaError::unsupported("Media Foundation timed text is unavailable"))?;
+        let selected_id = id
+            .map(|id| parse_media_foundation_stream_id(id, "mf-subtitle-"))
+            .transpose()?;
+        let tracks = unsafe { timed_text.GetTextTracks() }.map_err(|error| {
+            windows_backend_error("failed to enumerate Media Foundation subtitles", error)
+        })?;
+        let mut found = selected_id.is_none();
+        for index in 0..unsafe { tracks.GetLength() } {
+            let track = unsafe { tracks.GetTrack(index) }.map_err(|error| {
+                windows_backend_error("failed to read Media Foundation subtitle track", error)
+            })?;
+            let track_id = unsafe { track.GetId() };
+            let selected = selected_id == Some(track_id);
+            found |= selected;
+            unsafe { timed_text.SelectTrack(track_id, selected) }.map_err(|error| {
+                windows_backend_error("failed to select Media Foundation subtitle", error)
+            })?;
+        }
+        if !found {
+            return Err(MediaError::invalid_input(format!(
+                "unknown subtitle stream {}",
+                id.expect("a missing selection is always valid")
+            )));
+        }
+        self.output
+            .emit(MediaBackendEvent::Subtitle(SubtitleEvent::Reset));
+        self.refresh_media_info()
+    }
+
+    fn handle_native_event(&mut self, event: NativeEvent) {
         let event_code = event.event as i32;
+        if [
+            MF_MEDIA_ENGINE_EVENT_LOADEDDATA.0,
+            MF_MEDIA_ENGINE_EVENT_TRACKSCHANGE.0,
+        ]
+        .contains(&event_code)
+            && let Err(error) = self.refresh_media_info()
+        {
+            log::warn!("failed to read Media Foundation stream metadata: {error}");
+        }
         if [
             MF_MEDIA_ENGINE_EVENT_LOADEDDATA.0,
             MF_MEDIA_ENGINE_EVENT_CANPLAY.0,
@@ -629,6 +952,89 @@ impl MediaFoundationWorker {
             .map(|ticks| Duration::from_nanos(ticks.saturating_mul(100)));
         Ok(Some(VideoFrame::new(Arc::new(surface), timestamp, None)))
     }
+}
+
+fn media_foundation_stream_guid(engine: &IMFMediaEngineEx, index: u32, key: &GUID) -> Option<GUID> {
+    let value = unsafe { engine.GetStreamAttribute(index, key) }.ok()?;
+    if value.vt() != VT_CLSID {
+        return None;
+    }
+    let pointer = unsafe { value.Anonymous.Anonymous.Anonymous.puuid };
+    (!pointer.is_null()).then(|| unsafe { *pointer })
+}
+
+fn media_foundation_stream_string(
+    engine: &IMFMediaEngineEx,
+    index: u32,
+    key: &GUID,
+) -> Option<String> {
+    let value = unsafe { engine.GetStreamAttribute(index, key) }.ok()?;
+    BSTR::try_from(&value).ok().map(|value| value.to_string())
+}
+
+fn media_foundation_stream_u32(engine: &IMFMediaEngineEx, index: u32, key: &GUID) -> Option<u32> {
+    let value = unsafe { engine.GetStreamAttribute(index, key) }.ok()?;
+    u32::try_from(&value).ok()
+}
+
+fn timed_text_track_ids(tracks: &IMFTimedTextTrackList) -> Vec<u32> {
+    (0..unsafe { tracks.GetLength() })
+        .filter_map(|index| unsafe { tracks.GetTrack(index) }.ok())
+        .map(|track| unsafe { track.GetId() })
+        .collect()
+}
+
+fn parse_media_foundation_stream_id(id: &MediaStreamId, prefix: &str) -> MediaResult<u32> {
+    id.as_str()
+        .strip_prefix(prefix)
+        .and_then(|index| index.parse().ok())
+        .ok_or_else(|| MediaError::invalid_input(format!("invalid media stream identifier {id}")))
+}
+
+fn pwstr_to_string(value: PWSTR) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let result = unsafe { value.to_string().ok() };
+    unsafe { CoTaskMemFree(Some(value.0.cast())) };
+    result
+}
+
+fn subtitle_cue_from_media_foundation(
+    cue: &IMFTimedTextCue,
+) -> MediaResult<Option<(MediaStreamId, SubtitleCue)>> {
+    let mut lines = Vec::new();
+    for index in 0..unsafe { cue.GetLineCount() } {
+        let line = unsafe { cue.GetLine(index) }.map_err(|error| {
+            windows_backend_error("failed to read Media Foundation subtitle text", error)
+        })?;
+        let text = unsafe { line.GetText() }
+            .ok()
+            .and_then(pwstr_to_string)
+            .unwrap_or_default();
+        lines.push(text);
+    }
+    let raw = lines.join("\n");
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let start = seconds_duration(unsafe { cue.GetStartTime() }).unwrap_or_default();
+    let duration = seconds_duration(unsafe { cue.GetDuration() }).unwrap_or_default();
+    let end = start.checked_add(duration).unwrap_or(start);
+    let cue_id = unsafe { cue.GetId() };
+    let track_id = unsafe { cue.GetTrackId() };
+    Ok(Some((
+        MediaStreamId::new(format!("mf-subtitle-{track_id}")),
+        SubtitleCue {
+            id: Some(format!("mf-cue-{cue_id}").into()),
+            start,
+            end,
+            text: raw.clone().into(),
+            raw: raw.into(),
+            settings: Some(format!("kind={:?}", unsafe { cue.GetCueKind() }).into()),
+            format: SubtitleFormat::PlainText,
+        },
+    )))
 }
 
 impl Drop for MediaFoundationWorker {

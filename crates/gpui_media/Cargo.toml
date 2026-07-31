@@ -3,6 +3,7 @@ name = "gpui_media"
 version = "0.1.0"
 publish.workspace = true
 edition.workspace = true
+license = "MIT"
 
 [features]
 default = ["backend-system"]
@@ -54,6 +55,8 @@ windows = { workspace = true, features = [
   "Win32_Graphics_Imaging",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
 ], optional = true }
 windows-core = { workspace = true, optional = true }
 

@@ -1,8 +1,9 @@
 //! GStreamer implementation used by the Linux and macOS `SystemBackend`.
 
 use std::{
+    collections::HashSet,
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
@@ -16,10 +17,12 @@ use gpui::{
 use gst::prelude::*;
 
 use crate::{
-    FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
-    MediaBackendEvent, MediaCapabilities, MediaError, MediaErrorKind, MediaOutputSink,
-    MediaPlaybackRequest, MediaPlaybackSession, MediaRecovery, MediaResult, MediaSource,
-    PlaybackTimeline, SeekMode, TransportChange, VideoFrame,
+    AudioStreamInfo, FrameExtractionSession, FrameExtractorBackendRequest,
+    FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities, MediaError,
+    MediaErrorKind, MediaInfo, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession,
+    MediaRecovery, MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode,
+    SubtitleCue, SubtitleEvent, SubtitleFormat, SubtitleStreamInfo, TransportChange, VideoFrame,
+    VideoStreamInfo, subtitles::normalize_subtitle_text,
 };
 use network::{configure_playbin_network, configure_playbin_progressive_download};
 
@@ -54,6 +57,8 @@ pub(crate) struct GstreamerPlayback {
     bus_shutdown: Arc<AtomicBool>,
     bus_thread: Option<JoinHandle<()>>,
     container_duration: Option<Duration>,
+    output: MediaOutputSink,
+    media_info: Arc<RwLock<Option<Arc<MediaInfo>>>>,
     #[cfg(target_os = "linux")]
     using_cpu_fallback: AtomicBool,
 }
@@ -78,6 +83,8 @@ impl GstreamerPlayback {
 
         let output_for_preroll = output.clone();
         let output_for_samples = output.clone();
+        let media_info = Arc::new(RwLock::new(None));
+        let selected_subtitle = Arc::new(RwLock::new(None));
         let sequence = Arc::new(AtomicU64::new(1));
         let sequence_for_preroll = sequence.clone();
         let surface_handle = SurfaceHandle::new();
@@ -126,6 +133,37 @@ impl GstreamerPlayback {
                 .build(),
         );
 
+        let subtitle_sink = gst_app::AppSink::builder()
+            .max_buffers(16)
+            .drop(false)
+            .wait_on_eos(false)
+            .sync(true)
+            .build();
+        let output_for_subtitle_preroll = output.clone();
+        let output_for_subtitle_samples = output.clone();
+        let selected_subtitle_for_preroll = selected_subtitle.clone();
+        let selected_subtitle_for_samples = selected_subtitle.clone();
+        subtitle_sink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_preroll(move |sink| {
+                    let sample = sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?;
+                    publish_subtitle_sample(
+                        &sample,
+                        &output_for_subtitle_preroll,
+                        &selected_subtitle_for_preroll,
+                    )
+                })
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    publish_subtitle_sample(
+                        &sample,
+                        &output_for_subtitle_samples,
+                        &selected_subtitle_for_samples,
+                    )
+                })
+                .build(),
+        );
+
         let playbin = gst::ElementFactory::make("playbin3")
             .build()
             .map_err(|error| {
@@ -134,6 +172,7 @@ impl GstreamerPlayback {
         configure_playbin_network(&playbin, source.network_options());
         playbin.set_property("uri", source.uri());
         playbin.set_property("video-sink", &appsink);
+        playbin.set_property("text-sink", &subtitle_sink);
         configure_playbin_progressive_download(&playbin, source.uri(), source.network_options());
 
         let bus = playbin
@@ -145,8 +184,10 @@ impl GstreamerPlayback {
         let bus_shutdown_for_thread = bus_shutdown.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_bus = producer_drm_device;
-        let output_for_bus = output;
+        let output_for_bus = output.clone();
         let source_for_bus = source.clone();
+        let media_info_for_bus = media_info.clone();
+        let selected_subtitle_for_bus = selected_subtitle;
         let bus_thread = std::thread::Builder::new()
             .name("gpui-video-gstreamer-bus".into())
             .spawn(move || {
@@ -178,6 +219,34 @@ impl GstreamerPlayback {
                         gst::MessageView::Buffering(buffering) => Some(
                             MediaBackendEvent::Buffering(buffering_percent(buffering.percent())),
                         ),
+                        gst::MessageView::StreamCollection(streams) => {
+                            let selected = selected_stream_ids(
+                                media_info_for_bus
+                                    .read()
+                                    .ok()
+                                    .and_then(|info| info.clone())
+                                    .as_deref(),
+                            );
+                            let info = Arc::new(media_info_from_stream_collection(
+                                &streams.stream_collection(),
+                                &selected,
+                            ));
+                            replace_media_info(&media_info_for_bus, info.clone());
+                            replace_selected_subtitle(&selected_subtitle_for_bus, &info);
+                            Some(MediaBackendEvent::MediaInfoChanged(info))
+                        }
+                        gst::MessageView::StreamsSelected(streams) => {
+                            let selected = streams
+                                .streams()
+                                .filter_map(|stream| stream.stream_id().map(|id| id.to_string()))
+                                .collect::<HashSet<_>>();
+                            let collection = streams.stream_collection();
+                            let info =
+                                Arc::new(media_info_from_stream_collection(&collection, &selected));
+                            replace_media_info(&media_info_for_bus, info.clone());
+                            replace_selected_subtitle(&selected_subtitle_for_bus, &info);
+                            Some(MediaBackendEvent::MediaInfoChanged(info))
+                        }
                         gst::MessageView::Eos(..) => Some(MediaBackendEvent::Ended),
                         gst::MessageView::Error(error) => Some(MediaBackendEvent::Error(Arc::new(
                             media_error_from_gstreamer_message(error, &source_for_bus),
@@ -202,6 +271,8 @@ impl GstreamerPlayback {
             bus_shutdown,
             bus_thread: Some(bus_thread),
             container_duration,
+            output,
+            media_info,
             #[cfg(target_os = "linux")]
             using_cpu_fallback: AtomicBool::new(false),
         })
@@ -313,6 +384,71 @@ impl GstreamerPlayback {
         self.playbin.set_property("mute", muted);
     }
 
+    pub fn media_info(&self) -> Option<Arc<MediaInfo>> {
+        self.media_info.read().ok().and_then(|info| info.clone())
+    }
+
+    pub fn select_audio_stream(&self, id: &MediaStreamId) -> MediaResult<()> {
+        let mut info = self
+            .media_info()
+            .ok_or_else(|| MediaError::unsupported("audio streams are not available yet"))?;
+        if !info.audio_streams.iter().any(|stream| &stream.id == id) {
+            return Err(MediaError::invalid_input(format!(
+                "unknown audio stream {id}"
+            )));
+        }
+        let mut updated = (*info).clone();
+        for stream in &mut updated.audio_streams {
+            stream.selected = stream.id == *id;
+        }
+        info = Arc::new(updated);
+        self.select_streams(&info)?;
+        replace_media_info(&self.media_info, info.clone());
+        self.output.emit(MediaBackendEvent::MediaInfoChanged(info));
+        Ok(())
+    }
+
+    pub fn select_subtitle_stream(&self, id: Option<&MediaStreamId>) -> MediaResult<()> {
+        let mut info = self
+            .media_info()
+            .ok_or_else(|| MediaError::unsupported("subtitle streams are not available yet"))?;
+        if let Some(id) = id
+            && !info.subtitle_streams.iter().any(|stream| &stream.id == id)
+        {
+            return Err(MediaError::invalid_input(format!(
+                "unknown subtitle stream {id}"
+            )));
+        }
+        let mut updated = (*info).clone();
+        for stream in &mut updated.subtitle_streams {
+            stream.selected = id.is_some_and(|id| stream.id == *id);
+        }
+        info = Arc::new(updated);
+        self.select_streams(&info)?;
+        replace_media_info(&self.media_info, info.clone());
+        self.output.emit(MediaBackendEvent::MediaInfoChanged(info));
+        Ok(())
+    }
+
+    fn select_streams(&self, info: &MediaInfo) -> MediaResult<()> {
+        let stream_ids = selected_stream_ids(Some(info))
+            .into_iter()
+            .collect::<Vec<_>>();
+        if stream_ids.is_empty() {
+            return Err(MediaError::unsupported(
+                "the playback pipeline has not selected any media streams",
+            ));
+        }
+        let event = gst::event::SelectStreams::new(stream_ids.iter().map(String::as_str));
+        if self.playbin.send_event(event) {
+            Ok(())
+        } else {
+            Err(MediaError::unsupported(
+                "the playback pipeline rejected stream selection",
+            ))
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub fn switch_to_cpu_fallback(&self) -> MediaResult<bool> {
         if self
@@ -349,6 +485,199 @@ impl GstreamerPlayback {
         }
         result
     }
+}
+
+fn replace_media_info(target: &RwLock<Option<Arc<MediaInfo>>>, info: Arc<MediaInfo>) {
+    if let Ok(mut current) = target.write() {
+        *current = Some(info);
+    }
+}
+
+fn replace_selected_subtitle(target: &RwLock<Option<MediaStreamId>>, info: &MediaInfo) {
+    if let Ok(mut current) = target.write() {
+        *current = info
+            .selected_subtitle_stream()
+            .map(|stream| stream.id.clone());
+    }
+}
+
+fn selected_stream_ids(info: Option<&MediaInfo>) -> HashSet<String> {
+    let Some(info) = info else {
+        return HashSet::new();
+    };
+    info.video_streams
+        .iter()
+        .filter(|stream| stream.selected)
+        .map(|stream| stream.id.to_string())
+        .chain(
+            info.audio_streams
+                .iter()
+                .filter(|stream| stream.selected)
+                .map(|stream| stream.id.to_string()),
+        )
+        .chain(
+            info.subtitle_streams
+                .iter()
+                .filter(|stream| stream.selected)
+                .map(|stream| stream.id.to_string()),
+        )
+        .collect()
+}
+
+fn media_info_from_stream_collection(
+    collection: &gst::StreamCollection,
+    selected: &HashSet<String>,
+) -> MediaInfo {
+    let mut info = MediaInfo::default();
+    for stream in collection.iter() {
+        let Some(id) = stream.stream_id().map(|id| id.to_string()) else {
+            continue;
+        };
+        let selected = selected.contains(&id)
+            || (selected.is_empty() && stream.stream_flags().contains(gst::StreamFlags::SELECT));
+        let tags = stream.tags();
+        let caps = stream.caps();
+        let structure = caps.as_ref().and_then(|caps| caps.structure(0));
+        let codec_from_caps = structure.map(|structure| structure.name().to_string().into());
+        let language = tags
+            .as_ref()
+            .and_then(|tags| tags.get::<gst::tags::LanguageCode>())
+            .map(|tag| tag.get().to_owned().into());
+        let title = tags
+            .as_ref()
+            .and_then(|tags| tags.get::<gst::tags::Title>())
+            .map(|tag| tag.get().to_owned().into());
+        let bitrate = tags
+            .as_ref()
+            .and_then(|tags| tags.get::<gst::tags::Bitrate>())
+            .map(|tag| u64::from(tag.get()));
+        let stream_type = stream.stream_type();
+        if stream_type.contains(gst::StreamType::VIDEO) {
+            let codec = tags
+                .as_ref()
+                .and_then(|tags| tags.get::<gst::tags::VideoCodec>())
+                .or_else(|| {
+                    tags.as_ref()
+                        .and_then(|tags| tags.get::<gst::tags::Codec>())
+                })
+                .map(|tag| tag.get().to_owned().into())
+                .or(codec_from_caps);
+            let width = structure
+                .and_then(|structure| structure.get::<i32>("width").ok())
+                .and_then(|value| u32::try_from(value).ok());
+            let height = structure
+                .and_then(|structure| structure.get::<i32>("height").ok())
+                .and_then(|value| u32::try_from(value).ok());
+            let coded_size = width.zip(height).map(|(width, height)| {
+                size(DevicePixels(width as i32), DevicePixels(height as i32))
+            });
+            let frame_rate = structure
+                .and_then(|structure| structure.get::<gst::Fraction>("framerate").ok())
+                .and_then(|rate| {
+                    (rate.denom() != 0).then(|| f64::from(rate.numer()) / f64::from(rate.denom()))
+                });
+            info.video_streams.push(VideoStreamInfo {
+                id: MediaStreamId::new(id),
+                codec,
+                coded_size,
+                display_size: coded_size,
+                frame_rate,
+                bitrate,
+                language,
+                selected,
+            });
+        } else if stream_type.contains(gst::StreamType::AUDIO) {
+            let codec = tags
+                .as_ref()
+                .and_then(|tags| tags.get::<gst::tags::AudioCodec>())
+                .or_else(|| {
+                    tags.as_ref()
+                        .and_then(|tags| tags.get::<gst::tags::Codec>())
+                })
+                .map(|tag| tag.get().to_owned().into())
+                .or(codec_from_caps);
+            let channels = structure
+                .and_then(|structure| structure.get::<i32>("channels").ok())
+                .and_then(|value| u32::try_from(value).ok());
+            let sample_rate = structure
+                .and_then(|structure| structure.get::<i32>("rate").ok())
+                .and_then(|value| u32::try_from(value).ok());
+            info.audio_streams.push(AudioStreamInfo {
+                id: MediaStreamId::new(id),
+                codec,
+                channels,
+                sample_rate,
+                bitrate,
+                language,
+                title,
+                selected,
+            });
+        } else if stream_type.contains(gst::StreamType::TEXT) {
+            let codec = tags
+                .as_ref()
+                .and_then(|tags| tags.get::<gst::tags::SubtitleCodec>())
+                .or_else(|| {
+                    tags.as_ref()
+                        .and_then(|tags| tags.get::<gst::tags::Codec>())
+                })
+                .map(|tag| tag.get().to_owned().into())
+                .or(codec_from_caps);
+            info.subtitle_streams.push(SubtitleStreamInfo {
+                id: MediaStreamId::new(id),
+                codec,
+                language,
+                title,
+                forced: false,
+                selected,
+            });
+        }
+    }
+    info
+}
+
+fn publish_subtitle_sample(
+    sample: &gst::Sample,
+    output: &MediaOutputSink,
+    selected_subtitle: &RwLock<Option<MediaStreamId>>,
+) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
+    let stream_id = selected_subtitle
+        .read()
+        .ok()
+        .and_then(|stream| stream.clone());
+    let Some(stream_id) = stream_id else {
+        return Ok(gst::FlowSuccess::Ok);
+    };
+    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+    let mapping = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+    let raw = std::str::from_utf8(mapping.as_slice())
+        .map_err(|_| gst::FlowError::Error)?
+        .trim_matches('\0');
+    if raw.trim().is_empty() {
+        return Ok(gst::FlowSuccess::Ok);
+    }
+    let start = buffer.pts().map(Duration::from).unwrap_or_default();
+    let end = buffer
+        .duration()
+        .map(Duration::from)
+        .and_then(|duration| start.checked_add(duration))
+        .unwrap_or(start);
+    let cue = Arc::new(SubtitleCue {
+        id: None,
+        start,
+        end,
+        text: normalize_subtitle_text(raw).into(),
+        raw: raw.to_owned().into(),
+        settings: sample
+            .caps()
+            .and_then(|caps| caps.structure(0))
+            .map(|structure| structure.to_string().into()),
+        format: SubtitleFormat::PlainText,
+    });
+    output.emit(MediaBackendEvent::Subtitle(SubtitleEvent::Cue {
+        stream_id,
+        cue,
+    }));
+    Ok(gst::FlowSuccess::Ok)
 }
 
 fn publish_appsink_sample(
@@ -411,13 +740,13 @@ impl MediaPlaybackSession for GstreamerPlayback {
         MediaCapabilities {
             video: true,
             audio: true,
+            subtitles: true,
             seeking: true,
             accurate_seeking: true,
             playback_rate: true,
             frame_stepping: true,
             frame_extraction: true,
             transport_switching: cfg!(target_os = "linux"),
-            ..MediaCapabilities::default()
         }
     }
 
@@ -455,6 +784,18 @@ impl MediaPlaybackSession for GstreamerPlayback {
 
     fn set_muted(&mut self, muted: bool) {
         GstreamerPlayback::set_muted(self, muted);
+    }
+
+    fn media_info(&self) -> Option<Arc<MediaInfo>> {
+        GstreamerPlayback::media_info(self)
+    }
+
+    fn select_audio_stream(&mut self, id: &MediaStreamId) -> MediaResult<()> {
+        GstreamerPlayback::select_audio_stream(self, id)
+    }
+
+    fn select_subtitle_stream(&mut self, id: Option<&MediaStreamId>) -> MediaResult<()> {
+        GstreamerPlayback::select_subtitle_stream(self, id)
     }
 
     fn set_frame_transport_preference(
@@ -923,6 +1264,7 @@ fn surface_color_info(info: &gst_video::VideoInfo) -> SurfaceColorInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     #[cfg(target_os = "linux")]
     use std::fs::File;
 
@@ -932,7 +1274,8 @@ mod tests {
 
     use super::{
         add_required_allocation_metas, appsink_caps, buffering_percent,
-        media_error_from_gstreamer_message, sample_to_surface_frame, video_frame_geometry,
+        media_error_from_gstreamer_message, media_info_from_stream_collection,
+        sample_to_surface_frame, video_frame_geometry,
     };
 
     #[test]
@@ -940,6 +1283,58 @@ mod tests {
         assert_eq!(buffering_percent(-1), 0);
         assert_eq!(buffering_percent(42), 42);
         assert_eq!(buffering_percent(101), 100);
+    }
+
+    #[test]
+    fn stream_collection_maps_audio_and_subtitle_metadata() {
+        super::initialize().unwrap();
+        let audio_caps = "audio/x-raw,channels=6,rate=48000"
+            .parse::<gst::Caps>()
+            .unwrap();
+        let audio = gst::Stream::new(
+            Some("audio-en"),
+            Some(&audio_caps),
+            gst::StreamType::AUDIO,
+            gst::StreamFlags::SELECT,
+        );
+        let mut audio_tags = gst::TagList::new();
+        {
+            let tags = audio_tags.get_mut().unwrap();
+            tags.add::<gst::tags::LanguageCode>(&"en", gst::TagMergeMode::Replace);
+            tags.add::<gst::tags::Title>(&"English 5.1", gst::TagMergeMode::Replace);
+            tags.add::<gst::tags::AudioCodec>(&"PCM", gst::TagMergeMode::Replace);
+        }
+        audio.set_tags(Some(&audio_tags));
+
+        let subtitle_caps = "text/x-raw,format=utf8".parse::<gst::Caps>().unwrap();
+        let subtitle = gst::Stream::new(
+            Some("subtitle-zh"),
+            Some(&subtitle_caps),
+            gst::StreamType::TEXT,
+            gst::StreamFlags::empty(),
+        );
+        let mut subtitle_tags = gst::TagList::new();
+        subtitle_tags
+            .get_mut()
+            .unwrap()
+            .add::<gst::tags::LanguageCode>(&"zh", gst::TagMergeMode::Replace);
+        subtitle.set_tags(Some(&subtitle_tags));
+
+        let collection = gst::StreamCollection::builder(Some("test"))
+            .streams([audio, subtitle])
+            .build();
+        let info = media_info_from_stream_collection(&collection, &HashSet::new());
+
+        assert_eq!(info.audio_streams.len(), 1);
+        assert_eq!(info.audio_streams[0].id.as_str(), "audio-en");
+        assert_eq!(info.audio_streams[0].channels, Some(6));
+        assert_eq!(info.audio_streams[0].sample_rate, Some(48_000));
+        assert_eq!(info.audio_streams[0].language.as_deref(), Some("en"));
+        assert_eq!(info.audio_streams[0].title.as_deref(), Some("English 5.1"));
+        assert!(info.audio_streams[0].selected);
+        assert_eq!(info.subtitle_streams.len(), 1);
+        assert_eq!(info.subtitle_streams[0].id.as_str(), "subtitle-zh");
+        assert_eq!(info.subtitle_streams[0].language.as_deref(), Some("zh"));
     }
 
     #[test]

@@ -1,0 +1,11 @@
+1
+00:00:00,750 --> 00:00:03,750
+[External SRT] This text was loaded and parsed by the host.
+
+2
+00:00:04,000 --> 00:00:06,750
+[External SRT] External and embedded cues may be composed together.
+
+3
+00:00:07,000 --> 00:00:09,750
+[External SRT] Styling and rendering remain application-owned.

@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use gpui::GpuSpecs;
 
 use crate::{
-    MediaError, MediaResult, MediaSource, PlaybackTimeline, SeekMode, VideoFrame,
-    stats::PlaybackCounters,
+    MediaError, MediaInfo, MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode,
+    SubtitleEvent, VideoFrame, stats::PlaybackCounters,
 };
 
 // One queued frame is the current presentation candidate and the second
@@ -20,6 +20,8 @@ pub enum MediaBackendEvent {
     /// seek and the session can continue in its requested play/pause state.
     Ready,
     Buffering(u8),
+    MediaInfoChanged(Arc<MediaInfo>),
+    Subtitle(SubtitleEvent),
     Ended,
     Error(Arc<MediaError>),
 }
@@ -194,6 +196,22 @@ pub trait MediaPlaybackSession: Send {
 
     fn set_volume(&mut self, _volume: f64) {}
     fn set_muted(&mut self, _muted: bool) {}
+
+    fn media_info(&self) -> Option<Arc<MediaInfo>> {
+        None
+    }
+
+    fn select_audio_stream(&mut self, _id: &MediaStreamId) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend does not support audio stream selection",
+        ))
+    }
+
+    fn select_subtitle_stream(&mut self, _id: Option<&MediaStreamId>) -> MediaResult<()> {
+        Err(MediaError::unsupported(
+            "this media backend does not support subtitle stream selection",
+        ))
+    }
 
     fn restart(&mut self) -> MediaResult<()> {
         self.seek_to(Duration::ZERO, SeekMode::KeyFrame)?;

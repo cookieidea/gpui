@@ -11,6 +11,18 @@ different interfaces on top of the same core.
 `SystemBackend` uses GStreamer on Linux and macOS, and Media Foundation on
 Windows.
 
+## GStreamer distribution
+
+Applications are responsible for complying with the licenses of the exact
+GStreamer libraries and plugins they distribute. In particular, an application
+that bundles GStreamer should retain the applicable notices, include the LGPL
+license, provide the corresponding source as required, and keep dynamically
+linked libraries replaceable. Plugin licenses can be inspected with
+`gst-inspect-1.0 <plugin-or-element>`. Applications that use a system-installed
+GStreamer do not redistribute those system libraries, but should still document
+the runtime dependency. See the
+[GStreamer licensing guidance](https://gstreamer.freedesktop.org/documentation/frequently-asked-questions/licensing.html).
+
 ## Public capabilities
 
 - play, pause, stop and replay
@@ -20,6 +32,9 @@ Windows.
 - step forward and backward by decoded frames
 - playback rate, volume and mute controls
 - unified audio/video lifecycle, timeline and playback clock
+- audio and embedded-subtitle stream enumeration and selection
+- normalized embedded subtitle cues for host rendering
+- host-supplied SRT, WebVTT and ASS/SSA text parsing
 - timestamped current-frame access
 - independent frame extraction for thumbnails and scrubbing
 - state, timeline, buffering, frame, transport, rate and volume events
@@ -343,6 +358,12 @@ cx.subscribe(&player, |_, _, event, cx| {
         VideoPlayerEvent::BufferingChanged(percent) => {
             // The host decides whether and how to present buffering UI.
         }
+        VideoPlayerEvent::MediaInfoChanged(info) => {
+            // Refresh application-owned audio and subtitle controls.
+        }
+        VideoPlayerEvent::Subtitle(event) => {
+            // Store or clear extracted cues for host rendering.
+        }
         VideoPlayerEvent::FrameReady(frame) => {
             // Inspect PTS, size or transport.
         }
@@ -352,10 +373,21 @@ cx.subscribe(&player, |_, _, event, cx| {
         }
         VideoPlayerEvent::PlaybackRateChanged(rate) => {}
         VideoPlayerEvent::VolumeChanged { volume, muted } => {}
+        _ => {}
     }
     cx.notify();
 });
 ```
+
+## Audio tracks and subtitles
+
+`SystemBackend` reports available audio and embedded-subtitle streams through
+`MediaInfoChanged`. Applications choose streams through the player while the
+backend preserves the shared playback clock.
+
+Embedded subtitle cues arrive through `VideoPlayerEvent::Subtitle`. External
+SRT, WebVTT and ASS/SSA text can be normalized with `parse_subtitles`; cue
+selection, composition, styling and rendering remain application-owned.
 
 ## Access the current frame
 
