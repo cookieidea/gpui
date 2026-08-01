@@ -140,7 +140,6 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
         -dot(pointer_delta, pointer_delta)
         / max(pointer_radius * pointer_radius, 1.0),
     ) * input.pointer_active;
-    let pointer_normal = glass_safe_normalize(pointer_delta);
 
     let tau = 6.28318530718;
     let phase = input.time * tau;
@@ -211,11 +210,6 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
         * pointer_field
         * pointer_strength
         * 0.13;
-    let approach_displacement = pointer_normal
-        * pointer_field
-        * pointer_strength
-        * refraction_pixels
-        * 0.22;
     let inertia_displacement = velocity
         * speed
         * thickness
@@ -225,12 +219,11 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
         + flow_displacement
         + traveling_lens
         + pressure_displacement
-        + approach_displacement
         + inertia_displacement;
 
     let chromatic_direction = normal
         * dispersion_pixels
-        * (0.18 + edge * 1.25 + abs(pressure) * pointer_field * 0.45);
+        * (0.18 + edge * 1.25);
     let red = sample_raw_backdrop(input, displacement + chromatic_direction);
     let green = sample_raw_backdrop(input, displacement);
     let blue = sample_raw_backdrop(input, displacement - chromatic_direction);
@@ -267,14 +260,8 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
     let concentrated_rim = inner_rim
         * highlight_strength
         * (0.18 + 0.28 * facing_light);
-    let contact_glow = pointer_field
-        * input.pointer_active
-        * highlight_strength
-        * (0.08 + abs(pressure) * 0.22 + speed * 0.12);
     let transmitted_color = mix(edge_light.rgb, blurred.rgb, 0.2);
-    color += transmitted_color
-        * (caustic + concentrated_rim + contact_glow)
-        * edge_light.a;
+    color += transmitted_color * (caustic + concentrated_rim) * edge_light.a;
     color -= blurred.rgb
         * edge
         * facing_shadow

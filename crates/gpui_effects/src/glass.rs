@@ -77,6 +77,11 @@ impl GlassInteractionState {
 
     fn record_pointer(&mut self, position: Point<Pixels>) {
         let now = Instant::now();
+        if self.target_pressure < 0.5 {
+            self.last_pointer = Some(position);
+            self.last_pointer_at = now;
+            return;
+        }
         let elapsed = now
             .saturating_duration_since(self.last_pointer_at)
             .as_secs_f32();
@@ -167,6 +172,9 @@ pub struct GlassPanel {
     surface: Option<[f32; 4]>,
     shader_tint: Option<[f32; 4]>,
     translation_velocity: Point<f32>,
+    deformation: f32,
+    wave_strength: f32,
+    glass_opacity: f32,
 }
 
 impl Default for GlassPanel {
@@ -192,6 +200,9 @@ impl GlassPanel {
             surface: None,
             shader_tint: None,
             translation_velocity: Point::default(),
+            deformation: 1.0,
+            wave_strength: 1.0,
+            glass_opacity: 1.0,
         }
     }
 
@@ -252,6 +263,24 @@ impl GlassPanel {
         self
     }
 
+    /// Scales lens, edge, and chromatic deformation. Zero keeps the backdrop undistorted.
+    pub fn deformation(mut self, strength: f32) -> Self {
+        self.deformation = strength.max(0.0);
+        self
+    }
+
+    /// Scales the ambient animated surface flow. Zero disables the default wave.
+    pub fn wave_strength(mut self, strength: f32) -> Self {
+        self.wave_strength = strength.max(0.0);
+        self
+    }
+
+    /// Sets the material opacity without changing its tint color.
+    pub fn glass_opacity(mut self, opacity: f32) -> Self {
+        self.glass_opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
     /// Supplies the panel's translation velocity in logical pixels per second.
     ///
     /// Pointer motion describes interaction across the surface, while this
@@ -291,15 +320,14 @@ impl RenderOnce for GlassPanel {
         });
         let tint: Rgba = self.tint.into();
         let edge_light: Rgba = self.border_color.into();
+        let mut optics = self.optics.unwrap_or(preset_optics);
+        optics[0] *= self.deformation;
+        optics[1] *= self.deformation;
+        let mut surface = self.surface.unwrap_or(preset_surface);
+        surface[3] *= self.wave_strength;
         let mut uniforms = EffectUniforms::new()
-            .with_slot(
-                LIQUID_GLASS_OPTICS_SLOT,
-                self.optics.unwrap_or(preset_optics),
-            )
-            .with_slot(
-                LIQUID_GLASS_SURFACE_SLOT,
-                self.surface.unwrap_or(preset_surface),
-            )
+            .with_slot(LIQUID_GLASS_OPTICS_SLOT, optics)
+            .with_slot(LIQUID_GLASS_SURFACE_SLOT, surface)
             .with_slot(
                 LIQUID_GLASS_TINT_SLOT,
                 self.shader_tint.unwrap_or([tint.r, tint.g, tint.b, tint.a]),
@@ -310,7 +338,7 @@ impl RenderOnce for GlassPanel {
                     GLASS_OVERSCAN,
                     self.radius.to_pixels(window.rem_size()).as_f32(),
                     18.0 + blur_radius.as_f32() * 0.22,
-                    0.092,
+                    0.092 * self.deformation,
                 ],
             )
             .with_slot(
@@ -336,6 +364,7 @@ impl RenderOnce for GlassPanel {
         let overlay = liquid_glass()
             .uniforms(uniforms)
             .blur_radius(blur_radius)
+            .effect_opacity(self.glass_opacity)
             .absolute()
             .left(px(-GLASS_OVERSCAN))
             .right(px(-GLASS_OVERSCAN))
@@ -356,7 +385,7 @@ impl RenderOnce for GlassPanel {
         let fallback_alpha = if window.supports_backdrop_blur() {
             0.0
         } else {
-            1.0
+            self.glass_opacity
         };
         let fallback = div()
             .absolute()
@@ -450,5 +479,30 @@ mod tests {
         let expected = std::f32::consts::FRAC_1_SQRT_2;
         assert!((velocity.x - expected).abs() < 0.0001);
         assert!((velocity.y - expected).abs() < 0.0001);
+    }
+
+    #[test]
+    fn hover_motion_does_not_drive_the_surface() {
+        let mut state = GlassInteractionState::default();
+        state.record_pointer(Point {
+            x: px(10.0),
+            y: px(10.0),
+        });
+        state.record_pointer(Point {
+            x: px(80.0),
+            y: px(40.0),
+        });
+        assert_eq!(state.pointer_velocity, Point::default());
+    }
+
+    #[test]
+    fn semantic_controls_clamp_invalid_values() {
+        let panel = GlassPanel::new()
+            .deformation(-1.0)
+            .wave_strength(-1.0)
+            .glass_opacity(2.0);
+        assert_eq!(panel.deformation, 0.0);
+        assert_eq!(panel.wave_strength, 0.0);
+        assert_eq!(panel.glass_opacity, 1.0);
     }
 }

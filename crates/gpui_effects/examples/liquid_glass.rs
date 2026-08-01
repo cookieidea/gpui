@@ -1,18 +1,23 @@
-use std::{
-    f32::consts::TAU,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, App, Bounds, Context, CursorStyle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Window, WindowBounds, WindowOptions, div,
-    point, prelude::*, px, rgb, rgba, size,
+    App, Bounds, Context, CursorStyle, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rgb,
+    rgba, size,
 };
 use gpui_effects::{GlassMaterial, GlassPanel};
 use gpui_platform::application;
 
 const PROBE_WIDTH: f32 = 126.0;
 const PROBE_HEIGHT: f32 = 92.0;
+const PANEL_LEFT: f32 = 225.0;
+const PANEL_TOP: f32 = 155.0;
+const PANEL_WIDTH: f32 = 550.0;
+const PANEL_HEIGHT: f32 = 310.0;
+const LAYER_BLOCK_WIDTH: f32 = 92.0;
+const LAYER_BLOCK_HEIGHT: f32 = 58.0;
+const BELOW_LAYER: usize = 0;
+const ABOVE_LAYER: usize = 1;
 
 struct LiquidGlassExample {
     probe_position: Point<Pixels>,
@@ -21,6 +26,9 @@ struct LiquidGlassExample {
     last_probe_move_at: Instant,
     last_frame_at: Instant,
     dragging_probe: bool,
+    layer_positions: [Point<Pixels>; 2],
+    layer_drag_offset: Point<Pixels>,
+    dragging_layer: Option<usize>,
 }
 
 impl LiquidGlassExample {
@@ -78,6 +86,58 @@ impl LiquidGlassExample {
         self.dragging_probe = false;
         cx.notify();
     }
+
+    fn layer_at(&self, position: Point<Pixels>) -> Option<usize> {
+        [ABOVE_LAYER, BELOW_LAYER].into_iter().find(|&layer| {
+            let origin = self.layer_positions[layer];
+            position.x >= origin.x
+                && position.x <= origin.x + px(LAYER_BLOCK_WIDTH)
+                && position.y >= origin.y
+                && position.y <= origin.y + px(LAYER_BLOCK_HEIGHT)
+        })
+    }
+
+    fn begin_layer_drag(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(layer) = self.layer_at(event.position) else {
+            return;
+        };
+        self.dragging_layer = Some(layer);
+        self.layer_drag_offset = point(
+            event.position.x - self.layer_positions[layer].x,
+            event.position.y - self.layer_positions[layer].y,
+        );
+        cx.notify();
+    }
+
+    fn update_layer_drag(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layer) = self.dragging_layer else {
+            return;
+        };
+        let viewport = window.viewport_size();
+        let next_position = point(
+            px((event.position.x - self.layer_drag_offset.x)
+                .as_f32()
+                .clamp(0.0, (viewport.width.as_f32() - LAYER_BLOCK_WIDTH).max(0.0))),
+            px((event.position.y - self.layer_drag_offset.y)
+                .as_f32()
+                .clamp(
+                    0.0,
+                    (viewport.height.as_f32() - LAYER_BLOCK_HEIGHT).max(0.0),
+                )),
+        );
+        self.layer_positions[layer] = next_position;
+        cx.notify();
+    }
+
+    fn end_layer_drag(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.dragging_layer = None;
+        cx.notify();
+    }
 }
 
 impl Render for LiquidGlassExample {
@@ -98,6 +158,16 @@ impl Render for LiquidGlassExample {
             .y
             .as_f32()
             .clamp(0.0, (viewport.height.as_f32() - PROBE_HEIGHT).max(0.0)));
+        for position in &mut self.layer_positions {
+            position.x = px(position
+                .x
+                .as_f32()
+                .clamp(0.0, (viewport.width.as_f32() - LAYER_BLOCK_WIDTH).max(0.0)));
+            position.y = px(position.y.as_f32().clamp(
+                0.0,
+                (viewport.height.as_f32() - LAYER_BLOCK_HEIGHT).max(0.0),
+            ));
+        }
         let now = Instant::now();
         let frame_elapsed = now
             .saturating_duration_since(self.last_frame_at)
@@ -144,12 +214,20 @@ impl Render for LiquidGlassExample {
                             .bg(rgba(0xffffffd8))
                             .shadow_sm(),
                     )
-                    .child(div().text_xs().text_color(rgba(0xffffffb8)).child("DRAG")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(0xffffffb8))
+                            .child("SMALL GLASS"),
+                    ),
             )
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_probe_drag))
             .on_mouse_move(cx.listener(Self::update_probe_drag))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::end_probe_drag))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::end_probe_drag));
+
+        let below_position = self.layer_positions[BELOW_LAYER];
+        let above_position = self.layer_positions[ABOVE_LAYER];
 
         div()
             .relative()
@@ -178,11 +256,7 @@ impl Render for LiquidGlassExample {
                     .right_0()
                     .top(px(row as f32 * 40.0))
                     .h(px(if row % 5 == 0 { 2.0 } else { 1.0 }))
-                    .bg(rgba(if row % 5 == 0 {
-                        0x44d7ff3d
-                    } else {
-                        0x7aa5ca20
-                    }))
+                    .bg(rgba(if row % 5 == 0 { 0x44d7ff3d } else { 0x7aa5ca20 }))
             }))
             .child(
                 div()
@@ -192,6 +266,33 @@ impl Render for LiquidGlassExample {
                     .text_xs()
                     .text_color(rgba(0x8edfffc0))
                     .child("GPUI EFFECTS  /  OPTICAL MATERIAL LAB"),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(335.0))
+                    .top(px(66.0))
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .text_xs()
+                    .text_color(rgba(0xffffff90))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().size(px(9.0)).rounded_full().bg(rgb(0xff4f9a)))
+                            .child("BELOW / REFRACTS"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().size(px(9.0)).rounded_full().bg(rgb(0x39d5ff)))
+                            .child("ABOVE / UNCHANGED"),
+                    ),
             )
             .child(
                 div()
@@ -222,33 +323,12 @@ impl Render for LiquidGlassExample {
                     .overflow_hidden()
                     .flex()
                     .children((0..65).map(|index| {
-                        div()
-                            .h_full()
-                            .w(px(10.0))
-                            .bg(rgb(if index % 2 == 0 { 0xf2f7ff } else { 0x172033 }))
+                        div().h_full().w(px(10.0)).bg(rgb(if index % 2 == 0 {
+                            0xf2f7ff
+                        } else {
+                            0x172033
+                        }))
                     })),
-            )
-            // A luminous bead repeatedly crosses both glass edges.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(80.0))
-                    .top(px(270.0))
-                    .size(px(74.0))
-                    .rounded_full()
-                    .bg(rgb(0xff4f9a))
-                    .border_4()
-                    .border_color(rgba(0xffd4e8d8))
-                    .shadow_xl()
-                    .with_animation(
-                        "glass-reference-bead",
-                        Animation::new(Duration::from_secs(12)).repeat(),
-                        |bead, time| {
-                            let phase = time * TAU;
-                            bead.left(px(455.0 + phase.sin() * 360.0))
-                                .top(px(270.0 + (phase * 2.0).sin() * 92.0))
-                        },
-                    ),
             )
             // This color band makes background color transmission obvious.
             .child(
@@ -266,15 +346,42 @@ impl Render for LiquidGlassExample {
                         div().flex_1().h_full().bg(rgb(0xff4f87)),
                     ]),
             )
+            // The below-layer block is painted only before the glass, so the
+            // material is free to refract its entire silhouette.
+            .child(
+                div()
+                    .absolute()
+                    .left(below_position.x)
+                    .top(below_position.y)
+                    .w(px(LAYER_BLOCK_WIDTH))
+                    .h(px(LAYER_BLOCK_HEIGHT))
+                    .rounded_lg()
+                    .bg(rgb(0xff4f9a))
+                    .border_2()
+                    .border_color(rgba(0xffd4e8e8))
+                    .shadow_lg()
+                    .cursor(if self.dragging_layer == Some(BELOW_LAYER) {
+                        CursorStyle::ClosedHand
+                    } else {
+                        CursorStyle::OpenHand
+                    })
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .child("BELOW")
+                    .child(div().text_color(rgba(0xffffffb0)).child("REFRACTED")),
+            )
             .child(
                 GlassPanel::new()
                     .material(GlassMaterial::Regular)
                     .animation("glass-example", Duration::from_secs(7))
                     .absolute()
-                    .left(px(225.0))
-                    .top(px(155.0))
-                    .w(px(550.0))
-                    .h(px(310.0))
+                    .left(px(PANEL_LEFT))
+                    .top(px(PANEL_TOP))
+                    .w(px(PANEL_WIDTH))
+                    .h(px(PANEL_HEIGHT))
                     .p_7()
                     .shadow_xl()
                     .flex()
@@ -292,10 +399,9 @@ impl Render for LiquidGlassExample {
                                     .gap_2()
                                     .child(div().text_2xl().child("Liquid Glass"))
                                     .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(rgba(0xffffffc4))
-                                            .child("Move, press and release anywhere on the surface"),
+                                        div().text_sm().text_color(rgba(0xffffffc4)).child(
+                                            "Move, press and release anywhere on the surface",
+                                        ),
                                     ),
                             )
                             .child(
@@ -326,9 +432,41 @@ impl Render for LiquidGlassExample {
                     .bottom(px(28.0))
                     .text_xs()
                     .text_color(rgba(0xffffff70))
-                    .child("Watch grid spacing, stripe width and the moving bead at the glass boundary."),
+                    .child("Drag the pink and cyan blocks across both glass surfaces."),
             )
             .child(probe)
+            // The foreground block is painted last. Its shape stays clean and
+            // it never enters either backdrop texture.
+            .child(
+                div()
+                    .absolute()
+                    .left(above_position.x)
+                    .top(above_position.y)
+                    .w(px(LAYER_BLOCK_WIDTH))
+                    .h(px(LAYER_BLOCK_HEIGHT))
+                    .rounded_lg()
+                    .bg(rgb(0x20cfee))
+                    .border_2()
+                    .border_color(rgba(0xc8f8fff0))
+                    .shadow_lg()
+                    .cursor(if self.dragging_layer == Some(ABOVE_LAYER) {
+                        CursorStyle::ClosedHand
+                    } else {
+                        CursorStyle::OpenHand
+                    })
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgba(0x06202ce0))
+                    .child("ABOVE")
+                    .child(div().text_color(rgba(0x06202ca8)).child("UNCHANGED")),
+            )
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_layer_drag))
+            .on_mouse_move(cx.listener(Self::update_layer_drag))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::end_layer_drag))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::end_layer_drag))
     }
 }
 
@@ -349,6 +487,9 @@ fn main() {
                     last_probe_move_at: now,
                     last_frame_at: now,
                     dragging_probe: false,
+                    layer_positions: [point(px(145.0), px(265.0)), point(px(758.0), px(220.0))],
+                    layer_drag_offset: Point::default(),
+                    dragging_layer: None,
                 })
             },
         )
