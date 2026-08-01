@@ -32,4 +32,13 @@ Example source code is available in [`crates/gpui/examples`](crates/gpui/example
 
 ## License
 
-This repository is based on the GPUI-related components of Zed that are licensed under the Apache License 2.0. See [LICENSE-APACHE](LICENSE-APACHE) for details.
+This is a mixed-license repository:
+
+- GPUI-related code derived from Zed remains licensed under the Apache License
+  2.0. See [LICENSE-APACHE](LICENSE-APACHE).
+- The independently developed `gpui_effects`, `gpui_media`, `uic`, and
+  `uic-macros` crates are licensed under the MIT License. See the `LICENSE` file
+  in each crate.
+- Third-party assets retain their original licenses. In particular, the Lucide
+  icons bundled by `uic` retain the Lucide ISC and Feather MIT license text in
+  [`uic/assets/icons/LICENSE`](uic/assets/icons/LICENSE).
