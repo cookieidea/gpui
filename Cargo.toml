@@ -26,6 +26,8 @@ members = [
   "crates/refineable/derive_refineable",
   "crates/reqwest_client",
   "crates/gpui_effects",
+  "uic",
+  "uic/macros",
 ]
 
 [workspace.package]
@@ -65,6 +67,7 @@ mime = "0.3.17"
 naga = { version = "29.0.4", features = ["wgsl-in", "msl-out", "hlsl-out"] }
 util_macros = { path = "crates/util_macros" }
 util = { path = "crates/util" }
+uic_macros = { package = "uic-macros", path = "uic/macros", version = "0.1.0" }
 oauth_callback_server = { path = "crates/oauth_callback_server" }
 refineable = { path = "crates/refineable" }
 reqwest_client = { path = "crates/reqwest_client" }
@@ -353,7 +356,7 @@ sqlformat = "0.2"
 stacksafe = "1.0.2"
 streaming-iterator = "0.1"
 strsim = "0.11"
-strum = { version = "0.27.2", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
 sys-locale = "0.3.1"
 sysinfo = "0.37.0"

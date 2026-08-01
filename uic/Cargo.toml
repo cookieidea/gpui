@@ -1,0 +1,18 @@
+[package]
+name = "uic"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+strum = { workspace = true, features = ["derive", "strum_macros"] }
+unicode-segmentation = { workspace = true }
+anyhow = { workspace = true }
+gpui = { workspace = true }
+rust-embed = { version = "8.11", features = ["include-exclude"] }
+uic_macros = { workspace = true }
+
+
+[dev-dependencies]
+gpui_platform = { workspace = true, features = ["wayland"] }
