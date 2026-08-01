@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AbsoluteLength, Animation, AnimationExt, AnyElement, Div, EffectUniforms, ElementId, Hsla,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, Rgba,
-    StyleRefinement, Styled, div, hsla, px,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, Point,
+    RenderOnce, Rgba, StyleRefinement, Styled, div, hsla, px,
 };
 
 use crate::{
@@ -157,14 +157,17 @@ impl GlassMaterial {
 /// Content is painted after the material, while the effect itself samples only
 /// scene content already behind the panel. On renderers without backdrop
 /// support, the translucent tint and border remain visible as a fallback.
-#[derive(IntoElement)]
+///
+/// See the [`glass_guide`](crate::glass_guide) for the rendering model,
+/// layer-ordering rules, recipes, and a complete parameter reference.
 pub struct GlassPanel {
     div: Div,
     children: Vec<AnyElement>,
     material: GlassMaterial,
+    blur_radius: Option<Pixels>,
     radius: AbsoluteLength,
     tint: Hsla,
-    border_color: Hsla,
+    edge_color: Hsla,
     animated: bool,
     animation_id: ElementId,
     animation_duration: Duration,
@@ -190,9 +193,10 @@ impl GlassPanel {
             div: div().relative().rounded(px(16.0)),
             children: Vec::new(),
             material: GlassMaterial::Regular,
+            blur_radius: None,
             radius: px(16.0).into(),
             tint: hsla(0.58, 0.55, 0.96, 0.07),
-            border_color: hsla(0.0, 0.0, 1.0, 0.24),
+            edge_color: hsla(0.0, 0.0, 1.0, 0.78),
             animated: true,
             animation_id: "gpui-liquid-glass".into(),
             animation_duration: Duration::from_secs(7),
@@ -206,13 +210,38 @@ impl GlassPanel {
         }
     }
 
-    /// Selects an optical density preset.
+    /// Assigns the standard GPUI element id without wrapping the component.
+    ///
+    /// `GlassPanel` is a [`RenderOnce`] component rather than a low-level
+    /// [`gpui::Element`], so the blanket [`InteractiveElement::id`] method
+    /// would produce an unusable `Stateful<GlassPanel>`. This inherent method
+    /// forwards the id to the internal [`Div`] and intentionally returns
+    /// `Self`, preserving component-specific and [`ParentElement`] chaining.
+    /// The id also isolates this panel's press and pointer interaction state.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.div.interactivity().element_id = Some(id.into());
+        self
+    }
+
+    /// Selects the preset blur radius, optics, and surface parameters.
+    ///
+    /// Explicit [`Self::optics`] and [`Self::surface`] values override their
+    /// respective preset arrays.
     pub fn material(mut self, material: GlassMaterial) -> Self {
         self.material = material;
         self
     }
 
-    /// Sets the panel and material corner radius.
+    /// Overrides the material preset's backdrop blur radius.
+    pub fn blur_radius(mut self, radius: Pixels) -> Self {
+        self.blur_radius = Some(px(radius.as_f32().max(0.0)));
+        self
+    }
+
+    /// Sets both the GPUI container radius and shader silhouette radius.
+    ///
+    /// Prefer this over applying only a generic rounded style, which does not
+    /// update the shader geometry.
     pub fn radius(mut self, radius: impl Into<AbsoluteLength>) -> Self {
         let radius = radius.into();
         self.radius = radius;
@@ -220,62 +249,103 @@ impl GlassPanel {
         self
     }
 
-    /// Sets the conventional translucent overlay painted over the material.
+    /// Sets the conventional material tint and unsupported-renderer fallback.
+    ///
+    /// Its alpha is used as shader tint strength unless [`Self::shader_tint`]
+    /// is set.
     pub fn tint(mut self, tint: impl Into<Hsla>) -> Self {
         self.tint = tint.into();
         self
     }
 
-    /// Sets the bright glass edge color.
-    pub fn border_color(mut self, color: impl Into<Hsla>) -> Self {
-        self.border_color = color.into();
+    /// Sets the color and base strength of the bright refractive material edge.
+    ///
+    /// This is separate from the normal GPUI [`Styled::border_color`]. Edge
+    /// width and additional brightness are controlled by the first two values
+    /// passed to [`Self::surface`].
+    pub fn edge_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.edge_color = color.into();
         self
     }
 
-    /// Enables or disables time- and pointer-driven surface animation.
+    /// Enables or disables continuous time- and pointer-driven animation.
+    ///
+    /// Disabling animation zeros the shader's pointer-response and ambient
+    /// motion parameters. Explicit translation velocity can still deform the
+    /// panel.
     pub fn animated(mut self, animated: bool) -> Self {
         self.animated = animated;
         self
     }
 
-    /// Sets the animation identity and duration.
+    /// Sets the shader animation identity and ambient loop duration.
+    ///
+    /// The duration controls one shader cycle, not the press/release spring.
+    /// When [`Self::id`] is absent, this id is also the fallback key for the
+    /// panel's interaction state.
     pub fn animation(mut self, id: impl Into<ElementId>, duration: Duration) -> Self {
         self.animation_id = id.into();
         self.animation_duration = duration;
         self
     }
 
-    /// Overrides refraction, dispersion, raw-detail mix, and saturation.
+    /// Overrides `[refraction_px, dispersion_px, raw_detail, saturation]`.
+    ///
+    /// `raw_detail` mixes blurred (`0`) and raw/refracted (`1`) backdrop
+    /// samples. See [`crate::glass_guide`] for ranges and preset values.
     pub fn optics(mut self, value: [f32; 4]) -> Self {
         self.optics = Some(value);
         self
     }
 
-    /// Overrides edge width, highlight, pointer response, and motion.
+    /// Overrides `[edge_width, highlight, pointer_response, ambient_motion]`.
+    ///
+    /// All four values are dimensionless material coefficients:
+    ///
+    /// - `edge_width` is relative to the material's internal edge thickness
+    ///   and is clamped to `0.001..=0.5` by the shader;
+    /// - `highlight` multiplies refractive edge light;
+    /// - `pointer_response` scales press-driven local refraction;
+    /// - `ambient_motion` scales contour waves and interior flow, then is
+    ///   multiplied by [`Self::wave_strength`].
     pub fn surface(mut self, value: [f32; 4]) -> Self {
         self.surface = Some(value);
         self
     }
 
-    /// Overrides shader tint RGB and shader tint strength.
+    /// Overrides `[red, green, blue, strength]` for the shader-backed path.
+    ///
+    /// When set, this takes precedence over [`Self::tint`] in the shader;
+    /// `tint` remains the unsupported-renderer fallback color.
     pub fn shader_tint(mut self, value: [f32; 4]) -> Self {
         self.shader_tint = Some(value);
         self
     }
 
-    /// Scales lens, edge, and chromatic deformation. Zero keeps the backdrop undistorted.
+    /// Scales refraction, lens magnification, and chromatic dispersion.
+    ///
+    /// Zero keeps the backdrop undistorted while retaining blur, tint, and
+    /// edge lighting. Negative values are clamped to zero.
     pub fn deformation(mut self, strength: f32) -> Self {
         self.deformation = strength.max(0.0);
         self
     }
 
-    /// Scales the ambient animated surface flow. Zero disables the default wave.
+    /// Scales ambient animated surface flow and contour motion.
+    ///
+    /// Zero removes the default wave without disabling explicit translation
+    /// inertia. Negative values are clamped to zero.
     pub fn wave_strength(mut self, strength: f32) -> Self {
         self.wave_strength = strength.max(0.0);
         self
     }
 
-    /// Sets the material opacity without changing its tint color.
+    /// Sets post-shader compositing opacity in `0.0..=1.0`.
+    ///
+    /// This fades the complete refraction, blur, tint, dispersion, and edge
+    /// result back toward the original scene. It does not directly control
+    /// backdrop visibility; for a less see-through panel, normally leave this
+    /// at `1.0` and increase tint strength or reduce `optics[2]`.
     pub fn glass_opacity(mut self, opacity: f32) -> Self {
         self.glass_opacity = opacity.clamp(0.0, 1.0);
         self
@@ -287,6 +357,8 @@ impl GlassPanel {
     /// value describes movement of the glass body itself. Draggable or
     /// spring-animated callers should update it every frame so the leading
     /// edge stretches and the trailing edge lags behind.
+    /// Around 600 px/s reaches the reference motion strength; larger values
+    /// are normalized without changing direction.
     pub fn translation_velocity(mut self, velocity: Point<f32>) -> Self {
         self.translation_velocity = velocity;
         self
@@ -299,19 +371,39 @@ impl Styled for GlassPanel {
     }
 }
 
+impl InteractiveElement for GlassPanel {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.div.interactivity()
+    }
+}
+
 impl ParentElement for GlassPanel {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);
     }
 }
 
+impl IntoElement for GlassPanel {
+    type Element = gpui::ViewElement<Self>;
+
+    #[track_caller]
+    fn into_element(self) -> Self::Element {
+        gpui::ViewElement::new(self)
+    }
+}
+
 impl RenderOnce for GlassPanel {
-    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let (blur_radius, preset_optics, preset_surface) = self.material.parameters();
+    fn render(mut self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+        let (preset_blur_radius, preset_optics, preset_surface) = self.material.parameters();
+        let blur_radius = self.blur_radius.unwrap_or(preset_blur_radius);
         let should_animate = self.animated && window.supports_backdrop_blur();
-        let interaction = window.use_keyed_state(self.animation_id.clone(), cx, |_, _| {
-            GlassInteractionState::default()
-        });
+        let interaction_id = self
+            .interactivity()
+            .element_id
+            .clone()
+            .unwrap_or_else(|| self.animation_id.clone());
+        let interaction =
+            window.use_keyed_state(interaction_id, cx, |_, _| GlassInteractionState::default());
         let interaction_frame = interaction.update(cx, |state, _| state.advance());
         let translation_velocity = normalize_translation_velocity(self.translation_velocity);
         let (material_velocity, material_speed) = clamp_unit_velocity(Point {
@@ -319,7 +411,7 @@ impl RenderOnce for GlassPanel {
             y: interaction_frame.velocity.y + translation_velocity.y,
         });
         let tint: Rgba = self.tint.into();
-        let edge_light: Rgba = self.border_color.into();
+        let edge_light: Rgba = self.edge_color.into();
         let mut optics = self.optics.unwrap_or(preset_optics);
         optics[0] *= self.deformation;
         optics[1] *= self.deformation;
@@ -352,7 +444,7 @@ impl RenderOnce for GlassPanel {
             )
             .with_slot(
                 LIQUID_GLASS_LIGHT_SLOT,
-                [edge_light.r, edge_light.g, edge_light.b, 0.78],
+                [edge_light.r, edge_light.g, edge_light.b, edge_light.a],
             );
         if !should_animate {
             let mut surface = uniforms.slots()[LIQUID_GLASS_SURFACE_SLOT];
@@ -393,7 +485,7 @@ impl RenderOnce for GlassPanel {
             .rounded(self.radius)
             .bg(self.tint.opacity(fallback_alpha))
             .border_1()
-            .border_color(self.border_color.opacity(fallback_alpha));
+            .border_color(self.edge_color.opacity(fallback_alpha));
 
         let move_state = interaction.clone();
         let down_state = interaction.clone();
@@ -498,11 +590,23 @@ mod tests {
     #[test]
     fn semantic_controls_clamp_invalid_values() {
         let panel = GlassPanel::new()
+            .blur_radius(px(-4.0))
             .deformation(-1.0)
             .wave_strength(-1.0)
             .glass_opacity(2.0);
+        assert_eq!(panel.blur_radius, Some(px(0.0)));
         assert_eq!(panel.deformation, 0.0);
         assert_eq!(panel.wave_strength, 0.0);
         assert_eq!(panel.glass_opacity, 1.0);
+    }
+
+    #[test]
+    fn component_id_preserves_the_panel_type_and_forwards_to_the_div() {
+        let mut panel = GlassPanel::new().id("documented-glass-panel").child(div());
+        assert_eq!(
+            panel.div.interactivity().element_id.as_ref(),
+            Some(&ElementId::from("documented-glass-panel"))
+        );
+        let _: gpui::ViewElement<GlassPanel> = panel.into_element();
     }
 }

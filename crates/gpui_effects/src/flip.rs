@@ -664,7 +664,10 @@ impl Flip {
     /// Selects the initial logical position before the component is rendered.
     pub fn start_at(mut self, position: usize) -> Self {
         let stride = self.layout.visible_count();
-        assert!(position % stride == 0, "initial position is misaligned");
+        assert!(
+            position.is_multiple_of(stride),
+            "initial position is misaligned"
+        );
         assert!(
             self.slots
                 .as_ref()
@@ -726,7 +729,7 @@ impl Flip {
             return FlipJumpResult::OutOfRange;
         };
         let stride = self.layout.visible_count();
-        if position % stride != 0 {
+        if !position.is_multiple_of(stride) {
             return FlipJumpResult::Misaligned;
         }
         if position + stride > slots.len() {

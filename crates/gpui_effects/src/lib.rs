@@ -3,6 +3,13 @@
 //! Effects use WGSL as their canonical implementation. Applications may add
 //! native MSL and HLSL implementations through [`gpui::EffectShader`] when an
 //! effect needs platform-specific tuning.
+//!
+//! See [`glass_guide`] for the complete liquid-glass rendering model,
+//! parameter reference, recipes, and troubleshooting guide.
+
+/// Complete usage guide for [`GlassPanel`](crate::GlassPanel).
+#[doc = include_str!("../docs/liquid_glass.md")]
+pub mod glass_guide {}
 
 mod backdrop;
 mod builtins;
