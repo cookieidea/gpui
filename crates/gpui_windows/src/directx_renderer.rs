@@ -378,6 +378,7 @@ impl DirectXRenderer {
 
         for batch in scene.batches() {
             match batch {
+                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
                 PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
                 PrimitiveBatch::Effects(range) => self.draw_effects(&scene.effects[range]),

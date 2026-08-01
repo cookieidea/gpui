@@ -766,6 +766,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
+    /// Returns whether this window can sample and blur previously painted scene content.
+    fn supports_backdrop_blur(&self) -> bool {
+        false
+    }
 
     // macOS specific methods
     fn get_title(&self) -> String {

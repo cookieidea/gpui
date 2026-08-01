@@ -271,6 +271,9 @@ pub struct Style {
     /// The relative rate at which this item shrinks when it is contracting to fit into space, 1.0 is the default value, and this value must be positive.
     pub flex_shrink: f32,
 
+    /// Blur radius applied to scene content painted behind this element.
+    pub backdrop_blur: Option<Pixels>,
+
     /// The fill color of this element
     pub background: Option<Fill>,
 
@@ -722,6 +725,12 @@ impl Style {
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
 
+        if let Some(blur_radius) = self.backdrop_blur {
+            window.paint_backdrop_blur(
+                crate::backdrop_blur(bounds, blur_radius).corner_radii(corner_radii),
+            );
+        }
+
         window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
 
         let background_color = self.background.as_ref().and_then(Fill::color);
@@ -834,6 +843,7 @@ impl Default for Style {
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
+            backdrop_blur: None,
             background: None,
             border_color: None,
             border_top_color: None,

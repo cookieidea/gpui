@@ -698,6 +698,10 @@ impl PlatformWindow for WebWindow {
             .supports_dual_source_blending()
     }
 
+    fn supports_backdrop_blur(&self) -> bool {
+        self.inner.state.borrow().renderer.supports_backdrop_blur()
+    }
+
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         Some(self.inner.state.borrow().renderer.gpu_specs())
     }

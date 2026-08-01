@@ -1583,6 +1583,10 @@ impl PlatformWindow for X11Window {
             .unwrap_or_default()
     }
 
+    fn supports_backdrop_blur(&self) -> bool {
+        self.0.state.borrow().renderer.supports_backdrop_blur()
+    }
+
     fn minimize(&self) {
         let state = self.0.state.borrow();
         const WINDOW_ICONIC_STATE: u32 = 3;

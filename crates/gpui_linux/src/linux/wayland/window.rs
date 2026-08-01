@@ -1602,6 +1602,10 @@ impl PlatformWindow for WaylandWindow {
             .is_some_and(|ctx| ctx.supports_dual_source_blending())
     }
 
+    fn supports_backdrop_blur(&self) -> bool {
+        self.borrow().renderer.supports_backdrop_blur()
+    }
+
     fn minimize(&self) {
         if let Some(toplevel) = self.borrow().surface_state.toplevel() {
             toplevel.set_minimized();

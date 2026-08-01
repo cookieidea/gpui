@@ -43,6 +43,7 @@ pub struct Scene {
     pub(crate) paint_operations: Vec<PaintOperation>,
     primitive_bounds: BoundsTree<ScaledPixels>,
     layer_stack: Vec<DrawOrder>,
+    pub backdrop_blurs: Vec<BackdropBlur>,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub effects: Vec<EffectQuad>,
@@ -60,6 +61,7 @@ impl Scene {
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
+        self.backdrop_blurs.clear();
         self.paths.clear();
         self.shadows.clear();
         self.quads.clear();
@@ -103,6 +105,10 @@ impl Scene {
             .copied()
             .unwrap_or_else(|| self.primitive_bounds.insert(clipped_bounds));
         match &mut primitive {
+            Primitive::BackdropBlur(backdrop) => {
+                backdrop.order = order;
+                self.backdrop_blurs.push(*backdrop);
+            }
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
                 self.shadows.push(*shadow);
@@ -156,6 +162,7 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        self.backdrop_blurs.sort_by_key(|backdrop| backdrop.order);
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.effects.sort_by_key(|effect| effect.order);
@@ -179,6 +186,8 @@ impl Scene {
     )]
     pub fn batches(&self) -> impl Iterator<Item = PrimitiveBatch> + '_ {
         BatchIterator {
+            backdrop_blurs_start: 0,
+            backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
             shadows_start: 0,
             shadows_iter: self.shadows.iter().peekable(),
             quads_start: 0,
@@ -210,6 +219,7 @@ impl Scene {
     allow(dead_code)
 )]
 pub(crate) enum PrimitiveKind {
+    BackdropBlur,
     Shadow,
     #[default]
     Quad,
@@ -231,6 +241,7 @@ pub(crate) enum PaintOperation {
 #[derive(Clone)]
 #[expect(missing_docs)]
 pub enum Primitive {
+    BackdropBlur(BackdropBlur),
     Shadow(Shadow),
     Quad(Quad),
     Effect(EffectQuad),
@@ -246,6 +257,7 @@ pub enum Primitive {
 impl Primitive {
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
+            Primitive::BackdropBlur(backdrop) => &backdrop.bounds,
             Primitive::Shadow(shadow) => &shadow.bounds,
             Primitive::Quad(quad) => &quad.bounds,
             Primitive::Effect(effect) => &effect.bounds,
@@ -260,6 +272,7 @@ impl Primitive {
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
         match self {
+            Primitive::BackdropBlur(backdrop) => &backdrop.content_mask,
             Primitive::Shadow(shadow) => &shadow.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
             Primitive::Effect(effect) => &effect.content_mask,
@@ -281,6 +294,8 @@ impl Primitive {
     allow(dead_code)
 )]
 struct BatchIterator<'a> {
+    backdrop_blurs_start: usize,
+    backdrop_blurs_iter: Peekable<slice::Iter<'a, BackdropBlur>>,
     shadows_start: usize,
     shadows_iter: Peekable<slice::Iter<'a, Shadow>>,
     quads_start: usize,
@@ -306,6 +321,10 @@ impl<'a> Iterator for BatchIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut orders_and_kinds = [
+            (
+                self.backdrop_blurs_iter.peek().map(|b| b.order),
+                PrimitiveKind::BackdropBlur,
+            ),
             (
                 self.shadows_iter.peek().map(|s| s.order),
                 PrimitiveKind::Shadow,
@@ -348,6 +367,22 @@ impl<'a> Iterator for BatchIterator<'a> {
         };
 
         match batch_kind {
+            PrimitiveKind::BackdropBlur => {
+                let backdrops_start = self.backdrop_blurs_start;
+                let mut backdrops_end = backdrops_start + 1;
+                self.backdrop_blurs_iter.next();
+                while self
+                    .backdrop_blurs_iter
+                    .next_if(|backdrop| (backdrop.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    backdrops_end += 1;
+                }
+                self.backdrop_blurs_start = backdrops_end;
+                Some(PrimitiveBatch::BackdropBlurs(
+                    backdrops_start..backdrops_end,
+                ))
+            }
             PrimitiveKind::Shadow => {
                 let shadows_start = self.shadows_start;
                 let mut shadows_end = shadows_start + 1;
@@ -509,6 +544,7 @@ impl<'a> Iterator for BatchIterator<'a> {
 )]
 #[allow(missing_docs)]
 pub enum PrimitiveBatch {
+    BackdropBlurs(Range<usize>),
     Shadows(Range<usize>),
     Quads(Range<usize>),
     Effects(Range<usize>),
@@ -528,6 +564,25 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+}
+
+/// A background blur composited from primitives that precede it in scene draw order.
+#[derive(Debug, Copy, Clone)]
+#[repr(C)]
+#[expect(missing_docs)]
+pub struct BackdropBlur {
+    pub order: DrawOrder,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub blur_radius: ScaledPixels,
+    pub opacity: f32,
+}
+
+impl From<BackdropBlur> for Primitive {
+    fn from(backdrop: BackdropBlur) -> Self {
+        Primitive::BackdropBlur(backdrop)
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -971,6 +1026,52 @@ where
 impl From<Path<ScaledPixels>> for Primitive {
     fn from(path: Path<ScaledPixels>) -> Self {
         Primitive::Path(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_bounds() -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: Point {
+                x: ScaledPixels(0.0),
+                y: ScaledPixels(0.0),
+            },
+            size: Size {
+                width: ScaledPixels(100.0),
+                height: ScaledPixels(100.0),
+            },
+        }
+    }
+
+    #[test]
+    fn backdrop_precedes_quads_in_the_same_layer() {
+        let bounds = test_bounds();
+        let mut scene = Scene::default();
+        scene.push_layer(bounds);
+        scene.insert_primitive(Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            ..Default::default()
+        });
+        scene.insert_primitive(BackdropBlur {
+            order: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            blur_radius: ScaledPixels(16.0),
+            opacity: 1.0,
+        });
+        scene.pop_layer();
+        scene.finish();
+
+        let batches = scene.batches().collect::<Vec<_>>();
+        assert!(matches!(
+            batches.as_slice(),
+            [PrimitiveBatch::BackdropBlurs(_), PrimitiveBatch::Quads(_)]
+        ));
     }
 }
 

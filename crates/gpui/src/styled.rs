@@ -496,6 +496,15 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Blurs scene content painted behind this element.
+    ///
+    /// The blur follows the element's bounds, corner radii, opacity, and content mask.
+    /// On unsupported renderers it is a no-op; use [`Self::bg`] for a visual fallback.
+    fn backdrop_blur(mut self, radius: impl Into<gpui::Pixels>) -> Self {
+        self.style().backdrop_blur = Some(radius.into());
+        self
+    }
+
     /// Sets the border style of the element.
     fn border_dashed(mut self) -> Self {
         self.style().border_style = Some(BorderStyle::Dashed);

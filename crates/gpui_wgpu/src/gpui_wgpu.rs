@@ -66,6 +66,23 @@ mod tests {
     }
 
     #[test]
+    fn backdrop_blur_shader_is_valid_wgsl() {
+        let module = wgpu::naga::front::wgsl::parse_str(include_str!("backdrop_blur.wgsl"))
+            .expect("backdrop blur shader should parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("backdrop blur shader should validate");
+
+        assert_eq!(
+            shader_struct_span(&module, "BackdropInstance") as usize,
+            std::mem::size_of::<super::wgpu_renderer::BackdropInstance>(),
+        );
+    }
+
+    #[test]
     fn effect_shader_contract_is_valid_wgsl() {
         let source = gpui::compose_effect_wgsl(
             r#"

@@ -974,6 +974,7 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             let ok = match batch {
+                PrimitiveBatch::BackdropBlurs(_) => true,
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(
                     &scene.shadows[range],
                     instance_buffer,

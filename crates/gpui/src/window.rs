@@ -2,23 +2,24 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderGradient, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, EffectQuad,
-    EffectShader, EffectUniforms, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global,
-    GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
-    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    PaintEffect, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
-    RenderColorSvgParams, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
-    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
-    TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    point, prelude::*, profiler, px, rems, size, transparent_black,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderGradient,
+    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
+    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, EffectQuad, EffectShader, EffectUniforms, Entity, EntityId, EventEmitter,
+    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
+    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
+    MouseMoveEvent, MouseUpEvent, PaintEffect, Path, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
+    PromptButton, PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
+    transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -3859,6 +3860,31 @@ impl Window {
         });
     }
 
+    /// Paints a blur of all scene primitives that precede this call in draw order.
+    ///
+    /// The blur is clipped to `backdrop.bounds`, the current content mask, and the
+    /// supplied corner radii. Renderers that do not support backdrop capture treat
+    /// this operation as a no-op, so applications should paint their translucent
+    /// fallback material separately.
+    pub fn paint_backdrop_blur(&mut self, backdrop: PaintBackdropBlur) {
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity() * backdrop.opacity.clamp(0.0, 1.0);
+        let blur_radius = backdrop.blur_radius.max(px(0.));
+        if opacity == 0.0 || blur_radius == px(0.) {
+            return;
+        }
+
+        self.next_frame.scene.insert_primitive(BackdropBlur {
+            order: 0,
+            bounds: self.snap_bounds(backdrop.bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: backdrop.corner_radii.scale(self.scale_factor()),
+            blur_radius: ScaledPixels(blur_radius.0 * self.scale_factor()),
+            opacity,
+        });
+    }
+
     /// Paints a custom fragment effect into the scene for the next frame.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
@@ -5788,6 +5814,11 @@ impl Window {
         self.platform_window.gpu_specs()
     }
 
+    /// Returns whether this window supports scene-content backdrop blur.
+    pub fn supports_backdrop_blur(&self) -> bool {
+        self.platform_window.supports_backdrop_blur()
+    }
+
     /// Perform titlebar double-click action.
     /// This is macOS specific.
     pub fn titlebar_double_click(&self) {
@@ -6566,6 +6597,48 @@ pub struct PaintQuad {
     pub border_gradient: BorderGradient,
     /// The style of the quad's borders.
     pub border_style: BorderStyle,
+}
+
+/// A rectangular background blur passed to [`Window::paint_backdrop_blur`].
+#[derive(Clone, Copy, Debug)]
+pub struct PaintBackdropBlur {
+    /// Bounds of the blurred region within the window.
+    pub bounds: Bounds<Pixels>,
+    /// Radii used to clip the blurred region.
+    pub corner_radii: Corners<Pixels>,
+    /// Blur radius in logical pixels.
+    pub blur_radius: Pixels,
+    /// Opacity used when compositing the blurred backdrop over the original scene.
+    pub opacity: f32,
+}
+
+impl PaintBackdropBlur {
+    /// Creates a backdrop blur for `bounds`.
+    pub fn new(bounds: impl Into<Bounds<Pixels>>, blur_radius: Pixels) -> Self {
+        Self {
+            bounds: bounds.into(),
+            corner_radii: Corners::default(),
+            blur_radius,
+            opacity: 1.0,
+        }
+    }
+
+    /// Sets the corner radii used to clip the blurred backdrop.
+    pub fn corner_radii(mut self, corner_radii: impl Into<Corners<Pixels>>) -> Self {
+        self.corner_radii = corner_radii.into();
+        self
+    }
+
+    /// Sets the compositing opacity.
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+}
+
+/// Creates a rectangular background blur.
+pub fn backdrop_blur(bounds: impl Into<Bounds<Pixels>>, blur_radius: Pixels) -> PaintBackdropBlur {
+    PaintBackdropBlur::new(bounds, blur_radius)
 }
 
 impl PaintQuad {
