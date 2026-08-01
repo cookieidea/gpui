@@ -5,9 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, BorderGradient, Bounds, ContentMask, Corners, Edges,
-    EffectShader, EffectUniforms, Hsla, Pixels, Point, Radians, ScaledPixels, Size, SurfaceSource,
-    bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, BackdropShader, Background, BorderGradient, Bounds, ContentMask,
+    Corners, Edges, EffectShader, EffectUniforms, Hsla, Pixels, Point, Radians, ScaledPixels, Size,
+    SurfaceSource, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -107,7 +107,7 @@ impl Scene {
         match &mut primitive {
             Primitive::BackdropBlur(backdrop) => {
                 backdrop.order = order;
-                self.backdrop_blurs.push(*backdrop);
+                self.backdrop_blurs.push(backdrop.clone());
             }
             Primitive::Shadow(shadow) => {
                 shadow.order = order;
@@ -567,8 +567,7 @@ pub enum PrimitiveBatch {
 }
 
 /// A background blur composited from primitives that precede it in scene draw order.
-#[derive(Debug, Copy, Clone)]
-#[repr(C)]
+#[derive(Debug, Clone)]
 #[expect(missing_docs)]
 pub struct BackdropBlur {
     pub order: DrawOrder,
@@ -577,6 +576,11 @@ pub struct BackdropBlur {
     pub corner_radii: Corners<ScaledPixels>,
     pub blur_radius: ScaledPixels,
     pub opacity: f32,
+    pub shader: Option<BackdropShader>,
+    pub uniforms: EffectUniforms,
+    pub time: f32,
+    pub pointer: Point<f32>,
+    pub pointer_active: bool,
 }
 
 impl From<BackdropBlur> for Primitive {
@@ -1063,6 +1067,11 @@ mod tests {
             corner_radii: Corners::default(),
             blur_radius: ScaledPixels(16.0),
             opacity: 1.0,
+            shader: None,
+            uniforms: EffectUniforms::default(),
+            time: 0.0,
+            pointer: Point { x: 0.5, y: 0.5 },
+            pointer_active: false,
         });
         scene.pop_layer();
         scene.finish();

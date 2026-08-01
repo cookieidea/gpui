@@ -9,13 +9,21 @@ struct Bounds {
     size: vec2<f32>,
 }
 
+struct BackdropParams {
+    slots: array<vec4<f32>, 8>,
+}
+
 struct BackdropInstance {
     bounds: Bounds,
     content_mask: Bounds,
     corner_radii: vec4<f32>,
     blur_radius: f32,
     opacity: f32,
+    time: f32,
+    pointer_active: f32,
     direction: vec2<f32>,
+    pointer: vec2<f32>,
+    uniforms: BackdropParams,
 }
 
 @group(0) @binding(0) var<uniform> globals: GlobalParams;

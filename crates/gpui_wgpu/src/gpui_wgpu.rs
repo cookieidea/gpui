@@ -107,6 +107,54 @@ fn effect(input: EffectInput, params: EffectParams) -> vec4<f32> {
     }
 
     #[test]
+    fn backdrop_effect_shader_contract_is_valid_wgsl() {
+        let shader = gpui::BackdropShader::wgsl(
+            r#"
+fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
+    let displacement = (input.pointer - input.uv) * params.slots[0].x;
+    return mix(
+        sample_blurred_backdrop(input, vec2<f32>(0.0)),
+        sample_raw_backdrop(input, displacement),
+        0.5,
+    );
+}
+"#,
+        );
+        let source = gpui::compose_backdrop_shader_wgsl(&shader);
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .expect("backdrop effect shader contract should parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("backdrop effect shader contract should validate");
+
+        assert_eq!(
+            shader_struct_span(&module, "BackdropInstance") as usize,
+            std::mem::size_of::<super::wgpu_renderer::BackdropInstance>(),
+        );
+    }
+
+    #[test]
+    fn liquid_glass_backdrop_shader_is_valid_wgsl() {
+        let source = gpui::compose_backdrop_shader_wgsl(&gpui_effects::liquid_glass_shader());
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .expect("liquid glass backdrop shader should parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("liquid glass backdrop shader should validate");
+
+        assert_eq!(
+            shader_struct_span(&module, "BackdropInstance") as usize,
+            std::mem::size_of::<super::wgpu_renderer::BackdropInstance>(),
+        );
+    }
+
+    #[test]
     fn built_in_effect_shaders_are_valid_wgsl() {
         for shader in [
             gpui_effects::aurora_shader(),

@@ -1,10 +1,11 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, BackdropBlur, Background, Bounds, ColorRange, DevicePixels, EffectQuad,
-    EffectShader, GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
-    ScaledPixels, Scene, Shadow, Size, SubpixelSprite, SurfaceColorInfo, SurfaceFormat,
-    SurfaceFrame, SurfaceId, Underline, WeakSurfaceHandle, YuvMatrix, get_gamma_correction_ratios,
+    AtlasTextureId, BackdropBlur, BackdropShader, Background, Bounds, ColorRange, DevicePixels,
+    EffectQuad, EffectShader, GpuSpecs, MonochromeSprite, Path, Point, PolychromeSprite,
+    PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite, SurfaceColorInfo,
+    SurfaceFormat, SurfaceFrame, SurfaceId, Underline, WeakSurfaceHandle, YuvMatrix,
+    get_gamma_correction_ratios,
 };
 #[cfg(target_os = "linux")]
 use gpui::{
@@ -281,7 +282,11 @@ pub(super) struct BackdropInstance {
     corner_radii: [f32; 4],
     blur_radius: f32,
     opacity: f32,
+    time: f32,
+    pointer_active: f32,
     direction: [f32; 2],
+    pointer: [f32; 2],
+    uniforms: [[f32; 4]; gpui::EFFECT_UNIFORM_SLOTS],
 }
 
 impl BackdropInstance {
@@ -304,7 +309,11 @@ impl BackdropInstance {
             corner_radii: [0.0; 4],
             blur_radius,
             opacity: 1.0,
+            time: 0.0,
+            pointer_active: 0.0,
             direction,
+            pointer: [0.5; 2],
+            uniforms: [[0.0; 4]; gpui::EFFECT_UNIFORM_SLOTS],
         }
     }
 }
@@ -322,7 +331,11 @@ impl From<&BackdropBlur> for BackdropInstance {
             ],
             blur_radius: backdrop.blur_radius.0,
             opacity: backdrop.opacity,
+            time: backdrop.time,
+            pointer_active: u32::from(backdrop.pointer_active) as f32,
             direction: [0.0; 2],
+            pointer: [backdrop.pointer.x, backdrop.pointer.y],
+            uniforms: *backdrop.uniforms.slots(),
         }
     }
 }
@@ -390,6 +403,8 @@ struct WgpuResources {
     pipelines: WgpuPipelines,
     effect_pipelines: HashMap<u64, wgpu::RenderPipeline>,
     failed_effect_pipelines: HashSet<u64>,
+    backdrop_effect_pipelines: HashMap<u64, wgpu::RenderPipeline>,
+    failed_backdrop_effect_pipelines: HashSet<u64>,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     globals_buffer: wgpu::Buffer,
@@ -765,6 +780,8 @@ impl WgpuRenderer {
             pipelines,
             effect_pipelines: HashMap::default(),
             failed_effect_pipelines: HashSet::default(),
+            backdrop_effect_pipelines: HashMap::default(),
+            failed_backdrop_effect_pipelines: HashSet::default(),
             bind_group_layouts,
             atlas_sampler,
             globals_buffer,
@@ -1141,6 +1158,123 @@ impl WgpuRenderer {
                 Err(error) => {
                     log::error!("failed to compile GPUI effect {key:016x}: {error:#}");
                     self.resources_mut().failed_effect_pipelines.insert(key);
+                }
+            }
+        }
+    }
+
+    fn create_backdrop_effect_pipeline(
+        device: &wgpu::Device,
+        layouts: &WgpuBindGroupLayouts,
+        surface_format: wgpu::TextureFormat,
+        alpha_mode: wgpu::CompositeAlphaMode,
+        shader: &BackdropShader,
+    ) -> anyhow::Result<wgpu::RenderPipeline> {
+        let source = gpui::compose_backdrop_shader_wgsl(shader);
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .map_err(|error| anyhow::anyhow!("WGSL parse error: {error}"))?;
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .map_err(|error| anyhow::anyhow!("WGSL validation error: {error}"))?;
+
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gpui_backdrop_effect_shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(source)),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gpui_backdrop_effect_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(&layouts.globals),
+                Some(&layouts.instances_with_two_textures),
+            ],
+            immediate_size: 0,
+        });
+        let blend = match alpha_mode {
+            wgpu::CompositeAlphaMode::PreMultiplied => {
+                wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
+            }
+            _ => wgpu::BlendState::ALPHA_BLENDING,
+        };
+
+        Ok(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gpui_backdrop_effect_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader_module,
+                    entry_point: Some("vs_backdrop"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_module,
+                    entry_point: Some("fs_backdrop"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            }),
+        )
+    }
+
+    fn ensure_backdrop_effect_pipelines(&mut self, scene: &Scene) {
+        let shaders = scene
+            .backdrop_blurs
+            .iter()
+            .filter_map(|backdrop| backdrop.shader.clone())
+            .collect::<Vec<_>>();
+
+        for shader in shaders {
+            let key = shader.id().as_u64();
+            if self
+                .resources()
+                .backdrop_effect_pipelines
+                .contains_key(&key)
+                || self
+                    .resources()
+                    .failed_backdrop_effect_pipelines
+                    .contains(&key)
+            {
+                continue;
+            }
+
+            let result = Self::create_backdrop_effect_pipeline(
+                &self.resources().device,
+                &self.resources().bind_group_layouts,
+                self.surface_config.format,
+                self.surface_config.alpha_mode,
+                &shader,
+            );
+            match result {
+                Ok(pipeline) => {
+                    self.resources_mut()
+                        .backdrop_effect_pipelines
+                        .insert(key, pipeline);
+                }
+                Err(error) => {
+                    log::error!("failed to compile GPUI backdrop effect {key:016x}: {error:#}");
+                    self.resources_mut()
+                        .failed_backdrop_effect_pipelines
+                        .insert(key);
                 }
             }
         }
@@ -1710,6 +1844,8 @@ impl WgpuRenderer {
             );
             resources.effect_pipelines.clear();
             resources.failed_effect_pipelines.clear();
+            resources.backdrop_effect_pipelines.clear();
+            resources.failed_backdrop_effect_pipelines.clear();
         }
     }
 
@@ -1793,6 +1929,7 @@ impl WgpuRenderer {
 
         self.atlas.before_frame();
         self.ensure_effect_pipelines(scene);
+        self.ensure_backdrop_effect_pipelines(scene);
 
         let frame = match self.resources().surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
@@ -3068,14 +3205,41 @@ impl WgpuRenderer {
                     depth_stencil_attachment: None,
                     ..Default::default()
                 });
-                if !self.draw_instances_with_texture(
-                    bytemuck::bytes_of(&composite),
-                    1,
-                    result_view,
-                    &resources.pipelines.backdrop_composite,
-                    instance_offset,
-                    &mut pass,
-                ) {
+                let did_draw = if let Some(shader) = backdrop.shader.as_ref() {
+                    if let Some(pipeline) = resources
+                        .backdrop_effect_pipelines
+                        .get(&shader.id().as_u64())
+                    {
+                        self.draw_instances_with_two_textures(
+                            bytemuck::bytes_of(&composite),
+                            1,
+                            source_view,
+                            result_view,
+                            pipeline,
+                            instance_offset,
+                            &mut pass,
+                        )
+                    } else {
+                        self.draw_instances_with_texture(
+                            bytemuck::bytes_of(&composite),
+                            1,
+                            result_view,
+                            &resources.pipelines.backdrop_composite,
+                            instance_offset,
+                            &mut pass,
+                        )
+                    }
+                } else {
+                    self.draw_instances_with_texture(
+                        bytemuck::bytes_of(&composite),
+                        1,
+                        result_view,
+                        &resources.pipelines.backdrop_composite,
+                        instance_offset,
+                        &mut pass,
+                    )
+                };
+                if !did_draw {
                     return false;
                 }
             }

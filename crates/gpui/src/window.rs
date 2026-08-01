@@ -9,10 +9,10 @@ use crate::{
     FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, PaintEffect, Path, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
-    PromptButton, PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    MouseMoveEvent, MouseUpEvent, PaintBackdropEffect, PaintEffect, Path, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
+    Priority, PromptButton, PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
@@ -3882,6 +3882,35 @@ impl Window {
             corner_radii: backdrop.corner_radii.scale(self.scale_factor()),
             blur_radius: ScaledPixels(blur_radius.0 * self.scale_factor()),
             opacity,
+            shader: None,
+            uniforms: EffectUniforms::default(),
+            time: 0.0,
+            pointer: Point { x: 0.5, y: 0.5 },
+            pointer_active: false,
+        });
+    }
+
+    /// Paints a custom shader that samples raw and blurred scene content behind it.
+    pub fn paint_backdrop_effect(&mut self, effect: PaintBackdropEffect) {
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity() * effect.opacity.clamp(0.0, 1.0);
+        if opacity == 0.0 {
+            return;
+        }
+        let blur_radius = effect.blur_radius.max(px(0.));
+        self.next_frame.scene.insert_primitive(BackdropBlur {
+            order: 0,
+            bounds: self.snap_bounds(effect.bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: effect.corner_radii.scale(self.scale_factor()),
+            blur_radius: ScaledPixels(blur_radius.0 * self.scale_factor()),
+            opacity,
+            shader: Some(effect.shader),
+            uniforms: effect.uniforms,
+            time: effect.time,
+            pointer: effect.pointer,
+            pointer_active: effect.pointer_active,
         });
     }
 
