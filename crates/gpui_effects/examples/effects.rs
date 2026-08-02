@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     Animation, AnimationExt, App, Context, Image, ImageFormat, Render, Window, WindowOptions, div,
@@ -7,20 +10,33 @@ use gpui::{
 use gpui_effects::{album_glow, album_ripples, aurora, color_orbs, plasma};
 use gpui_platform::application;
 
-struct EffectsViewer;
+struct EffectsViewer {
+    album_cover: Arc<Image>,
+    started_at: Instant,
+}
+
+impl EffectsViewer {
+    fn new() -> Self {
+        Self {
+            album_cover: Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                include_bytes!("album-cover.svg").to_vec(),
+            )),
+            started_at: Instant::now(),
+        }
+    }
+}
 
 impl Render for EffectsViewer {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        window.request_animation_frame();
         let colors = [
             gpui::rgb(0xff2d55),
             gpui::rgb(0x5856d6),
             gpui::rgb(0x00d4aa),
             gpui::rgb(0xffcc00),
         ];
-        let album_cover = Arc::new(Image::from_bytes(
-            ImageFormat::Svg,
-            include_bytes!("album-cover.svg").to_vec(),
-        ));
+        let elapsed = self.started_at.elapsed().as_secs_f32();
 
         div()
             .size_full()
@@ -32,18 +48,14 @@ impl Render for EffectsViewer {
             .text_color(gpui::white())
             .child(effect_row(
                 "Album glow",
-                album_glow(album_cover.clone())
+                album_glow(self.album_cover.clone())
+                    .time(elapsed)
                     .size_full()
-                    .rounded_xl()
-                    .with_animation(
-                        "album-glow",
-                        Animation::new(Duration::from_secs(12)).repeat(),
-                        |effect, time| effect.time(time),
-                    ),
+                    .rounded_xl(),
             ))
             .child(effect_row(
                 "Album ripples",
-                album_ripples(album_cover)
+                album_ripples(self.album_cover.clone())
                     .size_full()
                     .rounded_xl()
                     .with_animation(
@@ -97,7 +109,9 @@ fn effect_row(label: &'static str, effect: impl IntoElement) -> impl IntoElement
 
 fn main() {
     application().run(|cx: &mut App| {
-        cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| EffectsViewer))
-            .expect("failed to open effects example");
+        cx.open_window(WindowOptions::default(), |_, cx| {
+            cx.new(|_| EffectsViewer::new())
+        })
+        .expect("failed to open effects example");
     });
 }

@@ -132,10 +132,11 @@ impl Effect {
         self
     }
 
-    /// Sets the normalized animation time supplied to the shader.
+    /// Sets the animation time supplied to the shader.
     ///
-    /// Built-in effects are periodic over `0.0..=1.0`, making them suitable
-    /// for GPUI's repeating animation wrapper.
+    /// Periodic effects conventionally use a normalized `0.0..=1.0` value.
+    /// Continuous effects may instead accept monotonically increasing elapsed
+    /// seconds; see the effect's documentation for its time convention.
     pub fn time(mut self, time: f32) -> Self {
         self.time = time;
         self
