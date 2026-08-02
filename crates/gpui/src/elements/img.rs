@@ -143,6 +143,14 @@ impl Default for ImageStyle {
     }
 }
 
+fn image_paint_bounds(
+    object_fit: &ObjectFit,
+    clip_bounds: Bounds<Pixels>,
+    image_size: crate::Size<crate::DevicePixels>,
+) -> (Bounds<Pixels>, Bounds<Pixels>) {
+    (object_fit.get_bounds(clip_bounds, image_size), clip_bounds)
+}
+
 /// Style an image element.
 pub trait StyledImage: Sized {
     /// Get a mutable [ImageStyle] from the element.
@@ -482,17 +490,19 @@ impl Element for Img {
                     if data.frame_count() == 0 {
                         return;
                     }
-                    let new_bounds = self
-                        .style
-                        .object_fit
-                        .get_bounds(bounds, data.size(layout_state.frame_index));
+                    let (image_bounds, clip_bounds) = image_paint_bounds(
+                        &self.style.object_fit,
+                        bounds,
+                        data.size(layout_state.frame_index),
+                    );
                     let corner_radii = style
                         .corner_radii
                         .to_pixels(window.rem_size())
-                        .clamp_radii_for_quad_size(new_bounds.size);
+                        .clamp_radii_for_quad_size(clip_bounds.size);
                     window
-                        .paint_image(
-                            new_bounds,
+                        .paint_image_with_clip(
+                            image_bounds,
+                            clip_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
@@ -806,7 +816,7 @@ impl From<image::ImageError> for ImageCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
+    use crate::{DevicePixels, ParentElement as _, TestAppContext, canvas, div, point, px, size};
     use image::{Frame, ImageBuffer, Rgba};
 
     const TEST_IMG_ID: &str = "test-img";
@@ -816,6 +826,22 @@ mod tests {
         Arc::new(RenderImage::new(SmallVec::from_iter(
             (0..frame_count).map(|_| frame.clone()),
         )))
+    }
+
+    #[test]
+    fn cover_keeps_container_bounds_as_rounded_clip() {
+        let clip_bounds = Bounds {
+            origin: point(px(20.), px(30.)),
+            size: size(px(100.), px(100.)),
+        };
+        let image_size = size(DevicePixels::from(200), DevicePixels::from(100));
+
+        let (image_bounds, resolved_clip_bounds) =
+            image_paint_bounds(&ObjectFit::Cover, clip_bounds, image_size);
+
+        assert_eq!(resolved_clip_bounds, clip_bounds);
+        assert_eq!(image_bounds.origin, point(px(-30.), px(30.)));
+        assert_eq!(image_bounds.size, size(px(200.), px(100.)));
     }
 
     /// Overwrites the cached `frame_index` of the sibling `img` during paint.

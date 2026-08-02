@@ -916,7 +916,7 @@ fragment float4 polychrome_sprite_fragment(
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float distance =
-      quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
+      quad_sdf(input.local_position, sprite.clip_bounds, sprite.corner_radii);
 
   float4 color = sample;
   if (sprite.grayscale) {

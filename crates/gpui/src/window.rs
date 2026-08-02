@@ -4319,6 +4319,7 @@ impl Window {
                 pad: 0,
                 grayscale: false.into(),
                 bounds,
+                clip_bounds: bounds,
                 corner_radii: Default::default(),
                 content_mask,
                 tile,
@@ -4495,6 +4496,7 @@ impl Window {
             pad: 0,
             grayscale: false.into(),
             bounds: final_bounds,
+            clip_bounds: final_bounds,
             content_mask: self.snapped_content_mask(),
             corner_radii: corner_radii.scale(self.scale_factor()),
             tile,
@@ -4505,9 +4507,9 @@ impl Window {
     }
 
     /// Paint an image into the scene for the next frame at the current z-index.
-    /// This method will panic if the frame_index is not valid
     ///
-    /// This method should only be called as part of the paint phase of element drawing.
+    /// The image geometry is also used as its clip geometry. Use
+    /// [`Self::paint_image_with_clip`] when those regions need to differ.
     pub fn paint_image(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -4516,9 +4518,31 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_with_clip(bounds, bounds, corner_radii, data, frame_index, grayscale)
+    }
+
+    /// Paint an image into the scene with independent texture and clip bounds.
+    ///
+    /// `image_bounds` controls the texture geometry and sampling. `clip_bounds`
+    /// and `corner_radii` control the visible image region independently. This
+    /// distinction allows an image fitted with [`ObjectFit::Cover`](crate::ObjectFit::Cover)
+    /// to retain the rounded corners of its element bounds.
+    /// This method will panic if the frame_index is not valid
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_image_with_clip(
+        &mut self,
+        image_bounds: Bounds<Pixels>,
+        clip_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
-        let bounds = self.snap_bounds(bounds);
+        let bounds = self.snap_bounds(image_bounds);
+        let clip_bounds = self.snap_bounds(clip_bounds);
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
@@ -4536,7 +4560,8 @@ impl Window {
                 )))
             })?
             .expect("Callback above only returns Some");
-        let content_mask = self.snapped_content_mask();
+        let mut content_mask = self.snapped_content_mask();
+        content_mask.bounds = content_mask.bounds.intersect(&clip_bounds);
         let corner_radii = corner_radii.scale(self.scale_factor());
         let opacity = self.element_opacity();
 
@@ -4545,6 +4570,7 @@ impl Window {
             pad: 0,
             grayscale: grayscale.into(),
             bounds,
+            clip_bounds,
             content_mask,
             corner_radii,
             tile,

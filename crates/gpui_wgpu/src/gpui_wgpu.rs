@@ -446,6 +446,55 @@ fn effect(input: EffectInput, params: EffectParams) -> vec4<f32> {
             shader_struct_span(&module, "SurfaceParams") as usize,
             std::mem::size_of::<super::wgpu_renderer::SurfaceParams>()
         );
+        assert_eq!(
+            shader_struct_offsets(&module, "PolychromeSprite"),
+            vec![
+                (
+                    "order".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, order) as u32,
+                ),
+                (
+                    "pad".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, pad) as u32,
+                ),
+                (
+                    "grayscale".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, grayscale) as u32,
+                ),
+                (
+                    "opacity".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, opacity) as u32,
+                ),
+                (
+                    "bounds".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, bounds) as u32,
+                ),
+                (
+                    "clip_bounds".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, clip_bounds) as u32,
+                ),
+                (
+                    "content_mask".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, content_mask) as u32,
+                ),
+                (
+                    "corner_radii".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, corner_radii) as u32,
+                ),
+                (
+                    "tile".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, tile) as u32,
+                ),
+                (
+                    "transformation".into(),
+                    std::mem::offset_of!(gpui::PolychromeSprite, transformation) as u32,
+                ),
+            ]
+        );
+        assert_eq!(
+            shader_struct_span(&module, "PolychromeSprite") as usize,
+            std::mem::size_of::<gpui::PolychromeSprite>()
+        );
     }
 
     #[test]
