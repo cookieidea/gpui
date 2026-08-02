@@ -6,10 +6,16 @@
 //!
 //! See [`glass_guide`] for the complete liquid-glass rendering model,
 //! parameter reference, recipes, and troubleshooting guide.
+//! See [`timed_text_guide`] for karaoke timelines, grouped emphasis, and
+//! playback-clock integration.
 
 /// Complete usage guide for [`GlassPanel`](crate::GlassPanel).
 #[doc = include_str!("../docs/liquid_glass.md")]
 pub mod glass_guide {}
+
+/// Usage guide for [`TimedText`](crate::TimedText).
+#[doc = include_str!("../docs/timed_text.md")]
+pub mod timed_text_guide {}
 
 mod backdrop;
 mod builtins;
@@ -20,6 +26,7 @@ mod masked_builtins;
 mod masked_effect;
 mod masked_fill;
 mod motion;
+mod timed_text;
 
 pub use backdrop::*;
 pub use builtins::*;
@@ -39,3 +46,4 @@ pub use motion::{
     MotionEasing, MotionEvent, MotionFrame, MotionId, MotionItem, MotionLayer, MotionOptions,
     MotionPath, MotionPolicy,
 };
+pub use timed_text::{TimedText, TimedTextEmphasis, TimedTextUnit};

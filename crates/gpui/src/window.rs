@@ -16,10 +16,10 @@ use crate::{
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
-    transparent_black,
+    TextStyleRefinement, ThermalState, Transformation, TransformationMatrix, Underline,
+    UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls,
+    WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler,
+    px, rems, size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -4085,10 +4085,38 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_with_transformation(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            color,
+            Transformation::default(),
+            origin,
+        )
+    }
+
+    /// Paints a shaped monochrome glyph with a GPU transformation.
+    ///
+    /// `anchor` is expressed in logical window pixels and can be shared by a
+    /// group of glyphs. The transformation affects painting only; text layout
+    /// and hit testing remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_glyph_with_transformation(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        transformation: Transformation,
+        anchor: Point<Pixels>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
+        let transformation = transformation.into_matrix(anchor, scale_factor);
         let glyph_origin = origin.scale(scale_factor);
 
         let quantized_origin = Point::new(
@@ -4104,7 +4132,8 @@ impl Window {
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
         // Arbitrary per-pixel fills are incompatible with LCD subpixel text,
         // whose three coverage channels assume one constant foreground color.
-        let subpixel_rendering = self.masked_paint_stack.is_empty()
+        let subpixel_rendering = transformation == TransformationMatrix::unit()
+            && self.masked_paint_stack.is_empty()
             && self.should_use_subpixel_rendering(font_id, font_size);
         let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
@@ -4145,7 +4174,7 @@ impl Window {
                     order: 0,
                     bounds,
                     effect_bounds: self.snap_bounds(*effect_bounds),
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                     content_mask,
                     shader: shader.clone(),
                     uniforms: *uniforms,
@@ -4179,7 +4208,7 @@ impl Window {
                     background,
                     background_bounds,
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             } else {
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
@@ -4190,7 +4219,7 @@ impl Window {
                     background,
                     background_bounds,
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             }
         }
@@ -4231,9 +4260,30 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
     ) -> Result<()> {
+        self.paint_emoji_with_transformation(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            Transformation::default(),
+            origin,
+        )
+    }
+
+    /// Paints a shaped emoji glyph with a GPU transformation around `anchor`.
+    pub fn paint_emoji_with_transformation(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        transformation: Transformation,
+        anchor: Point<Pixels>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        let transformation = transformation.into_matrix(anchor, scale_factor);
         let glyph_origin = origin.scale(scale_factor);
         let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
         let params = RenderGlyphParams {
@@ -4273,7 +4323,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
-                transformation: TransformationMatrix::default(),
+                transformation,
             });
         }
         Ok(())

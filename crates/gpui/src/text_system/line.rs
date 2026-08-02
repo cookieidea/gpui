@@ -1,11 +1,37 @@
 use crate::{
     App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
-    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
+    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, Transformation,
+    UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
+
+/// A paint-only transformation for glyphs in one UTF-8 byte range.
+///
+/// `anchor` is relative to the shaped line's aligned top-left origin. Every
+/// glyph in the range shares it, allowing a word to scale or rotate as one
+/// object without changing surrounding text layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlyphRunTransform {
+    /// UTF-8 byte range covered by this visual transformation.
+    pub range: Range<usize>,
+    /// Line-local transformation anchor.
+    pub anchor: Point<Pixels>,
+    /// GPU transformation applied at paint time.
+    pub transformation: Transformation,
+}
+
+impl GlyphRunTransform {
+    /// Creates a visual transformation for one shaped text range.
+    pub fn new(range: Range<usize>, anchor: Point<Pixels>, transformation: Transformation) -> Self {
+        Self {
+            range,
+            anchor,
+            transformation,
+        }
+    }
+}
 
 /// Pre-computed glyph data for efficient painting without per-glyph cache lookups.
 ///
@@ -97,11 +123,41 @@ impl ShapedLine {
             align_width,
             &self.decoration_runs,
             &[],
+            &[],
             window,
             cx,
         )?;
 
         Ok(())
+    }
+
+    /// Paints this line with paint-only transformations on selected ranges.
+    ///
+    /// Ranges use UTF-8 byte indices from the original shaped string and
+    /// should be non-overlapping. The first matching range wins.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_with_transforms(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        transforms: &[GlyphRunTransform],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        paint_line(
+            origin,
+            &self.layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &[],
+            transforms,
+            window,
+            cx,
+        )
     }
 
     /// Paint the background of the line to the window.
@@ -293,6 +349,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            &[],
             window,
             cx,
         )?;
@@ -339,6 +396,7 @@ fn paint_line(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    transforms: &[GlyphRunTransform],
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -370,6 +428,7 @@ fn paint_line(
             ),
             origin.y,
         );
+        let aligned_line_origin = glyph_origin;
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         let mut first_glyph_x = origin.x;
@@ -524,16 +583,41 @@ fn paint_line(
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     let vertical_offset = point(px(0.0), glyph.position.y);
+                    let paint_origin = glyph_origin + baseline_offset + vertical_offset;
+                    let transform = transforms
+                        .iter()
+                        .find(|transform| transform.range.contains(&glyph.index));
                     if glyph.is_emoji {
-                        window.paint_emoji(
-                            glyph_origin + baseline_offset + vertical_offset,
+                        if let Some(transform) = transform {
+                            window.paint_emoji_with_transformation(
+                                paint_origin,
+                                run.font_id,
+                                glyph.id,
+                                layout.font_size,
+                                transform.transformation,
+                                aligned_line_origin + transform.anchor,
+                            )?;
+                        } else {
+                            window.paint_emoji(
+                                paint_origin,
+                                run.font_id,
+                                glyph.id,
+                                layout.font_size,
+                            )?;
+                        }
+                    } else if let Some(transform) = transform {
+                        window.paint_glyph_with_transformation(
+                            paint_origin,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
+                            color,
+                            transform.transformation,
+                            aligned_line_origin + transform.anchor,
                         )?;
                     } else {
                         window.paint_glyph(
-                            glyph_origin + baseline_offset + vertical_offset,
+                            paint_origin,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
