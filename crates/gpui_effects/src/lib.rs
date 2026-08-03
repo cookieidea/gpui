@@ -4,13 +4,12 @@
 //! native MSL and HLSL implementations through [`gpui::EffectShader`] when an
 //! effect needs platform-specific tuning.
 //!
-//! See [`glass_guide`] for the complete liquid-glass rendering model,
-//! parameter reference, recipes, and troubleshooting guide.
+//! See [`glass_guide`] for frosted and gel glass materials.
 //! See [`timed_text_guide`] for karaoke timelines, grouped emphasis, and
 //! playback-clock integration.
 
 /// Complete usage guide for [`GlassPanel`](crate::GlassPanel).
-#[doc = include_str!("../docs/liquid_glass.md")]
+#[doc = include_str!("../docs/glass.md")]
 pub mod glass_guide {}
 
 /// Usage guide for [`TimedText`](crate::TimedText).
@@ -38,7 +37,7 @@ pub use flip::{
     FlipRequestResult, FlipSlot, FlipStyle, FlipUpdateResult, flip_shader, flip_shader_for,
     rigid_flip_shader, soft_flip_shader,
 };
-pub use glass::{GlassMaterial, GlassPanel, glass_panel};
+pub use glass::{GlassMaterial, GlassPanel, GlassStyle, glass_panel};
 pub use masked_builtins::{spectrum_mask_shader, spectrum_svg, spectrum_text};
 pub use masked_effect::{MaskedEffect, effect_svg, effect_text, masked_effect};
 pub use masked_fill::{MaskedFill, gradient_svg, gradient_text, masked_fill};

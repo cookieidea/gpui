@@ -165,24 +165,6 @@ TimedText::new(text, units).with_animation(
 )
 ```
 
-## Using timed text with liquid glass
-
-`TimedText` implements `IntoElement` and can be placed directly inside a
-`GlassPanel`:
-
-```rust,ignore
-GlassPanel::new()
-    .child(
-        TimedText::new(text, units)
-            .position(playback_position)
-            .text_size(px(32.)),
-    )
-```
-
-As a child of the panel, text is painted above the glass and remains crisp.
-Content painted before the panel becomes part of the backdrop and is affected
-by the glass optics.
-
 ## Example
 
 The example contains synchronized Chinese, English, and mixed-script lines.

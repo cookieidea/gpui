@@ -3076,13 +3076,18 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn liquid_glass_translates_and_compiles_for_directx() {
-        let source = translate_backdrop_to_hlsl(&gpui_effects::liquid_glass_shader())
-            .expect("liquid glass should translate to HLSL");
-        compile_hlsl(&source, "vs_backdrop", "vs_5_0")
-            .expect("liquid glass vertex shader should compile");
-        compile_hlsl(&source, "fs_backdrop", "ps_5_0")
-            .expect("liquid glass fragment shader should compile");
+    fn glass_backdrops_translate_and_compile_for_directx() {
+        for (name, shader) in [
+            ("frosted glass", gpui_effects::frosted_glass_shader()),
+            ("gel glass", gpui_effects::gel_glass_shader()),
+        ] {
+            let source = translate_backdrop_to_hlsl(&shader)
+                .unwrap_or_else(|error| panic!("{name} should translate to HLSL: {error}"));
+            compile_hlsl(&source, "vs_backdrop", "vs_5_0")
+                .unwrap_or_else(|error| panic!("{name} vertex shader should compile: {error}"));
+            compile_hlsl(&source, "fs_backdrop", "ps_5_0")
+                .unwrap_or_else(|error| panic!("{name} fragment shader should compile: {error}"));
+        }
     }
 }
 

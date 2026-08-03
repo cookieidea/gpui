@@ -1,3 +1,4 @@
+// Elastic gel-glass material retained for playful, deformable surfaces.
 fn glass_safe_normalize(value: vec2<f32>) -> vec2<f32> {
     let magnitude = length(value);
     if (magnitude < 0.0001) {

@@ -7,8 +7,8 @@ use gpui::{
 };
 
 use crate::{
-    LIQUID_GLASS_GEOMETRY_SLOT, LIQUID_GLASS_INTERACTION_SLOT, LIQUID_GLASS_LIGHT_SLOT,
-    LIQUID_GLASS_OPTICS_SLOT, LIQUID_GLASS_SURFACE_SLOT, LIQUID_GLASS_TINT_SLOT, liquid_glass,
+    GLASS_GEOMETRY_SLOT, GLASS_INTERACTION_SLOT, GLASS_LIGHT_SLOT, GLASS_OPTICS_SLOT,
+    GLASS_SURFACE_SLOT, GLASS_TINT_SLOT, backdrop_effect, frosted_glass_shader, gel_glass_shader,
 };
 
 const GLASS_OVERSCAN: f32 = 32.0;
@@ -69,22 +69,31 @@ impl Default for GlassInteractionState {
 }
 
 impl GlassInteractionState {
-    fn set_pressed(&mut self, pressed: bool, position: Point<Pixels>) {
-        self.target_pressure = if pressed { 1.0 } else { 0.0 };
+    fn set_pressed(&mut self, pressed: bool, position: Point<Pixels>, style: GlassStyle) {
+        self.target_pressure = if style == GlassStyle::Gel && pressed {
+            1.0
+        } else {
+            0.0
+        };
         self.last_pointer = Some(position);
         self.last_pointer_at = Instant::now();
     }
 
-    fn record_pointer(&mut self, position: Point<Pixels>) {
+    fn record_pointer(&mut self, position: Point<Pixels>, style: GlassStyle) {
         let now = Instant::now();
-        if self.target_pressure < 0.5 {
-            self.last_pointer = Some(position);
-            self.last_pointer_at = now;
-            return;
-        }
         let elapsed = now
             .saturating_duration_since(self.last_pointer_at)
             .as_secs_f32();
+        self.record_pointer_by(position, elapsed, style);
+        self.last_pointer_at = now;
+    }
+
+    fn record_pointer_by(&mut self, position: Point<Pixels>, elapsed: f32, style: GlassStyle) {
+        if style != GlassStyle::Gel || self.target_pressure < 0.5 {
+            self.pointer_velocity = Point::default();
+            self.last_pointer = Some(position);
+            return;
+        }
         if let Some(previous) = self.last_pointer
             && (0.001..=0.12).contains(&elapsed)
         {
@@ -97,37 +106,55 @@ impl GlassInteractionState {
             self.pointer_velocity.y += (measured.y - self.pointer_velocity.y) * blend;
         }
         self.last_pointer = Some(position);
-        self.last_pointer_at = now;
     }
 
-    fn advance(&mut self) -> GlassInteractionFrame {
+    fn advance(&mut self, style: GlassStyle) -> GlassInteractionFrame {
         let now = Instant::now();
         let elapsed = now
             .saturating_duration_since(self.last_frame_at)
             .as_secs_f32()
             .clamp(0.0, 1.0 / 20.0);
         self.last_frame_at = now;
-        self.advance_by(elapsed)
+        self.advance_by(elapsed, style)
     }
 
-    fn advance_by(&mut self, elapsed: f32) -> GlassInteractionFrame {
+    fn advance_by(&mut self, elapsed: f32, style: GlassStyle) -> GlassInteractionFrame {
         let elapsed = elapsed.clamp(0.0, 1.0 / 20.0);
+        if style != GlassStyle::Gel {
+            self.pressure = 0.0;
+            self.pressure_velocity = 0.0;
+            self.target_pressure = 0.0;
+            self.pointer_velocity = Point::default();
+            return GlassInteractionFrame::default();
+        }
 
-        // Slightly under-damped spring: one restrained overshoot on release.
+        let stiffness = 185.0;
+        let damping = 21.0;
+        let velocity_decay = 6.5;
         let acceleration =
-            (self.target_pressure - self.pressure) * 185.0 - self.pressure_velocity * 21.0;
+            (self.target_pressure - self.pressure) * stiffness - self.pressure_velocity * damping;
         self.pressure_velocity += acceleration * elapsed;
         self.pressure += self.pressure_velocity * elapsed;
         self.pressure = self.pressure.clamp(-0.12, 1.08);
 
-        let velocity_decay = (-elapsed * 6.5).exp();
-        self.pointer_velocity.x *= velocity_decay;
-        self.pointer_velocity.y *= velocity_decay;
+        let pointer_decay = (-elapsed * velocity_decay).exp();
+        self.pointer_velocity.x *= pointer_decay;
+        self.pointer_velocity.y *= pointer_decay;
         GlassInteractionFrame {
             pressure: self.pressure,
             velocity: self.pointer_velocity,
         }
     }
+}
+
+/// Material style and interaction model used by [`GlassPanel`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GlassStyle {
+    /// Stable diffuse glass whose backdrop is scattered rather than lensed.
+    #[default]
+    Frosted,
+    /// Continuously animated elastic glass with pronounced deformation.
+    Gel,
 }
 
 /// Optical density presets for [`GlassPanel`].
@@ -143,16 +170,31 @@ pub enum GlassMaterial {
 }
 
 impl GlassMaterial {
-    fn parameters(self) -> (Pixels, [f32; 4], [f32; 4]) {
-        match self {
-            Self::Thin => (px(10.0), [10.0, 1.0, 0.62, 1.08], [0.13, 0.34, 0.64, 0.72]),
-            Self::Regular => (px(14.0), [15.0, 1.8, 0.56, 1.12], [0.18, 0.52, 0.76, 1.0]),
-            Self::Thick => (px(22.0), [19.0, 2.4, 0.42, 1.14], [0.22, 0.62, 0.82, 0.86]),
+    fn parameters(self, style: GlassStyle) -> (Pixels, [f32; 4], [f32; 4]) {
+        match (style, self) {
+            (GlassStyle::Frosted, Self::Thin) => {
+                (px(8.0), [0.0, 0.0, 0.34, 1.04], [0.12, 0.30, 0.0, 0.0])
+            }
+            (GlassStyle::Frosted, Self::Regular) => {
+                (px(14.0), [0.0, 0.0, 0.18, 1.02], [0.16, 0.42, 0.0, 0.0])
+            }
+            (GlassStyle::Frosted, Self::Thick) => {
+                (px(22.0), [0.0, 0.0, 0.08, 1.0], [0.20, 0.55, 0.0, 0.0])
+            }
+            (GlassStyle::Gel, Self::Thin) => {
+                (px(10.0), [10.0, 1.0, 0.62, 1.08], [0.13, 0.34, 0.64, 0.72])
+            }
+            (GlassStyle::Gel, Self::Regular) => {
+                (px(14.0), [15.0, 1.8, 0.56, 1.12], [0.18, 0.52, 0.76, 1.0])
+            }
+            (GlassStyle::Gel, Self::Thick) => {
+                (px(22.0), [19.0, 2.4, 0.42, 1.14], [0.22, 0.62, 0.82, 0.86])
+            }
         }
     }
 }
 
-/// A container backed by the dynamic liquid-glass backdrop effect.
+/// A container backed by frosted or elastic gel glass.
 ///
 /// Content is painted after the material, while the effect itself samples only
 /// scene content already behind the panel. On renderers without backdrop
@@ -163,10 +205,11 @@ impl GlassMaterial {
 pub struct GlassPanel {
     div: Div,
     children: Vec<AnyElement>,
+    style: GlassStyle,
     material: GlassMaterial,
     blur_radius: Option<Pixels>,
     radius: AbsoluteLength,
-    tint: Hsla,
+    tint: Option<Hsla>,
     edge_color: Hsla,
     animated: bool,
     animation_id: ElementId,
@@ -187,15 +230,16 @@ impl Default for GlassPanel {
 }
 
 impl GlassPanel {
-    /// Creates a regular, animated glass panel.
+    /// Creates regular frosted glass.
     pub fn new() -> Self {
         Self {
             div: div().relative().rounded(px(16.0)),
             children: Vec::new(),
+            style: GlassStyle::Frosted,
             material: GlassMaterial::Regular,
             blur_radius: None,
             radius: px(16.0).into(),
-            tint: hsla(0.58, 0.55, 0.96, 0.07),
+            tint: None,
             edge_color: hsla(0.0, 0.0, 1.0, 0.78),
             animated: true,
             animation_id: "gpui-liquid-glass".into(),
@@ -210,6 +254,22 @@ impl GlassPanel {
         }
     }
 
+    /// Creates stable diffuse glass with backdrop scattering and blur.
+    pub fn frosted() -> Self {
+        Self::new().style(GlassStyle::Frosted)
+    }
+
+    /// Creates continuously animated elastic gel glass.
+    pub fn gel() -> Self {
+        Self::new().style(GlassStyle::Gel)
+    }
+
+    /// Selects the frosted or elastic gel material model.
+    pub fn style(mut self, style: GlassStyle) -> Self {
+        self.style = style;
+        self
+    }
+
     /// Assigns the standard GPUI element id without wrapping the component.
     ///
     /// `GlassPanel` is a [`RenderOnce`] component rather than a low-level
@@ -217,7 +277,7 @@ impl GlassPanel {
     /// would produce an unusable `Stateful<GlassPanel>`. This inherent method
     /// forwards the id to the internal [`Div`] and intentionally returns
     /// `Self`, preserving component-specific and [`ParentElement`] chaining.
-    /// The id also isolates this panel's press and pointer interaction state.
+    /// The id also isolates Gel press and pointer interaction state.
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.div.interactivity().element_id = Some(id.into());
         self
@@ -254,7 +314,7 @@ impl GlassPanel {
     /// Its alpha is used as shader tint strength unless [`Self::shader_tint`]
     /// is set.
     pub fn tint(mut self, tint: impl Into<Hsla>) -> Self {
-        self.tint = tint.into();
+        self.tint = Some(tint.into());
         self
     }
 
@@ -268,11 +328,10 @@ impl GlassPanel {
         self
     }
 
-    /// Enables or disables continuous time- and pointer-driven animation.
+    /// Enables or disables Gel's time- and pointer-driven response.
     ///
-    /// Disabling animation zeros the shader's pointer-response and ambient
-    /// motion parameters. Explicit translation velocity can still deform the
-    /// panel.
+    /// Frosted is time-independent; its pixels still update when the live
+    /// backdrop or panel geometry changes.
     pub fn animated(mut self, animated: bool) -> Self {
         self.animated = animated;
         self
@@ -298,16 +357,17 @@ impl GlassPanel {
         self
     }
 
-    /// Overrides `[edge_width, highlight, pointer_response, ambient_motion]`.
+    /// Overrides `[edge_width, highlight, pointer_response, style_parameter]`.
     ///
     /// All four values are dimensionless material coefficients:
     ///
     /// - `edge_width` is relative to the material's internal edge thickness
     ///   and is clamped to `0.001..=0.5` by the shader;
     /// - `highlight` multiplies refractive edge light;
-    /// - `pointer_response` scales press-driven local refraction;
-    /// - `ambient_motion` scales contour waves and interior flow, then is
-    ///   multiplied by [`Self::wave_strength`].
+    /// - `pointer_response` scales Gel's press-driven local refraction and is
+    ///   ignored by Frosted;
+    /// - `style_parameter` controls Gel's continuous contour/interior flow.
+    ///   Frosted ignores it. [`Self::wave_strength`] scales it for Gel.
     pub fn surface(mut self, value: [f32; 4]) -> Self {
         self.surface = Some(value);
         self
@@ -331,10 +391,9 @@ impl GlassPanel {
         self
     }
 
-    /// Scales ambient animated surface flow and contour motion.
+    /// Scales Gel's continuous material motion.
     ///
-    /// Zero removes the default wave without disabling explicit translation
-    /// inertia. Negative values are clamped to zero.
+    /// Frosted ignores this setting. Negative values are clamped to zero.
     pub fn wave_strength(mut self, strength: f32) -> Self {
         self.wave_strength = strength.max(0.0);
         self
@@ -355,8 +414,8 @@ impl GlassPanel {
     ///
     /// Pointer motion describes interaction across the surface, while this
     /// value describes movement of the glass body itself. Draggable or
-    /// spring-animated callers should update it every frame so the leading
-    /// edge stretches and the trailing edge lags behind.
+    /// spring-animated Gel callers should update it every frame. Frosted and
+    /// Frosted ignores it.
     /// Around 600 px/s reaches the reference motion strength; larger values
     /// are normalized without changing direction.
     pub fn translation_velocity(mut self, velocity: Point<f32>) -> Self {
@@ -394,9 +453,10 @@ impl IntoElement for GlassPanel {
 
 impl RenderOnce for GlassPanel {
     fn render(mut self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
-        let (preset_blur_radius, preset_optics, preset_surface) = self.material.parameters();
+        let (preset_blur_radius, preset_optics, preset_surface) =
+            self.material.parameters(self.style);
         let blur_radius = self.blur_radius.unwrap_or(preset_blur_radius);
-        let should_animate = self.animated && window.supports_backdrop_blur();
+        let backdrop_supported = window.supports_backdrop_blur();
         let interaction_id = self
             .interactivity()
             .element_id
@@ -404,28 +464,41 @@ impl RenderOnce for GlassPanel {
             .unwrap_or_else(|| self.animation_id.clone());
         let interaction =
             window.use_keyed_state(interaction_id, cx, |_, _| GlassInteractionState::default());
-        let interaction_frame = interaction.update(cx, |state, _| state.advance());
-        let translation_velocity = normalize_translation_velocity(self.translation_velocity);
+        let interaction_frame = interaction.update(cx, |state, _| state.advance(self.style));
+        let translation_velocity = if self.style == GlassStyle::Gel {
+            normalize_translation_velocity(self.translation_velocity)
+        } else {
+            Point::default()
+        };
         let (material_velocity, material_speed) = clamp_unit_velocity(Point {
             x: interaction_frame.velocity.x + translation_velocity.x,
             y: interaction_frame.velocity.y + translation_velocity.y,
         });
-        let tint: Rgba = self.tint.into();
+        let tint: Rgba = self
+            .tint
+            .unwrap_or_else(|| match self.style {
+                GlassStyle::Frosted => hsla(0.58, 0.45, 0.96, 0.10),
+                GlassStyle::Gel => hsla(0.58, 0.55, 0.96, 0.055),
+            })
+            .into();
         let edge_light: Rgba = self.edge_color.into();
         let mut optics = self.optics.unwrap_or(preset_optics);
         optics[0] *= self.deformation;
         optics[1] *= self.deformation;
         let mut surface = self.surface.unwrap_or(preset_surface);
-        surface[3] *= self.wave_strength;
+        if self.style == GlassStyle::Gel {
+            surface[3] *= self.wave_strength;
+        }
+        let should_animate = self.animated && backdrop_supported && self.style == GlassStyle::Gel;
         let mut uniforms = EffectUniforms::new()
-            .with_slot(LIQUID_GLASS_OPTICS_SLOT, optics)
-            .with_slot(LIQUID_GLASS_SURFACE_SLOT, surface)
+            .with_slot(GLASS_OPTICS_SLOT, optics)
+            .with_slot(GLASS_SURFACE_SLOT, surface)
             .with_slot(
-                LIQUID_GLASS_TINT_SLOT,
+                GLASS_TINT_SLOT,
                 self.shader_tint.unwrap_or([tint.r, tint.g, tint.b, tint.a]),
             )
             .with_slot(
-                LIQUID_GLASS_GEOMETRY_SLOT,
+                GLASS_GEOMETRY_SLOT,
                 [
                     GLASS_OVERSCAN,
                     self.radius.to_pixels(window.rem_size()).as_f32(),
@@ -434,7 +507,7 @@ impl RenderOnce for GlassPanel {
                 ],
             )
             .with_slot(
-                LIQUID_GLASS_INTERACTION_SLOT,
+                GLASS_INTERACTION_SLOT,
                 [
                     interaction_frame.pressure,
                     material_velocity.x,
@@ -443,17 +516,22 @@ impl RenderOnce for GlassPanel {
                 ],
             )
             .with_slot(
-                LIQUID_GLASS_LIGHT_SLOT,
+                GLASS_LIGHT_SLOT,
                 [edge_light.r, edge_light.g, edge_light.b, edge_light.a],
             );
-        if !should_animate {
-            let mut surface = uniforms.slots()[LIQUID_GLASS_SURFACE_SLOT];
+        if (self.style == GlassStyle::Gel && !self.animated) || !backdrop_supported {
+            let mut surface = uniforms.slots()[GLASS_SURFACE_SLOT];
             surface[2] = 0.0;
             surface[3] = 0.0;
-            uniforms.set_slot(LIQUID_GLASS_SURFACE_SLOT, surface);
+            uniforms.set_slot(GLASS_SURFACE_SLOT, surface);
+            uniforms.set_slot(GLASS_INTERACTION_SLOT, [0.0; 4]);
         }
 
-        let overlay = liquid_glass()
+        let shader = match self.style {
+            GlassStyle::Frosted => frosted_glass_shader(),
+            GlassStyle::Gel => gel_glass_shader(),
+        };
+        let overlay = backdrop_effect(shader)
             .uniforms(uniforms)
             .blur_radius(blur_radius)
             .effect_opacity(self.glass_opacity)
@@ -474,7 +552,7 @@ impl RenderOnce for GlassPanel {
             overlay.into_any_element()
         };
 
-        let fallback_alpha = if window.supports_backdrop_blur() {
+        let fallback_alpha = if backdrop_supported {
             0.0
         } else {
             self.glass_opacity
@@ -483,7 +561,7 @@ impl RenderOnce for GlassPanel {
             .absolute()
             .inset_0()
             .rounded(self.radius)
-            .bg(self.tint.opacity(fallback_alpha))
+            .bg(tint.opacity(fallback_alpha))
             .border_1()
             .border_color(self.edge_color.opacity(fallback_alpha));
 
@@ -491,31 +569,47 @@ impl RenderOnce for GlassPanel {
         let down_state = interaction.clone();
         let up_state = interaction.clone();
         let up_out_state = interaction;
+        let move_style = self.style;
+        let down_style = self.style;
+        let up_style = self.style;
+        let up_out_style = self.style;
         self.div
             .on_mouse_move(move |event, window, cx| {
+                if move_style != GlassStyle::Gel {
+                    return;
+                }
                 move_state.update(cx, |state, cx| {
-                    state.record_pointer(event.position);
+                    state.record_pointer(event.position, move_style);
                     cx.notify();
                 });
                 window.refresh();
             })
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                if down_style != GlassStyle::Gel {
+                    return;
+                }
                 down_state.update(cx, |state, cx| {
-                    state.set_pressed(true, event.position);
+                    state.set_pressed(true, event.position, down_style);
                     cx.notify();
                 });
                 window.refresh();
             })
             .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+                if up_style != GlassStyle::Gel {
+                    return;
+                }
                 up_state.update(cx, |state, cx| {
-                    state.set_pressed(false, event.position);
+                    state.set_pressed(false, event.position, up_style);
                     cx.notify();
                 });
                 window.refresh();
             })
             .on_mouse_up_out(MouseButton::Left, move |event, window, cx| {
+                if up_out_style != GlassStyle::Gel {
+                    return;
+                }
                 up_out_state.update(cx, |state, cx| {
-                    state.set_pressed(false, event.position);
+                    state.set_pressed(false, event.position, up_out_style);
                     cx.notify();
                 });
                 window.refresh();
@@ -537,29 +631,44 @@ mod tests {
 
     #[test]
     fn material_density_increases_blur() {
-        assert!(GlassMaterial::Thin.parameters().0 < GlassMaterial::Regular.parameters().0);
-        assert!(GlassMaterial::Regular.parameters().0 < GlassMaterial::Thick.parameters().0);
+        for style in [GlassStyle::Frosted, GlassStyle::Gel] {
+            assert!(
+                GlassMaterial::Thin.parameters(style).0
+                    < GlassMaterial::Regular.parameters(style).0
+            );
+            assert!(
+                GlassMaterial::Regular.parameters(style).0
+                    < GlassMaterial::Thick.parameters(style).0
+            );
+        }
     }
 
     #[test]
-    fn pressure_uses_a_damped_release_spring() {
+    fn gel_pressure_uses_a_damped_release_spring() {
         let mut state = GlassInteractionState::default();
         state.target_pressure = 1.0;
         for _ in 0..30 {
-            state.advance_by(1.0 / 60.0);
+            state.advance_by(1.0 / 60.0, GlassStyle::Gel);
         }
         assert!(state.pressure > 0.9);
 
         state.target_pressure = 0.0;
         let mut crossed_rest = false;
         for _ in 0..90 {
-            crossed_rest |= state.advance_by(1.0 / 60.0).pressure < 0.0;
+            crossed_rest |= state.advance_by(1.0 / 60.0, GlassStyle::Gel).pressure < 0.0;
         }
         assert!(
             crossed_rest,
             "release should overshoot the resting position"
         );
         assert!(state.pressure.abs() < 0.01);
+    }
+
+    #[test]
+    fn glass_panel_constructors_select_all_styles() {
+        assert_eq!(GlassPanel::new().style, GlassStyle::Frosted);
+        assert_eq!(GlassPanel::frosted().style, GlassStyle::Frosted);
+        assert_eq!(GlassPanel::gel().style, GlassStyle::Gel);
     }
 
     #[test]
@@ -574,17 +683,26 @@ mod tests {
     }
 
     #[test]
-    fn hover_motion_does_not_drive_the_surface() {
+    fn non_gel_styles_ignore_pointer_and_pressure() {
+        let position = Point {
+            x: px(20.0),
+            y: px(20.0),
+        };
+        let style = GlassStyle::Frosted;
         let mut state = GlassInteractionState::default();
-        state.record_pointer(Point {
-            x: px(10.0),
-            y: px(10.0),
-        });
-        state.record_pointer(Point {
-            x: px(80.0),
-            y: px(40.0),
-        });
-        assert_eq!(state.pointer_velocity, Point::default());
+        state.set_pressed(true, position, style);
+        state.record_pointer_by(position, 1.0 / 60.0, style);
+        state.record_pointer_by(
+            Point {
+                x: px(80.0),
+                y: px(40.0),
+            },
+            1.0 / 60.0,
+            style,
+        );
+        let frame = state.advance_by(1.0 / 60.0, style);
+        assert_eq!(frame.pressure, 0.0);
+        assert_eq!(frame.velocity, Point::default());
     }
 
     #[test]

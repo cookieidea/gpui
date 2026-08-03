@@ -6,24 +6,22 @@ pipeline and `gpui_effects` providing higher-level components and presets.
 
 ## Guides
 
-- [Liquid glass](docs/liquid_glass.md): rendering model, layer ordering,
-  parameter reference, recipes, animation, fallback behavior, and
-  troubleshooting for `GlassPanel`.
+- [Glass](docs/glass.md): frosted and elastic Gel materials for `GlassPanel`.
 - [Timed text](docs/timed_text.md): arbitrary character/word timings, gradient
   reveal, grouped lift/scale emphasis, and playback-clock integration.
 
 ## Examples
 
-Run the interactive liquid-glass example from the workspace root:
+Run the Frosted and Gel comparison from the workspace root:
 
 ```sh
-cargo run -p gpui_effects --example liquid_glass
+cargo run -p gpui_effects --example glass
 ```
 
 Other examples in `examples/` demonstrate gradients, masked effects, motion
 layers, and page-flip effects.
 
-Run the timed-text example (also shown inside liquid glass):
+Run the standalone timed-text example:
 
 ```sh
 cargo run -p gpui_effects --example timed_text
