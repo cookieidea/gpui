@@ -17,14 +17,15 @@
 
 use crate::PinchEvent;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
-    Display, Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
-    HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent,
-    KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
-    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Size, Style, StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
-    point, px, size,
+    Action, ActiveDrag, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
+    DispatchPhase, Display, DragEnd, DragEndListener, DragOrigin, DragPhase, DragSessionId,
+    Element, ElementId, Entity, EntityId, FocusHandle, Global, GlobalElementId, Hitbox,
+    HitboxBehavior, HitboxId, InspectorElementId, InternalDragSession, IntoElement, IsZero,
+    KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId,
+    ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MousePressureEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -606,6 +607,37 @@ impl Interactivity {
             Arc::new(value),
             Box::new(move |value, offset, window, cx| {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
+            }),
+        ));
+    }
+
+    /// Bind a callback that runs exactly once when a drag started by this element ends.
+    ///
+    /// The callback receives the typed drag value and distinguishes an accepted drop from a
+    /// normal unaccepted release and a cancellation. The listener is moved into the drag session
+    /// when dragging starts, so it remains valid if the source element is rerendered or removed.
+    pub fn on_drag_end<T>(
+        &mut self,
+        listener: impl Fn(&DragEnd, &T, &mut Window, &mut App) + 'static,
+    ) where
+        Self: Sized,
+        T: 'static,
+    {
+        debug_assert!(
+            self.drag_end_listener.is_none(),
+            "calling on_drag_end more than once on the same element is not supported"
+        );
+        self.drag_end_listener = Some((
+            TypeId::of::<T>(),
+            Rc::new(move |event, value, window, cx| {
+                listener(
+                    event,
+                    value
+                        .downcast_ref::<T>()
+                        .expect("drag end listener type must match the drag value"),
+                    window,
+                    cx,
+                )
             }),
         ));
     }
@@ -1497,6 +1529,20 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Bind a callback that runs exactly once when a drag started by this element ends.
+    /// The fluent API equivalent to [`Interactivity::on_drag_end`].
+    fn on_drag_end<T>(
+        mut self,
+        listener: impl Fn(&DragEnd, &T, &mut Window, &mut App) + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+    {
+        self.interactivity().on_drag_end(listener);
+        self
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// The fluent API equivalent to [`Interactivity::on_hover`].
@@ -1949,6 +1995,7 @@ pub struct Interactivity {
     pub(crate) click_listeners: Vec<ClickListener>,
     pub(crate) aux_click_listeners: Vec<ClickListener>,
     pub(crate) drag_listener: Option<(Arc<dyn Any>, DragListener)>,
+    pub(crate) drag_end_listener: Option<(TypeId, DragEndListener)>,
     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
@@ -2637,6 +2684,7 @@ impl Interactivity {
         let drag_cursor_style = self.base_style.as_ref().mouse_cursor;
 
         let mut drag_listener = mem::take(&mut self.drag_listener);
+        let drag_end_listener = mem::take(&mut self.drag_end_listener);
         let drop_listeners = mem::take(&mut self.drop_listeners);
         let click_listeners = mem::take(&mut self.click_listeners);
         let aux_click_listeners = mem::take(&mut self.aux_click_listeners);
@@ -2665,8 +2713,18 @@ impl Interactivity {
 
                                 if can_drop {
                                     listener(drag.value.as_ref(), window, cx);
+                                    cx.active_drag = Some(drag);
+                                    cx.finish_active_drag(
+                                        DragEnd::Dropped {
+                                            target_window: window.window_handle().window_id(),
+                                            position: window.mouse_position(),
+                                        },
+                                        window,
+                                    );
                                     window.refresh();
                                     cx.stop_propagation();
+                                } else {
+                                    cx.active_drag = Some(drag);
                                 }
                             }
                         }
@@ -2729,11 +2787,28 @@ impl Interactivity {
                             let cursor_offset = event.position - hitbox.origin;
                             let drag =
                                 (drag_listener)(drag_value.as_ref(), cursor_offset, window, cx);
-                            cx.active_drag = Some(AnyDrag {
-                                view: drag,
-                                value: drag_value,
-                                cursor_offset,
-                                cursor_style: drag_cursor_style,
+                            let source_window = window.window_handle().window_id();
+                            let on_end =
+                                drag_end_listener
+                                    .as_ref()
+                                    .and_then(|(state_type, listener)| {
+                                        (*state_type == drag_value.as_ref().type_id())
+                                            .then(|| listener.clone())
+                                    });
+                            cx.active_drag = Some(ActiveDrag {
+                                data: AnyDrag {
+                                    view: drag,
+                                    value: drag_value,
+                                    cursor_offset,
+                                    cursor_style: drag_cursor_style,
+                                },
+                                origin: DragOrigin::Internal(InternalDragSession {
+                                    session_id: DragSessionId::next(),
+                                    source_window,
+                                    phase: DragPhase::Internal,
+                                    drop_performed: false,
+                                    on_end,
+                                }),
                             });
                             pending_mouse_down.take();
                             window.refresh();
@@ -4065,10 +4140,189 @@ impl ScrollHandle {
 mod tests {
     use super::*;
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, MouseMoveEvent,
-        TestAppContext, util::FluentBuilder as _,
+        AnyWindowHandle, AppContext as _, Context, InputEvent, InternalDragEvent, Keystroke,
+        MouseMoveEvent, TestAppContext, util::FluentBuilder as _,
     };
     use std::rc::Weak;
+
+    struct DragPreview;
+
+    impl Render for DragPreview {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(10.)).h(px(10.))
+        }
+    }
+
+    struct DragSessionTest {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        accept_drop: bool,
+    }
+
+    impl Render for DragSessionTest {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let end_events = self.events.clone();
+            let drop_events = self.events.clone();
+            div()
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .id("drag-source")
+                        .w(px(50.))
+                        .h(px(50.))
+                        .on_drag(7_u32, |_, _, _, cx| cx.new(|_| DragPreview))
+                        .on_drag_end::<u32>(move |event, _, _, _| {
+                            end_events.borrow_mut().push(match event {
+                                DragEnd::Dropped { .. } => "end:dropped",
+                                DragEnd::Unaccepted => "end:unaccepted",
+                                DragEnd::Cancelled => "end:cancelled",
+                            });
+                        }),
+                )
+                .child(
+                    div()
+                        .id("drop-target")
+                        .w(px(50.))
+                        .h(px(50.))
+                        .can_drop({
+                            let accept_drop = self.accept_drop;
+                            move |_, _, _| accept_drop
+                        })
+                        .on_drop::<u32>(move |_, _, _| {
+                            drop_events.borrow_mut().push("target:drop")
+                        }),
+                )
+        }
+    }
+
+    fn setup_drag_session_test(
+        accept_drop: bool,
+    ) -> (
+        TestAppContext,
+        AnyWindowHandle,
+        Rc<RefCell<Vec<&'static str>>>,
+    ) {
+        let mut cx = TestAppContext::single();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let events = events.clone();
+            move |_, _| DragSessionTest {
+                events,
+                accept_drop,
+            }
+        });
+        let window = AnyWindowHandle::from(window);
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        (cx, window, events)
+    }
+
+    fn start_test_drag(cx: &mut TestAppContext, window: AnyWindowHandle) -> DragSessionId {
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(10.), px(10.)),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(20.), px(10.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            match &cx.active_drag.as_ref().expect("drag should start").origin {
+                DragOrigin::Internal(session) => session.session_id,
+                DragOrigin::ExternalFiles => panic!("test drag must be internal"),
+            }
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn accepted_drop_runs_target_before_source_end_once() {
+        let (mut cx, window, events) = setup_drag_session_test(true);
+        start_test_drag(&mut cx, window);
+
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(75.), px(10.)),
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(!cx.has_active_drag());
+        })
+        .unwrap();
+
+        assert_eq!(&*events.borrow(), &["target:drop", "end:dropped"]);
+    }
+
+    #[test]
+    fn rejected_native_drop_stays_alive_until_source_outcome() {
+        let (mut cx, window, events) = setup_drag_session_test(false);
+        let session_id = start_test_drag(&mut cx, window);
+
+        cx.update_window(window, |_, window, cx| {
+            let DragOrigin::Internal(session) = &mut cx.active_drag.as_mut().unwrap().origin else {
+                panic!("test drag must be internal")
+            };
+            session.phase = DragPhase::Native;
+
+            let result = window.dispatch_event(
+                crate::PlatformInput::InternalDrag(InternalDragEvent::Dropped {
+                    session_id,
+                    position: point(px(75.), px(10.)),
+                }),
+                cx,
+            );
+            assert!(!result.drag_drop_accepted);
+            assert!(cx.has_active_drag());
+
+            window.dispatch_event(
+                crate::PlatformInput::InternalDrag(InternalDragEvent::SourceDropPerformed {
+                    session_id,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                crate::PlatformInput::InternalDrag(InternalDragEvent::SourceCancelled {
+                    session_id,
+                }),
+                cx,
+            );
+            assert!(!cx.has_active_drag());
+        })
+        .unwrap();
+
+        assert_eq!(&*events.borrow(), &["end:unaccepted"]);
+    }
+
+    #[test]
+    fn cancelling_drag_runs_source_end_only_once() {
+        let (mut cx, window, events) = setup_drag_session_test(true);
+        start_test_drag(&mut cx, window);
+
+        cx.update_window(window, |_, window, cx| {
+            assert!(cx.stop_active_drag(window));
+            assert!(!cx.stop_active_drag(window));
+        })
+        .unwrap();
+
+        assert_eq!(&*events.borrow(), &["end:cancelled"]);
+    }
 
     struct TestTooltipView;
 

@@ -36,11 +36,12 @@ pub(crate) type PlatformScreenCaptureFrame = core_video::image_buffer::CVImageBu
 
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
-    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, Font, FontId, FontMetrics,
-    FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap, LineLayout, Pixels,
-    PlatformGestures, PlatformInput, Point, Priority, RenderColorSvgParams, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
-    Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
+    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, DragSessionId, Edges, Font, FontId,
+    FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
+    LineLayout, Pixels, PlatformGestures, PlatformInput, Point, Priority, RenderColorSvgParams,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
+    ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
+    hash, point, px, size,
 };
 use anyhow::Result;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -762,6 +763,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_close(&self, callback: Box<dyn FnOnce()>);
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
+    /// Promotes a GPUI process-local drag to the platform drag-and-drop protocol.
+    fn start_internal_drag(&self, _session_id: DragSessionId) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "internal cross-window drag-and-drop is not supported by this platform"
+        ))
+    }
+    /// Cancels a platform drag previously started by [`Self::start_internal_drag`].
+    fn cancel_internal_drag(&self, _session_id: DragSessionId) {}
     fn draw(&self, scene: &Scene);
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;

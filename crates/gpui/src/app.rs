@@ -7,7 +7,10 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    sync::{Arc, atomic::Ordering::SeqCst},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::SeqCst},
+    },
     time::Duration,
 };
 
@@ -682,7 +685,7 @@ pub struct App {
     text_system: Arc<TextSystem>,
 
     pub(crate) actions: Rc<ActionRegistry>,
-    pub(crate) active_drag: Option<AnyDrag>,
+    pub(crate) active_drag: Option<ActiveDrag>,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) entities: EntityMap,
@@ -2362,13 +2365,39 @@ impl App {
 
     /// Stops active drag and clears any related effects.
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
-        if self.active_drag.is_some() {
-            self.active_drag = None;
-            window.refresh();
-            true
-        } else {
-            false
+        if let Some(active_drag) = &self.active_drag
+            && let DragOrigin::Internal(session) = &active_drag.origin
+            && session.phase == DragPhase::Native
+        {
+            window.cancel_internal_drag(session.session_id);
         }
+        self.finish_active_drag(DragEnd::Cancelled, window)
+    }
+
+    pub(crate) fn finish_active_drag(&mut self, outcome: DragEnd, window: &mut Window) -> bool {
+        let Some(active_drag) = self.active_drag.take() else {
+            return false;
+        };
+
+        window.refresh();
+        let DragOrigin::Internal(session) = active_drag.origin else {
+            return true;
+        };
+        let Some(listener) = session.on_end else {
+            return true;
+        };
+
+        let value = active_drag.data.value;
+        if session.source_window == window.window_handle().window_id() {
+            listener(&outcome, value.as_ref(), window, self);
+        } else if let Some(handle) = self.window_handles.get(&session.source_window).copied() {
+            let _ = handle.update(self, move |_, source_window, cx| {
+                listener(&outcome, value.as_ref(), source_window, cx);
+                source_window.refresh();
+            });
+        }
+
+        true
     }
 
     /// Sets the cursor style for the currently active drag operation.
@@ -2724,8 +2753,85 @@ impl<G: Global> DerefMut for GlobalLease<G> {
     }
 }
 
-/// Contains state associated with an active drag operation, started by dragging an element
-/// within the window or by dragging into the app from the underlying platform.
+static NEXT_DRAG_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Identifies one process-local drag operation for its entire lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct DragSessionId(u64);
+
+impl DragSessionId {
+    pub(crate) fn next() -> Self {
+        Self(NEXT_DRAG_SESSION_ID.fetch_add(1, SeqCst))
+    }
+
+    /// Returns this session identifier as an integer.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// The result of a process-local drag operation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DragEnd {
+    /// A target accepted the value and ran its typed drop handler.
+    Dropped {
+        /// The window that accepted the drop.
+        target_window: WindowId,
+        /// The position in the target window's local coordinate space.
+        position: Point<Pixels>,
+    },
+    /// The pointer was released normally, but no target accepted the value.
+    Unaccepted,
+    /// The drag was cancelled by the application, platform, or compositor.
+    Cancelled,
+}
+
+/// The phase of a process-local drag operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragPhase {
+    /// GPUI is handling the drag inside its source window.
+    Internal,
+    /// The platform drag-and-drop protocol owns pointer routing.
+    Native,
+    /// The drag is completing and no longer accepts platform events.
+    Finishing,
+}
+
+pub(crate) type DragEndListener = Rc<dyn Fn(&DragEnd, &dyn Any, &mut Window, &mut App) + 'static>;
+
+pub(crate) struct InternalDragSession {
+    pub session_id: DragSessionId,
+    pub source_window: WindowId,
+    pub phase: DragPhase,
+    pub drop_performed: bool,
+    pub on_end: Option<DragEndListener>,
+}
+
+pub(crate) enum DragOrigin {
+    Internal(InternalDragSession),
+    ExternalFiles,
+}
+
+pub(crate) struct ActiveDrag {
+    pub data: AnyDrag,
+    pub origin: DragOrigin,
+}
+
+impl Deref for ActiveDrag {
+    type Target = AnyDrag;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for ActiveDrag {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+/// Contains the payload and presentation associated with an active drag operation.
 pub struct AnyDrag {
     /// The view used to render this drag
     pub view: AnyView,

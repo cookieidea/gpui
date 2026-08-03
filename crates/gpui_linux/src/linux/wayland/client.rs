@@ -94,12 +94,12 @@ use crate::linux::{
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, FileDropEvent,
-    ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    Pixels, PlatformDisplay, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout, WindowKind,
-    WindowParams, point, profiler, px, size,
+    AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, DragSessionId,
+    FileDropEvent, ForegroundExecutor, InternalDragEvent, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
+    PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
+    Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -239,6 +239,8 @@ pub(crate) struct WaylandClientState {
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     data_device: Option<wl_data_device::WlDataDevice>,
+    internal_drag_mime: String,
+    native_drag_source: Option<NativeDragSource>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pre_edit_text: Option<String>,
@@ -285,8 +287,27 @@ pub(crate) struct WaylandClientState {
 
 pub struct DragState {
     data_offer: Option<wl_data_offer::WlDataOffer>,
+    kind: Option<DragOfferKind>,
     window: Option<WaylandWindowStatePtr>,
     position: Point<Pixels>,
+}
+
+#[derive(Clone, Copy)]
+enum DragOfferKind {
+    Internal(DragSessionId),
+    ExternalFiles,
+}
+
+struct NativeDragSource {
+    session_id: DragSessionId,
+    window: WaylandWindowStatePtr,
+    data_source: wl_data_source::WlDataSource,
+}
+
+#[derive(Clone, Copy)]
+enum WaylandDataSourceKind {
+    Clipboard,
+    InternalDrag(DragSessionId),
 }
 
 pub struct ClickState {
@@ -338,6 +359,55 @@ impl WaylandClientStatePtr {
 
     pub fn get_serial(&self, kind: SerialKind) -> u32 {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
+    }
+
+    pub fn start_internal_drag(
+        &self,
+        source_window: WaylandWindowStatePtr,
+        session_id: DragSessionId,
+    ) -> anyhow::Result<()> {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        let manager = state
+            .globals
+            .data_device_manager
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Wayland data-device manager is unavailable"))?;
+        let data_device = state
+            .data_device
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Wayland data device is unavailable"))?;
+        let serial = state.serial_tracker.get(SerialKind::MousePress);
+        if serial == 0 {
+            anyhow::bail!("Wayland has no initiating mouse-press serial for this drag");
+        }
+
+        let data_source = manager.create_data_source(
+            &state.globals.qh,
+            WaylandDataSourceKind::InternalDrag(session_id),
+        );
+        data_source.offer(state.internal_drag_mime.clone());
+        data_source.set_actions(DndAction::Move);
+        data_device.start_drag(Some(&data_source), &source_window.surface(), None, serial);
+        state.native_drag_source = Some(NativeDragSource {
+            session_id,
+            window: source_window,
+            data_source,
+        });
+        Ok(())
+    }
+
+    pub fn cancel_internal_drag(&self, session_id: DragSessionId) {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        let Some(source) = state.native_drag_source.take() else {
+            return;
+        };
+        if source.session_id == session_id {
+            source.data_source.destroy();
+        } else {
+            state.native_drag_source = Some(source);
+        }
     }
 
     pub fn set_pending_activation(&self, window: ObjectId) {
@@ -713,6 +783,11 @@ impl WaylandClient {
             pinch_scale: 1.0,
             cursor_shape_device: None,
             data_device,
+            internal_drag_mime: format!(
+                "application/x-gpui-internal-drag-{}",
+                uuid::Uuid::new_v4().simple()
+            ),
+            native_drag_source: None,
             primary_selection,
             text_input: None,
             pre_edit_text: None,
@@ -728,6 +803,7 @@ impl WaylandClient {
             compose_state: None,
             drag: DragState {
                 data_offer: None,
+                kind: None,
                 window: None,
                 position: Point::default(),
             },
@@ -1043,7 +1119,8 @@ impl LinuxClient for WaylandClient {
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
             state.clipboard.set(item);
             let serial = state.serial_tracker.get_latest();
-            let data_source = data_device_manager.create_data_source(&state.globals.qh, ());
+            let data_source = data_device_manager
+                .create_data_source(&state.globals.qh, WaylandDataSourceKind::Clipboard);
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }
@@ -2385,7 +2462,46 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                         return;
                     };
 
+                    let offer = state
+                        .data_offers
+                        .iter()
+                        .position(|wrapper| wrapper.inner.id() == data_offer.id())
+                        .map(|index| state.data_offers.remove(index));
+                    let position = Point::new(x.into(), y.into());
+
+                    let internal_session = offer
+                        .as_ref()
+                        .filter(|offer| offer.has_mime_type(&state.internal_drag_mime))
+                        .and_then(|_| state.native_drag_source.as_ref())
+                        .map(|source| source.session_id);
+                    if let Some(session_id) = internal_session {
+                        data_offer.accept(serial, Some(state.internal_drag_mime.clone()));
+                        data_offer.set_actions(DndAction::Move, DndAction::Move);
+                        state.drag.data_offer = Some(data_offer);
+                        state.drag.kind = Some(DragOfferKind::Internal(session_id));
+                        state.drag.window = Some(drag_window.clone());
+                        state.drag.position = position;
+                        drop(state);
+                        drag_window.handle_input(PlatformInput::InternalDrag(
+                            InternalDragEvent::Entered {
+                                session_id,
+                                position,
+                            },
+                        ));
+                        return;
+                    }
+
+                    let accepts_files = offer
+                        .as_ref()
+                        .is_some_and(|offer| offer.has_mime_type(FILE_LIST_MIME_TYPE));
+                    if !accepts_files {
+                        data_offer.accept(serial, None);
+                        data_offer.destroy();
+                        return;
+                    }
+
                     const ACTIONS: DndAction = DndAction::Copy;
+                    data_offer.accept(serial, Some(FILE_LIST_MIME_TYPE.to_string()));
                     data_offer.set_actions(ACTIONS, ACTIONS);
 
                     let pipe = Pipe::new().unwrap();
@@ -2425,8 +2541,6 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                     }
                                 })
                                 .collect();
-                            let position = Point::new(x.into(), y.into());
-
                             // Prevent dropping text from other programs.
                             if paths.is_empty() {
                                 data_offer.destroy();
@@ -2441,6 +2555,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                             let client = this.get_client();
                             let mut state = client.borrow_mut();
                             state.drag.data_offer = Some(data_offer);
+                            state.drag.kind = Some(DragOfferKind::ExternalFiles);
                             state.drag.window = Some(drag_window.clone());
                             state.drag.position = position;
 
@@ -2457,7 +2572,18 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let position = Point::new(x.into(), y.into());
                 state.drag.position = position;
 
-                let input = PlatformInput::FileDrop(FileDropEvent::Pending { position });
+                let input = match state.drag.kind {
+                    Some(DragOfferKind::Internal(session_id)) => {
+                        PlatformInput::InternalDrag(InternalDragEvent::Moved {
+                            session_id,
+                            position,
+                        })
+                    }
+                    Some(DragOfferKind::ExternalFiles) => {
+                        PlatformInput::FileDrop(FileDropEvent::Pending { position })
+                    }
+                    None => return,
+                };
                 drop(state);
                 drag_window.handle_input(input);
             }
@@ -2465,13 +2591,22 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                let data_offer = state.drag.data_offer.clone().unwrap();
-                data_offer.destroy();
+                let kind = state.drag.kind.take();
+                if let Some(data_offer) = state.drag.data_offer.take() {
+                    data_offer.destroy();
+                }
 
-                state.drag.data_offer = None;
                 state.drag.window = None;
 
-                let input = PlatformInput::FileDrop(FileDropEvent::Exited {});
+                let input = match kind {
+                    Some(DragOfferKind::Internal(session_id)) => {
+                        PlatformInput::InternalDrag(InternalDragEvent::Left { session_id })
+                    }
+                    Some(DragOfferKind::ExternalFiles) => {
+                        PlatformInput::FileDrop(FileDropEvent::Exited {})
+                    }
+                    None => return,
+                };
                 drop(state);
                 drag_window.handle_input(input);
             }
@@ -2479,18 +2614,38 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                let data_offer = state.drag.data_offer.clone().unwrap();
-                data_offer.finish();
-                data_offer.destroy();
-
-                state.drag.data_offer = None;
+                let data_offer = state.drag.data_offer.take();
+                let kind = state.drag.kind.take();
+                let position = state.drag.position;
                 state.drag.window = None;
-
-                let input = PlatformInput::FileDrop(FileDropEvent::Submit {
-                    position: state.drag.position,
-                });
                 drop(state);
-                drag_window.handle_input(input);
+
+                match kind {
+                    Some(DragOfferKind::Internal(session_id)) => {
+                        let result = drag_window.handle_input(PlatformInput::InternalDrag(
+                            InternalDragEvent::Dropped {
+                                session_id,
+                                position,
+                            },
+                        ));
+                        if let Some(data_offer) = data_offer {
+                            if result.drag_drop_accepted {
+                                data_offer.finish();
+                            }
+                            data_offer.destroy();
+                        }
+                    }
+                    Some(DragOfferKind::ExternalFiles) => {
+                        if let Some(data_offer) = data_offer {
+                            data_offer.finish();
+                            data_offer.destroy();
+                        }
+                        drag_window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
+                            position,
+                        }));
+                    }
+                    None => {}
+                }
             }
             _ => {}
         }
@@ -2514,13 +2669,6 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
         let mut state = client.borrow_mut();
 
         if let wl_data_offer::Event::Offer { mime_type } = event {
-            // Drag and drop
-            if mime_type == FILE_LIST_MIME_TYPE {
-                let serial = state.serial_tracker.get(SerialKind::DataDevice);
-                let mime_type = mime_type.clone();
-                data_offer.accept(serial, Some(mime_type));
-            }
-
             // Clipboard
             if let Some(offer) = state
                 .data_offers
@@ -2533,24 +2681,86 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
     }
 }
 
-impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
+impl Dispatch<wl_data_source::WlDataSource, WaylandDataSourceKind> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
         data_source: &wl_data_source::WlDataSource,
         event: wl_data_source::Event,
-        _: &(),
+        kind: &WaylandDataSourceKind,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         let client = this.get_client();
-        let state = client.borrow_mut();
+        let mut state = client.borrow_mut();
 
-        match event {
-            wl_data_source::Event::Send { mime_type, fd } => {
+        match (kind, event) {
+            (WaylandDataSourceKind::Clipboard, wl_data_source::Event::Send { mime_type, fd }) => {
                 state.clipboard.send(mime_type, fd);
             }
-            wl_data_source::Event::Cancelled => {
+            (WaylandDataSourceKind::Clipboard, wl_data_source::Event::Cancelled) => {
                 data_source.destroy();
+            }
+            (WaylandDataSourceKind::InternalDrag(_), wl_data_source::Event::Send { fd, .. }) => {
+                // The MIME is a process-private capability marker. The typed value never leaves
+                // GPUI, so there is no payload to serialize into this pipe.
+                drop(fd);
+            }
+            (
+                WaylandDataSourceKind::InternalDrag(session_id),
+                wl_data_source::Event::DndDropPerformed,
+            ) => {
+                let session_id = *session_id;
+                let Some(window) = state
+                    .native_drag_source
+                    .as_ref()
+                    .filter(|source| source.session_id == session_id)
+                    .map(|source| source.window.clone())
+                else {
+                    return;
+                };
+                drop(state);
+                window.handle_input(PlatformInput::InternalDrag(
+                    InternalDragEvent::SourceDropPerformed { session_id },
+                ));
+            }
+            (
+                WaylandDataSourceKind::InternalDrag(session_id),
+                wl_data_source::Event::DndFinished,
+            ) => {
+                let session_id = *session_id;
+                let window = state
+                    .native_drag_source
+                    .as_ref()
+                    .filter(|source| source.session_id == session_id)
+                    .map(|source| source.window.clone());
+                if window.is_some() {
+                    state.native_drag_source = None;
+                }
+                data_source.destroy();
+                drop(state);
+                if let Some(window) = window {
+                    window.handle_input(PlatformInput::InternalDrag(
+                        InternalDragEvent::SourceFinished { session_id },
+                    ));
+                }
+            }
+            (WaylandDataSourceKind::InternalDrag(session_id), wl_data_source::Event::Cancelled) => {
+                let session_id = *session_id;
+                let window = state
+                    .native_drag_source
+                    .as_ref()
+                    .filter(|source| source.session_id == session_id)
+                    .map(|source| source.window.clone());
+                if window.is_some() {
+                    state.native_drag_source = None;
+                }
+                data_source.destroy();
+                drop(state);
+                if let Some(window) = window {
+                    window.handle_input(PlatformInput::InternalDrag(
+                        InternalDragEvent::SourceCancelled { session_id },
+                    ));
+                }
             }
             _ => {}
         }

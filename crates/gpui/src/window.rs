@@ -1,18 +1,19 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderGradient,
-    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
-    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
-    Edges, Effect, EffectQuad, EffectShader, EffectUniforms, Entity, EntityId, EventEmitter,
-    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseMoveEvent, MouseUpEvent, PaintBackdropEffect, PaintEffect, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    Action, ActiveDrag, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext,
+    Arena, Asset, AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background,
+    BorderGradient, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, DragEnd, DragOrigin, Edges, Effect, EffectQuad, EffectShader, EffectUniforms,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, InternalDragEvent, IsZero, KeyBinding, KeyContext, KeyDownEvent,
+    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    PaintBackdropEffect, PaintEffect, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams, RenderImage,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
@@ -1799,6 +1800,8 @@ impl Window {
 pub struct DispatchEventResult {
     pub propagate: bool,
     pub default_prevented: bool,
+    /// Whether a process-local native drop ran a typed target handler.
+    pub drag_drop_accepted: bool,
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
@@ -2281,6 +2284,47 @@ impl Window {
     /// Returns the bounds of the current window in the global coordinate space, which could span across multiple displays.
     pub fn bounds(&self) -> Bounds<Pixels> {
         self.platform_window.bounds()
+    }
+
+    /// Promotes the active process-local drag to the platform drag-and-drop protocol.
+    ///
+    /// This keeps the typed payload inside GPUI. The platform transports only the opaque session
+    /// identifier and routes pointer events to other windows in this process.
+    pub fn promote_active_drag_to_system(&mut self, cx: &mut App) -> Result<crate::DragSessionId> {
+        let source_window = self.handle.id;
+        let (session_id, phase) = match cx.active_drag.as_ref().map(|drag| &drag.origin) {
+            Some(DragOrigin::Internal(session)) if session.source_window == source_window => {
+                (session.session_id, session.phase)
+            }
+            Some(DragOrigin::Internal(_)) => {
+                return Err(anyhow!("the active drag belongs to another source window"));
+            }
+            Some(DragOrigin::ExternalFiles) => {
+                return Err(anyhow!("external file drags cannot be promoted"));
+            }
+            None => return Err(anyhow!("there is no active drag to promote")),
+        };
+
+        if phase == crate::DragPhase::Native {
+            return Ok(session_id);
+        }
+        if phase != crate::DragPhase::Internal {
+            return Err(anyhow!("the active drag is already finishing"));
+        }
+
+        self.platform_window.start_internal_drag(session_id)?;
+        if let Some(active_drag) = cx.active_drag.as_mut()
+            && let DragOrigin::Internal(session) = &mut active_drag.origin
+            && session.session_id == session_id
+        {
+            session.phase = crate::DragPhase::Native;
+        }
+        self.refresh();
+        Ok(session_id)
+    }
+
+    pub(crate) fn cancel_internal_drag(&self, session_id: crate::DragSessionId) {
+        self.platform_window.cancel_internal_drag(session_id);
     }
 
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
@@ -5016,6 +5060,31 @@ impl Window {
         // Handlers may set this to true by calling `prevent_default`.
         self.default_prevented = false;
 
+        // Once a drag is promoted, Wayland's data-device protocol owns release routing. The
+        // pointer release still reaches the source wl_pointer, but dispatching it to normal GPUI
+        // listeners would race the target drop and could run source-side fallback behavior.
+        if let PlatformInput::MouseUp(mouse_up) = &event
+            && cx.active_drag.as_ref().is_some_and(|drag| {
+                matches!(
+                    &drag.origin,
+                    DragOrigin::Internal(session)
+                        if session.phase == crate::DragPhase::Native
+                            && session.source_window == self.handle.id
+                )
+            })
+        {
+            self.mouse_position = mouse_up.position;
+            self.modifiers = mouse_up.modifiers;
+            return DispatchEventResult {
+                propagate: true,
+                default_prevented: false,
+                drag_drop_accepted: false,
+            };
+        }
+
+        let mut preserve_drag_on_mouse_up = false;
+        let mut dropped_session = None;
+
         let event = match event {
             // Track the mouse position with our own state, since accessing the platform
             // API for the mouse position can only occur on the main thread.
@@ -5062,11 +5131,14 @@ impl Window {
                 FileDropEvent::Entered { position, paths } => {
                     self.mouse_position = position;
                     if cx.active_drag.is_none() {
-                        cx.active_drag = Some(AnyDrag {
-                            value: Arc::new(paths.clone()),
-                            view: cx.new(|_| paths).into(),
-                            cursor_offset: position,
-                            cursor_style: None,
+                        cx.active_drag = Some(ActiveDrag {
+                            data: AnyDrag {
+                                value: Arc::new(paths.clone()),
+                                view: cx.new(|_| paths).into(),
+                                cursor_offset: position,
+                                cursor_style: None,
+                            },
+                            origin: DragOrigin::ExternalFiles,
                         });
                     }
                     PlatformInput::MouseMove(MouseMoveEvent {
@@ -5098,12 +5170,120 @@ impl Window {
                     PlatformInput::FileDrop(FileDropEvent::Exited)
                 }
             },
+            PlatformInput::InternalDrag(drag_event) => match drag_event {
+                InternalDragEvent::Entered {
+                    session_id,
+                    position,
+                }
+                | InternalDragEvent::Moved {
+                    session_id,
+                    position,
+                } => {
+                    let matches_session = cx.active_drag.as_ref().is_some_and(|drag| {
+                        matches!(
+                            &drag.origin,
+                            DragOrigin::Internal(session)
+                                if session.session_id == session_id
+                                    && session.phase == crate::DragPhase::Native
+                        )
+                    });
+                    if !matches_session {
+                        return DispatchEventResult::default();
+                    }
+                    self.mouse_position = position;
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    })
+                }
+                InternalDragEvent::Left { session_id } => {
+                    let matches_session = cx.active_drag.as_ref().is_some_and(|drag| {
+                        matches!(
+                            &drag.origin,
+                            DragOrigin::Internal(session) if session.session_id == session_id
+                        )
+                    });
+                    if !matches_session {
+                        return DispatchEventResult::default();
+                    }
+                    PlatformInput::MouseExited(crate::MouseExitEvent {
+                        position: self.mouse_position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    })
+                }
+                InternalDragEvent::Dropped {
+                    session_id,
+                    position,
+                } => {
+                    let matches_session = cx.active_drag.as_ref().is_some_and(|drag| {
+                        matches!(
+                            &drag.origin,
+                            DragOrigin::Internal(session)
+                                if session.session_id == session_id
+                                    && session.phase == crate::DragPhase::Native
+                        )
+                    });
+                    if !matches_session {
+                        return DispatchEventResult::default();
+                    }
+                    self.mouse_position = position;
+                    preserve_drag_on_mouse_up = true;
+                    dropped_session = Some(session_id);
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                    })
+                }
+                InternalDragEvent::SourceDropPerformed { session_id } => {
+                    if let Some(active_drag) = cx.active_drag.as_mut()
+                        && let DragOrigin::Internal(session) = &mut active_drag.origin
+                        && session.session_id == session_id
+                    {
+                        session.drop_performed = true;
+                    }
+                    PlatformInput::InternalDrag(InternalDragEvent::SourceDropPerformed {
+                        session_id,
+                    })
+                }
+                InternalDragEvent::SourceFinished { session_id } => {
+                    let matches_session = cx.active_drag.as_ref().is_some_and(|drag| {
+                        matches!(
+                            &drag.origin,
+                            DragOrigin::Internal(session) if session.session_id == session_id
+                        )
+                    });
+                    if matches_session {
+                        cx.finish_active_drag(DragEnd::Unaccepted, self);
+                    }
+                    PlatformInput::InternalDrag(InternalDragEvent::SourceFinished { session_id })
+                }
+                InternalDragEvent::SourceCancelled { session_id } => {
+                    let outcome = cx.active_drag.as_ref().and_then(|drag| match &drag.origin {
+                        DragOrigin::Internal(session) if session.session_id == session_id => {
+                            Some(if session.drop_performed {
+                                DragEnd::Unaccepted
+                            } else {
+                                DragEnd::Cancelled
+                            })
+                        }
+                        _ => None,
+                    });
+                    if let Some(outcome) = outcome {
+                        cx.finish_active_drag(outcome, self);
+                    }
+                    PlatformInput::InternalDrag(InternalDragEvent::SourceCancelled { session_id })
+                }
+            },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
         if let Some(any_mouse_event) = event.mouse_event() {
-            self.dispatch_mouse_event(any_mouse_event, cx);
+            self.dispatch_mouse_event(any_mouse_event, preserve_drag_on_mouse_up, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
         }
@@ -5121,10 +5301,23 @@ impl Window {
         DispatchEventResult {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
+            drag_drop_accepted: dropped_session.is_some_and(|session_id| {
+                !cx.active_drag.as_ref().is_some_and(|drag| {
+                    matches!(
+                        &drag.origin,
+                        DragOrigin::Internal(session) if session.session_id == session_id
+                    )
+                })
+            }),
         }
     }
 
-    fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
+    fn dispatch_mouse_event(
+        &mut self,
+        event: &dyn Any,
+        preserve_drag_on_mouse_up: bool,
+        cx: &mut App,
+    ) {
         let hit_test = self.rendered_frame.hit_test(self.mouse_position());
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
@@ -5168,11 +5361,10 @@ impl Window {
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();
-            } else if event.is::<MouseUpEvent>() {
+            } else if event.is::<MouseUpEvent>() && !preserve_drag_on_mouse_up {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
-                cx.active_drag = None;
-                self.refresh();
+                cx.finish_active_drag(DragEnd::Unaccepted, self);
             }
         }
 

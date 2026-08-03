@@ -722,6 +722,52 @@ pub enum FileDropEvent {
     Exited,
 }
 
+/// A platform event for a process-local drag promoted to the native drag-and-drop protocol.
+#[derive(Debug, Clone)]
+pub enum InternalDragEvent {
+    /// The drag entered a GPUI window.
+    Entered {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+        /// The position relative to the target window.
+        position: Point<Pixels>,
+    },
+    /// The drag moved within a GPUI window.
+    Moved {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+        /// The position relative to the target window.
+        position: Point<Pixels>,
+    },
+    /// The drag left a GPUI window without ending the session.
+    Left {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+    },
+    /// The pointer was released over a GPUI window.
+    Dropped {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+        /// The position relative to the target window.
+        position: Point<Pixels>,
+    },
+    /// The native target observed a drop. A later finish or cancellation decides the outcome.
+    SourceDropPerformed {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+    },
+    /// The native target completed the operation.
+    SourceFinished {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+    },
+    /// The native operation was cancelled or rejected.
+    SourceCancelled {
+        /// The process-local drag session.
+        session_id: crate::DragSessionId,
+    },
+}
+
 impl Sealed for FileDropEvent {}
 impl InputEvent for FileDropEvent {
     fn to_platform_input(self) -> PlatformInput {
@@ -755,6 +801,8 @@ pub enum PlatformInput {
     Pinch(PinchEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
+    /// A process-local drag promoted to the platform drag-and-drop protocol.
+    InternalDrag(InternalDragEvent),
     /// A raw touch event on a touch screen.
     Touch(TouchEvent),
 }
@@ -773,6 +821,7 @@ impl PlatformInput {
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
+            PlatformInput::InternalDrag(_) => None,
             PlatformInput::Touch(_) => None,
         }
     }
@@ -790,6 +839,7 @@ impl PlatformInput {
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::FileDrop(_) => None,
+            PlatformInput::InternalDrag(_) => None,
             PlatformInput::Touch(_) => None,
         }
     }

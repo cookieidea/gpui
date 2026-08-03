@@ -1287,16 +1287,21 @@ impl WaylandWindowStatePtr {
         }
     }
 
-    pub fn handle_input(&self, input: PlatformInput) {
+    pub fn handle_input(&self, input: PlatformInput) -> gpui::DispatchEventResult {
         if self.is_blocked() {
-            return;
+            return gpui::DispatchEventResult::default();
         }
+        let mut dispatch_result = gpui::DispatchEventResult {
+            propagate: true,
+            ..Default::default()
+        };
         let callback = self.callbacks.borrow_mut().input.take();
         if let Some(mut fun) = callback {
             let result = fun(input.clone());
+            dispatch_result = result.clone();
             self.callbacks.borrow_mut().input = Some(fun);
             if !result.propagate {
-                return;
+                return result;
             }
         }
         if let PlatformInput::KeyDown(event) = input
@@ -1310,6 +1315,7 @@ impl WaylandWindowStatePtr {
                 self.state.borrow_mut().input_handler = Some(input_handler);
             }
         }
+        dispatch_result
     }
 
     pub fn set_focused(&self, focus: bool) {
@@ -1394,6 +1400,15 @@ impl rwh::HasDisplayHandle for WaylandWindow {
 }
 
 impl PlatformWindow for WaylandWindow {
+    fn start_internal_drag(&self, session_id: gpui::DragSessionId) -> anyhow::Result<()> {
+        let client = self.borrow().client.clone();
+        client.start_internal_drag(self.0.clone(), session_id)
+    }
+
+    fn cancel_internal_drag(&self, session_id: gpui::DragSessionId) {
+        self.borrow().client.cancel_internal_drag(session_id);
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.borrow().bounds
     }
