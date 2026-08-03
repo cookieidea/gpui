@@ -836,6 +836,10 @@ impl PlatformWindow for WindowsWindow {
         true
     }
 
+    fn supports_backdrop_blur(&self) -> bool {
+        true
+    }
+
     fn set_title(&mut self, title: &str) {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| log::error!("Set title failed: {e}"))

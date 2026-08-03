@@ -3083,6 +3083,7 @@ dependencies = [
  "etagere",
  "futures",
  "gpui",
+ "gpui_effects",
  "gpui_util",
  "image",
  "itertools 0.14.0",

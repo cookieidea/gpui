@@ -29,6 +29,36 @@ pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSI
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 // This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
 const PATH_MULTISAMPLE_COUNT: u32 = 4;
+const DEFAULT_BACKDROP_EFFECT: &str = r#"
+fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
+    return sample_blurred_backdrop(input, vec2<f32>(0.0));
+}
+"#;
+const DIRECTX_BACKDROP_BILINEAR_SUPPORT: &str = r#"
+fn backdrop_sample_bilinear(texture: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(texture));
+    let position = clamp(
+        uv * dimensions - vec2<f32>(0.5),
+        vec2<f32>(0.0),
+        dimensions - vec2<f32>(1.0),
+    );
+    let low = vec2<i32>(floor(position));
+    let high = min(low + vec2<i32>(1), vec2<i32>(dimensions) - vec2<i32>(1));
+    let factor = fract(position);
+    let top = mix(
+        textureLoad(texture, low, 0),
+        textureLoad(texture, vec2<i32>(high.x, low.y), 0),
+        factor.x,
+    );
+    let bottom = mix(
+        textureLoad(texture, vec2<i32>(low.x, high.y), 0),
+        textureLoad(texture, high, 0),
+        factor.x,
+    );
+    return mix(top, bottom, factor.y);
+}
+
+"#;
 
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
@@ -46,6 +76,10 @@ pub(crate) struct DirectXRenderer {
     pipelines: DirectXRenderPipelines,
     effect_pipelines: HashMap<u64, EffectPipeline>,
     failed_effect_pipelines: HashSet<u64>,
+    backdrop_blur_pipeline: BackdropPipeline,
+    backdrop_composite_pipeline: BackdropPipeline,
+    backdrop_effect_pipelines: HashMap<u64, BackdropPipeline>,
+    failed_backdrop_effect_pipelines: HashSet<u64>,
     surfaces: HashMap<SurfaceId, CachedSurface>,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
@@ -81,6 +115,12 @@ struct DirectXResources {
     path_intermediate_srv: Option<ID3D11ShaderResourceView>,
     path_intermediate_msaa_texture: ID3D11Texture2D,
     path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
+
+    // Backdrop textures are allocated lazily because they are only needed by
+    // windows that actually paint a backdrop effect.
+    backdrop_source: Option<DirectXBackdropTexture>,
+    backdrop_horizontal: Option<DirectXBackdropTexture>,
+    backdrop_result: Option<DirectXBackdropTexture>,
 
     // Cached viewport
     viewport: D3D11_VIEWPORT,
@@ -139,6 +179,12 @@ struct DirectXGlobalElements {
     sampler: Option<ID3D11SamplerState>,
 }
 
+struct DirectXBackdropTexture {
+    texture: ID3D11Texture2D,
+    view: Option<ID3D11ShaderResourceView>,
+    render_target_view: Option<ID3D11RenderTargetView>,
+}
+
 struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
@@ -192,6 +238,9 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let (backdrop_blur_pipeline, backdrop_composite_pipeline) =
+            create_builtin_backdrop_pipelines(&devices.device)
+                .context("Creating DirectX backdrop pipelines")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -213,6 +262,10 @@ impl DirectXRenderer {
             pipelines,
             effect_pipelines: HashMap::default(),
             failed_effect_pipelines: HashSet::default(),
+            backdrop_blur_pipeline,
+            backdrop_composite_pipeline,
+            backdrop_effect_pipelines: HashMap::default(),
+            failed_backdrop_effect_pipelines: HashSet::default(),
             surfaces: HashMap::default(),
             direct_composition,
             font_info: Self::get_font_info(),
@@ -328,6 +381,9 @@ impl DirectXRenderer {
             .context("Creating DirectXGlobalElements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectXRenderPipelines")?;
+        let (backdrop_blur_pipeline, backdrop_composite_pipeline) =
+            create_builtin_backdrop_pipelines(&devices.device)
+                .context("Creating DirectX backdrop pipelines")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -352,6 +408,10 @@ impl DirectXRenderer {
         self.pipelines = pipelines;
         self.effect_pipelines.clear();
         self.failed_effect_pipelines.clear();
+        self.backdrop_blur_pipeline = backdrop_blur_pipeline;
+        self.backdrop_composite_pipeline = backdrop_composite_pipeline;
+        self.backdrop_effect_pipelines.clear();
+        self.failed_backdrop_effect_pipelines.clear();
         self.surfaces.clear();
         self.direct_composition = direct_composition;
         self.skip_draws = true;
@@ -368,17 +428,23 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        if !scene.backdrop_blurs.is_empty() {
+            self.ensure_backdrop_resources()?;
+        }
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
         })?;
 
         self.ensure_effect_pipelines(scene)?;
+        self.ensure_backdrop_effect_pipelines(scene)?;
         self.upload_scene_buffers(scene)?;
 
         for batch in scene.batches() {
             match batch {
-                PrimitiveBatch::BackdropBlurs(_) => Ok(()),
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    self.draw_backdrop_blurs(&scene.backdrop_blurs[range])
+                }
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
                 PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
                 PrimitiveBatch::Effects(range) => self.draw_effects(&scene.effects[range]),
@@ -592,6 +658,223 @@ impl DirectXRenderer {
                     self.failed_effect_pipelines.insert(key);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn ensure_backdrop_resources(&mut self) -> Result<()> {
+        let resources = self.resources.as_mut().context("resources missing")?;
+        if resources.backdrop_source.is_some() {
+            return Ok(());
+        }
+
+        let device = &self.devices.as_ref().context("devices missing")?.device;
+        let source = create_backdrop_texture(device, self.width, self.height, false)?;
+        let blur_width = self.width.div_ceil(2);
+        let blur_height = self.height.div_ceil(2);
+        let horizontal = create_backdrop_texture(device, blur_width, blur_height, true)?;
+        let result = create_backdrop_texture(device, blur_width, blur_height, true)?;
+        resources.backdrop_source = Some(source);
+        resources.backdrop_horizontal = Some(horizontal);
+        resources.backdrop_result = Some(result);
+        Ok(())
+    }
+
+    fn ensure_backdrop_effect_pipelines(&mut self, scene: &Scene) -> Result<()> {
+        let shaders = scene
+            .backdrop_blurs
+            .iter()
+            .filter_map(|backdrop| backdrop.shader.clone())
+            .collect::<Vec<_>>();
+        for shader in shaders {
+            let key = shader.id().as_u64();
+            if self.backdrop_effect_pipelines.contains_key(&key)
+                || self.failed_backdrop_effect_pipelines.contains(&key)
+            {
+                continue;
+            }
+
+            let result = translate_backdrop_to_hlsl(&shader).and_then(|source| {
+                BackdropPipeline::new(
+                    &self.devices.as_ref().context("devices missing")?.device,
+                    &source,
+                    "fs_backdrop",
+                    true,
+                )
+            });
+            match result {
+                Ok(pipeline) => {
+                    self.backdrop_effect_pipelines.insert(key, pipeline);
+                }
+                Err(error) => {
+                    log::error!(
+                        "failed to compile GPUI DirectX backdrop effect {key:016x}: {error:#}"
+                    );
+                    self.failed_backdrop_effect_pipelines.insert(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_backdrop_blurs(&mut self, backdrops: &[BackdropBlur]) -> Result<()> {
+        if backdrops.is_empty() {
+            return Ok(());
+        }
+
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let device = devices.device.clone();
+        let device_context = devices.device_context.clone();
+        let (
+            render_target,
+            render_target_view,
+            source_texture,
+            source_view,
+            horizontal_view,
+            horizontal_render_target,
+            result_view,
+            result_render_target,
+            viewport,
+        ) = {
+            let resources = self.resources.as_ref().context("resources missing")?;
+            let source = resources
+                .backdrop_source
+                .as_ref()
+                .context("backdrop source missing")?;
+            let horizontal = resources
+                .backdrop_horizontal
+                .as_ref()
+                .context("horizontal backdrop target missing")?;
+            let result = resources
+                .backdrop_result
+                .as_ref()
+                .context("backdrop result target missing")?;
+            (
+                resources
+                    .render_target
+                    .as_ref()
+                    .context("render target missing")?
+                    .clone(),
+                resources.render_target_view.clone(),
+                source.texture.clone(),
+                source.view.clone(),
+                horizontal.view.clone(),
+                horizontal.render_target_view.clone(),
+                result.view.clone(),
+                result.render_target_view.clone(),
+                resources.viewport,
+            )
+        };
+        let blur_viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: self.width.div_ceil(2) as f32,
+            Height: self.height.div_ceil(2) as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        let viewport_size = [self.width as f32, self.height as f32];
+        let blur_size = [blur_viewport.Width, blur_viewport.Height];
+        let globals = slice::from_ref(&self.globals.effect_global_params_buffer);
+        let sampler = slice::from_ref(&self.globals.sampler);
+
+        for backdrop in backdrops {
+            unsafe {
+                unbind_backdrop_shader_resources(&device_context);
+                device_context.OMSetRenderTargets(None, None);
+                device_context.CopyResource(&source_texture, &render_target);
+                device_context
+                    .OMSetRenderTargets(Some(slice::from_ref(&horizontal_render_target)), None);
+                device_context.ClearRenderTargetView(
+                    horizontal_render_target
+                        .as_ref()
+                        .context("horizontal backdrop render target missing")?,
+                    &[0.0; 4],
+                );
+            }
+
+            let horizontal = BackdropInstance::blur(
+                viewport_size,
+                blur_size,
+                backdrop.blur_radius.0.min(64.0),
+                [1.0, 0.0],
+            );
+            self.backdrop_blur_pipeline.update_buffer(
+                &device,
+                &device_context,
+                slice::from_ref(&horizontal),
+            )?;
+            self.backdrop_blur_pipeline.draw(
+                &device_context,
+                slice::from_ref(&blur_viewport),
+                globals,
+                slice::from_ref(&source_view),
+                None,
+                sampler,
+                1,
+            );
+
+            unsafe {
+                unbind_backdrop_shader_resources(&device_context);
+                device_context
+                    .OMSetRenderTargets(Some(slice::from_ref(&result_render_target)), None);
+                device_context.ClearRenderTargetView(
+                    result_render_target
+                        .as_ref()
+                        .context("backdrop result render target missing")?,
+                    &[0.0; 4],
+                );
+            }
+            let vertical = BackdropInstance::blur(
+                viewport_size,
+                blur_size,
+                backdrop.blur_radius.0.min(64.0),
+                [0.0, 1.0],
+            );
+            self.backdrop_blur_pipeline.update_buffer(
+                &device,
+                &device_context,
+                slice::from_ref(&vertical),
+            )?;
+            self.backdrop_blur_pipeline.draw(
+                &device_context,
+                slice::from_ref(&blur_viewport),
+                globals,
+                slice::from_ref(&horizontal_view),
+                None,
+                sampler,
+                1,
+            );
+
+            unsafe {
+                unbind_backdrop_shader_resources(&device_context);
+                device_context.OMSetRenderTargets(Some(slice::from_ref(&render_target_view)), None);
+            }
+            let composite = BackdropInstance::from(backdrop);
+            let pipeline = backdrop
+                .shader
+                .as_ref()
+                .and_then(|shader| {
+                    self.backdrop_effect_pipelines
+                        .get_mut(&shader.id().as_u64())
+                })
+                .unwrap_or(&mut self.backdrop_composite_pipeline);
+            pipeline.update_buffer(&device, &device_context, slice::from_ref(&composite))?;
+            pipeline.draw(
+                &device_context,
+                slice::from_ref(&viewport),
+                globals,
+                slice::from_ref(&source_view),
+                Some(slice::from_ref(&result_view)),
+                sampler,
+                1,
+            );
+        }
+
+        unsafe {
+            unbind_backdrop_shader_resources(&device_context);
+            device_context.OMSetRenderTargets(Some(slice::from_ref(&render_target_view)), None);
+            device_context.RSSetViewports(Some(slice::from_ref(&viewport)));
         }
         Ok(())
     }
@@ -1229,6 +1512,9 @@ impl DirectXResources {
             path_intermediate_msaa_texture,
             path_intermediate_msaa_view,
             path_intermediate_srv,
+            backdrop_source: None,
+            backdrop_horizontal: None,
+            backdrop_result: None,
             viewport,
         })
     }
@@ -1255,6 +1541,9 @@ impl DirectXResources {
         self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
         self.path_intermediate_msaa_view = path_intermediate_msaa_view;
         self.path_intermediate_srv = path_intermediate_srv;
+        self.backdrop_source = None;
+        self.backdrop_horizontal = None;
+        self.backdrop_result = None;
         self.viewport = viewport;
         Ok(())
     }
@@ -1500,7 +1789,87 @@ impl From<&EffectQuad> for EffectInstance {
     }
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct BackdropInstance {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: [f32; 4],
+    blur_radius: f32,
+    opacity: f32,
+    time: f32,
+    pointer_active: f32,
+    direction: [f32; 2],
+    pointer: [f32; 2],
+    uniforms: [[f32; 4]; gpui::EFFECT_UNIFORM_SLOTS],
+}
+
+impl BackdropInstance {
+    fn blur(
+        viewport_size: [f32; 2],
+        render_size: [f32; 2],
+        blur_radius: f32,
+        direction: [f32; 2],
+    ) -> Self {
+        Self {
+            bounds: Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: ScaledPixels(viewport_size[0]),
+                    height: ScaledPixels(viewport_size[1]),
+                },
+            },
+            content_mask: Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: ScaledPixels(render_size[0]),
+                    height: ScaledPixels(render_size[1]),
+                },
+            },
+            corner_radii: [0.0; 4],
+            blur_radius,
+            opacity: 1.0,
+            time: 0.0,
+            pointer_active: 0.0,
+            direction,
+            pointer: [0.5; 2],
+            uniforms: [[0.0; 4]; gpui::EFFECT_UNIFORM_SLOTS],
+        }
+    }
+}
+
+impl From<&BackdropBlur> for BackdropInstance {
+    fn from(backdrop: &BackdropBlur) -> Self {
+        Self {
+            bounds: backdrop.bounds,
+            content_mask: backdrop.content_mask.bounds,
+            corner_radii: [
+                backdrop.corner_radii.top_left.0,
+                backdrop.corner_radii.top_right.0,
+                backdrop.corner_radii.bottom_right.0,
+                backdrop.corner_radii.bottom_left.0,
+            ],
+            blur_radius: backdrop.blur_radius.0,
+            opacity: backdrop.opacity,
+            time: backdrop.time,
+            pointer_active: u32::from(backdrop.pointer_active) as f32,
+            direction: [0.0; 2],
+            pointer: [backdrop.pointer.x, backdrop.pointer.y],
+            uniforms: *backdrop.uniforms.slots(),
+        }
+    }
+}
+
 struct EffectPipeline {
+    vertex: ID3D11VertexShader,
+    fragment: ID3D11PixelShader,
+    buffer: ID3D11Buffer,
+    buffer_size: usize,
+    view: Option<ID3D11ShaderResourceView>,
+    blend_state: ID3D11BlendState,
+}
+
+struct BackdropPipeline {
     vertex: ID3D11VertexShader,
     fragment: ID3D11PixelShader,
     buffer: ID3D11Buffer,
@@ -1810,6 +2179,87 @@ impl EffectPipeline {
     }
 }
 
+impl BackdropPipeline {
+    fn new(device: &ID3D11Device, source: &str, fragment_entry: &str, blend: bool) -> Result<Self> {
+        let vertex_blob = compile_hlsl(source, "vs_backdrop", "vs_5_0")?;
+        let fragment_blob = compile_hlsl(source, fragment_entry, "ps_5_0")?;
+        let vertex = unsafe {
+            let bytes = std::slice::from_raw_parts(
+                vertex_blob.GetBufferPointer() as *const u8,
+                vertex_blob.GetBufferSize(),
+            );
+            create_vertex_shader(device, bytes)?
+        };
+        let fragment = unsafe {
+            let bytes = std::slice::from_raw_parts(
+                fragment_blob.GetBufferPointer() as *const u8,
+                fragment_blob.GetBufferSize(),
+            );
+            create_fragment_shader(device, bytes)?
+        };
+        let (buffer, view) = create_raw_buffer::<BackdropInstance>(device, 1)?;
+        Ok(Self {
+            vertex,
+            fragment,
+            buffer,
+            buffer_size: 1,
+            view,
+            blend_state: if blend {
+                create_blend_state(device)?
+            } else {
+                create_replace_blend_state(device)?
+            },
+        })
+    }
+
+    fn update_buffer(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        data: &[BackdropInstance],
+    ) -> Result<()> {
+        if self.buffer_size < data.len() {
+            self.buffer_size = data.len().next_power_of_two();
+            let (buffer, view) = create_raw_buffer::<BackdropInstance>(device, self.buffer_size)?;
+            self.buffer = buffer;
+            self.view = view;
+        }
+        update_buffer(device_context, &self.buffer, data)
+    }
+
+    fn draw(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        viewport: &[D3D11_VIEWPORT],
+        global_params: &[Option<ID3D11Buffer>],
+        source: &[Option<ID3D11ShaderResourceView>],
+        blurred: Option<&[Option<ID3D11ShaderResourceView>]>,
+        sampler: &[Option<ID3D11SamplerState>],
+        instance_count: u32,
+    ) {
+        set_pipeline_state(
+            device_context,
+            slice::from_ref(&self.view),
+            D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            viewport,
+            &self.vertex,
+            &self.fragment,
+            global_params,
+            &self.blend_state,
+        );
+        unsafe {
+            device_context.PSSetSamplers(0, Some(sampler));
+            device_context.VSSetShaderResources(0, Some(source));
+            device_context.PSSetShaderResources(0, Some(source));
+            if let Some(blurred) = blurred {
+                device_context.VSSetShaderResources(2, Some(blurred));
+                device_context.PSSetShaderResources(2, Some(blurred));
+            }
+            device_context.DrawInstanced(4, instance_count, 0, 0);
+        }
+    }
+}
+
 fn translate_effect_to_hlsl(shader: &EffectShader) -> Result<String> {
     let source = gpui::compose_effect_shader_wgsl(shader);
     let module = naga::front::wgsl::parse_str(&source)
@@ -1905,6 +2355,119 @@ fn translate_effect_to_hlsl(shader: &EffectShader) -> Result<String> {
     Ok(output)
 }
 
+fn create_builtin_backdrop_pipelines(
+    device: &ID3D11Device,
+) -> Result<(BackdropPipeline, BackdropPipeline)> {
+    let blur_source = translate_backdrop_wgsl_to_hlsl(include_str!("backdrop_blur.wgsl"), false)?;
+    let blur = BackdropPipeline::new(device, &blur_source, "fs_blur", false)?;
+
+    let default_shader = BackdropShader::wgsl(DEFAULT_BACKDROP_EFFECT);
+    let composite_source = translate_backdrop_to_hlsl(&default_shader)?;
+    let composite = BackdropPipeline::new(device, &composite_source, "fs_backdrop", true)?;
+    Ok((blur, composite))
+}
+
+fn translate_backdrop_to_hlsl(shader: &BackdropShader) -> Result<String> {
+    let source = compose_directx_backdrop_shader_wgsl(shader)?;
+    translate_backdrop_wgsl_to_hlsl(&source, true)
+}
+
+fn compose_directx_backdrop_shader_wgsl(shader: &BackdropShader) -> Result<String> {
+    const SAMPLER_DECLARATION: &str = "@group(1) @binding(2) var s_backdrop: sampler;\n";
+    const RAW_SAMPLE: &str = r#"textureSample(
+        t_raw_backdrop,
+        s_backdrop,
+        backdrop_sample_uv(input, displacement_pixels),
+    )"#;
+    const BLURRED_SAMPLE: &str = r#"textureSample(
+        t_blurred_backdrop,
+        s_backdrop,
+        backdrop_sample_uv(input, displacement_pixels),
+    )"#;
+
+    let mut source = gpui::compose_backdrop_shader_wgsl(shader).replace("\r\n", "\n");
+    if !source.contains(SAMPLER_DECLARATION)
+        || !source.contains(RAW_SAMPLE)
+        || !source.contains(BLURRED_SAMPLE)
+    {
+        anyhow::bail!("backdrop shader contract changed without updating the DirectX composer");
+    }
+    source = source.replace(SAMPLER_DECLARATION, "");
+    source = source.replacen(
+        "fn backdrop_straight_color",
+        &format!("{DIRECTX_BACKDROP_BILINEAR_SUPPORT}fn backdrop_straight_color"),
+        1,
+    );
+    source = source.replace(
+        RAW_SAMPLE,
+        "backdrop_sample_bilinear(t_raw_backdrop, backdrop_sample_uv(input, displacement_pixels))",
+    );
+    source = source.replace(
+        BLURRED_SAMPLE,
+        "backdrop_sample_bilinear(t_blurred_backdrop, backdrop_sample_uv(input, displacement_pixels))",
+    );
+    Ok(source)
+}
+
+fn translate_backdrop_wgsl_to_hlsl(source: &str, has_blurred_texture: bool) -> Result<String> {
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|error| anyhow::anyhow!("WGSL parse error: {error}"))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|error| anyhow::anyhow!("WGSL validation error: {error}"))?;
+    let mut options = naga::back::hlsl::Options {
+        shader_model: naga::back::hlsl::ShaderModel::V5_0,
+        fake_missing_bindings: false,
+        ..Default::default()
+    };
+    for (binding, register) in [(0, 1), (1, 0)] {
+        options.binding_map.insert(
+            naga::ResourceBinding { group: 1, binding },
+            naga::back::hlsl::BindTarget {
+                space: 0,
+                register,
+                ..Default::default()
+            },
+        );
+    }
+    options.binding_map.insert(
+        naga::ResourceBinding {
+            group: 0,
+            binding: 0,
+        },
+        naga::back::hlsl::BindTarget {
+            space: 0,
+            register: 0,
+            ..Default::default()
+        },
+    );
+    if has_blurred_texture {
+        options.binding_map.insert(
+            naga::ResourceBinding {
+                group: 1,
+                binding: 3,
+            },
+            naga::back::hlsl::BindTarget {
+                space: 0,
+                register: 2,
+                ..Default::default()
+            },
+        );
+    }
+    let pipeline_options = naga::back::hlsl::PipelineOptions::default();
+    let mut output = String::new();
+    let reflection = naga::back::hlsl::Writer::new(&mut output, &options, &pipeline_options)
+        .write(&module, &info, None)
+        .map_err(|error| anyhow::anyhow!("HLSL generation error: {error}"))?;
+    for entry in reflection.entry_point_names {
+        entry.map_err(|error| anyhow::anyhow!("HLSL entry-point generation error: {error}"))?;
+    }
+    Ok(output)
+}
+
 fn compile_hlsl(source: &str, entry: &str, target: &str) -> Result<ID3DBlob> {
     use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
     use windows::core::PCSTR;
@@ -1945,7 +2508,14 @@ fn create_effect_buffer(
     device: &ID3D11Device,
     instance_count: usize,
 ) -> Result<(ID3D11Buffer, Option<ID3D11ShaderResourceView>)> {
-    let byte_width = mem::size_of::<EffectInstance>() * instance_count;
+    create_raw_buffer::<EffectInstance>(device, instance_count)
+}
+
+fn create_raw_buffer<T>(
+    device: &ID3D11Device,
+    instance_count: usize,
+) -> Result<(ID3D11Buffer, Option<ID3D11ShaderResourceView>)> {
+    let byte_width = mem::size_of::<T>() * instance_count;
     let desc = D3D11_BUFFER_DESC {
         ByteWidth: byte_width as u32,
         Usage: D3D11_USAGE_DYNAMIC,
@@ -2136,6 +2706,52 @@ fn create_path_intermediate_texture(
     Ok((texture, Some(shader_resource_view.unwrap())))
 }
 
+fn create_backdrop_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    render_target: bool,
+) -> Result<DirectXBackdropTexture> {
+    let bind_flags = D3D11_BIND_SHADER_RESOURCE.0
+        | if render_target {
+            D3D11_BIND_RENDER_TARGET.0
+        } else {
+            0
+        };
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: RENDER_TARGET_FORMAT,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: bind_flags as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+    let texture = texture.context("Direct3D did not create a backdrop texture")?;
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view))? };
+    let render_target_view = if render_target {
+        let mut view = None;
+        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut view))? };
+        view
+    } else {
+        None
+    };
+    Ok(DirectXBackdropTexture {
+        texture,
+        view,
+        render_target_view,
+    })
+}
+
 #[inline]
 fn create_path_intermediate_msaa_texture_and_view(
     device: &ID3D11Device,
@@ -2220,6 +2836,18 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
         let mut state = None;
         device.CreateBlendState(&desc, Some(&mut state))?;
         Ok(state.unwrap())
+    }
+}
+
+#[inline]
+fn create_replace_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = false.into();
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        state.context("Direct3D did not create a replace blend state")
     }
 }
 
@@ -2393,6 +3021,68 @@ fn set_pipeline_state(
         device_context.VSSetConstantBuffers(0, Some(global_params));
         device_context.PSSetConstantBuffers(0, Some(global_params));
         device_context.OMSetBlendState(blend_state, None, 0xFFFFFFFF);
+    }
+}
+
+unsafe fn unbind_backdrop_shader_resources(device_context: &ID3D11DeviceContext) {
+    let empty: [Option<ID3D11ShaderResourceView>; 3] = [None, None, None];
+    unsafe {
+        device_context.VSSetShaderResources(0, Some(&empty));
+        device_context.PSSetShaderResources(0, Some(&empty));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shader_struct_span(module: &naga::Module, name: &str) -> u32 {
+        module
+            .types
+            .iter()
+            .find_map(|(_, ty)| {
+                if ty.name.as_deref() != Some(name) {
+                    return None;
+                }
+                match &ty.inner {
+                    naga::TypeInner::Struct { span, .. } => Some(*span),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| panic!("missing shader struct {name}"))
+    }
+
+    #[::core::prelude::v1::test]
+    fn backdrop_blur_shader_matches_windows_instance_layout() {
+        let source = include_str!("backdrop_blur.wgsl");
+        let module = naga::front::wgsl::parse_str(source).expect("backdrop blur should parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("backdrop blur should validate");
+        assert_eq!(
+            shader_struct_span(&module, "BackdropInstance") as usize,
+            mem::size_of::<BackdropInstance>(),
+        );
+
+        let hlsl = translate_backdrop_wgsl_to_hlsl(source, false)
+            .expect("backdrop blur should translate to HLSL");
+        compile_hlsl(&hlsl, "vs_backdrop", "vs_5_0")
+            .expect("backdrop blur vertex shader should compile");
+        compile_hlsl(&hlsl, "fs_blur", "ps_5_0")
+            .expect("backdrop blur fragment shader should compile");
+    }
+
+    #[::core::prelude::v1::test]
+    fn liquid_glass_translates_and_compiles_for_directx() {
+        let source = translate_backdrop_to_hlsl(&gpui_effects::liquid_glass_shader())
+            .expect("liquid glass should translate to HLSL");
+        compile_hlsl(&source, "vs_backdrop", "vs_5_0")
+            .expect("liquid glass vertex shader should compile");
+        compile_hlsl(&source, "fs_backdrop", "ps_5_0")
+            .expect("liquid glass fragment shader should compile");
     }
 }
 
