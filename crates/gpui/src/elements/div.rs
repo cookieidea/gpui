@@ -2808,6 +2808,9 @@ impl Interactivity {
                                     phase: DragPhase::Internal,
                                     drop_performed: false,
                                     on_end,
+                                    system_options: None,
+                                    icon_created: false,
+                                    source_was_unmapped: false,
                                 }),
                             });
                             pending_mouse_down.take();

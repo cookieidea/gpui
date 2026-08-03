@@ -2383,18 +2383,51 @@ impl App {
         let DragOrigin::Internal(session) = active_drag.origin else {
             return true;
         };
-        let Some(listener) = session.on_end else {
-            return true;
-        };
-
+        let should_restore_source =
+            session.source_was_unmapped && matches!(outcome, DragEnd::Cancelled);
+        let icon_created = session.icon_created;
+        let session_id = session.session_id;
+        let listener = session.on_end;
         let value = active_drag.data.value;
         if session.source_window == window.window_handle().window_id() {
-            listener(&outcome, value.as_ref(), window, self);
+            if icon_created {
+                window
+                    .platform_window
+                    .destroy_internal_drag_icon(session_id);
+            }
+            if should_restore_source && let Err(error) = window.platform_window.set_mapped(true) {
+                log::error!(
+                    "[gpui-drag-icon] failed to remap source session={}: {error:#}",
+                    session_id.as_u64()
+                );
+            }
+            if let Some(listener) = listener {
+                listener(&outcome, value.as_ref(), window, self);
+            }
         } else if let Some(handle) = self.window_handles.get(&session.source_window).copied() {
             let _ = handle.update(self, move |_, source_window, cx| {
-                listener(&outcome, value.as_ref(), source_window, cx);
+                if icon_created {
+                    source_window
+                        .platform_window
+                        .destroy_internal_drag_icon(session_id);
+                }
+                if should_restore_source
+                    && let Err(error) = source_window.platform_window.set_mapped(true)
+                {
+                    log::error!(
+                        "[gpui-drag-icon] failed to remap source session={}: {error:#}",
+                        session_id.as_u64()
+                    );
+                }
+                if let Some(listener) = listener {
+                    listener(&outcome, value.as_ref(), source_window, cx);
+                }
                 source_window.refresh();
             });
+        } else if icon_created {
+            window
+                .platform_window
+                .destroy_internal_drag_icon(session_id);
         }
 
         true
@@ -2791,10 +2824,48 @@ pub enum DragEnd {
 pub enum DragPhase {
     /// GPUI is handling the drag inside its source window.
     Internal,
+    /// GPUI is preparing the platform drag icon and native drag request.
+    PreparingNative,
     /// The platform drag-and-drop protocol owns pointer routing.
     Native,
     /// The drag is completing and no longer accepts platform events.
     Finishing,
+}
+
+/// Selects the visual used by the platform while it owns a native drag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragIconPolicy {
+    /// Do not create a platform drag icon.
+    None,
+    /// Render the active drag view into a dedicated platform drag icon surface.
+    ActiveDragView,
+}
+
+/// Controls the source window while a native drag is active.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragSourceWindowPolicy {
+    /// Keep the source window mapped.
+    KeepVisible,
+    /// Temporarily unmap the source window after the native drag starts.
+    HideWhileNative,
+}
+
+/// Options used when promoting a process-local drag to a platform drag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemDragOptions {
+    /// Platform drag icon policy.
+    pub icon: DragIconPolicy,
+    /// Source window visibility policy.
+    pub source_window: DragSourceWindowPolicy,
+}
+
+impl Default for SystemDragOptions {
+    fn default() -> Self {
+        Self {
+            icon: DragIconPolicy::ActiveDragView,
+            source_window: DragSourceWindowPolicy::KeepVisible,
+        }
+    }
 }
 
 pub(crate) type DragEndListener = Rc<dyn Fn(&DragEnd, &dyn Any, &mut Window, &mut App) + 'static>;
@@ -2805,6 +2876,9 @@ pub(crate) struct InternalDragSession {
     pub phase: DragPhase,
     pub drop_performed: bool,
     pub on_end: Option<DragEndListener>,
+    pub system_options: Option<SystemDragOptions>,
+    pub icon_created: bool,
+    pub source_was_unmapped: bool,
 }
 
 pub(crate) enum DragOrigin {

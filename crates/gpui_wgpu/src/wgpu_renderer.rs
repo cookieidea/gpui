@@ -559,6 +559,52 @@ impl WgpuRenderer {
         )
     }
 
+    /// Creates a renderer for another presentation surface while sharing this renderer's atlas.
+    ///
+    /// This is intended for short-lived auxiliary surfaces, such as Wayland drag icons, whose
+    /// scenes reference sprites allocated by the source window.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn new_with_shared_atlas<W>(
+        &self,
+        window: &W,
+        config: WgpuSurfaceConfig,
+    ) -> anyhow::Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+    {
+        let window_handle = window
+            .window_handle()
+            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+        let gpu_context = self
+            .context
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("shared-atlas renderer requires a GPU context"))?;
+
+        let instance = gpu_context
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GPU context is unavailable"))?
+            .instance
+            .clone();
+        let surface = create_surface(&instance, window_handle.as_raw())?;
+
+        let context_ref = gpu_context.borrow();
+        let context = context_ref
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GPU context is unavailable"))?;
+        context.check_compatible_with_surface(&surface)?;
+
+        Self::new_internal(
+            Some(gpu_context.clone()),
+            context,
+            surface,
+            config,
+            self.compositor_gpu,
+            self.atlas.clone(),
+        )
+    }
+
     #[cfg(target_family = "wasm")]
     pub fn new_from_canvas(
         context: &WgpuContext,

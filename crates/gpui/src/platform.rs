@@ -763,8 +763,38 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_close(&self, callback: Box<dyn FnOnce()>);
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
+    /// Creates and presents the first frame of an auxiliary platform drag icon.
+    fn create_internal_drag_icon(
+        &self,
+        _session_id: DragSessionId,
+        _logical_size: Size<Pixels>,
+        _scale_factor: f32,
+        _hotspot: Point<Pixels>,
+        _scene: &Scene,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "platform drag icons are not supported by this platform"
+        ))
+    }
+    /// Updates an existing auxiliary platform drag icon.
+    fn update_internal_drag_icon(
+        &self,
+        _session_id: DragSessionId,
+        _logical_size: Size<Pixels>,
+        _scale_factor: f32,
+        _hotspot: Point<Pixels>,
+        _scene: &Scene,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Explicitly releases an auxiliary platform drag icon.
+    fn destroy_internal_drag_icon(&self, _session_id: DragSessionId) {}
     /// Promotes a GPUI process-local drag to the platform drag-and-drop protocol.
-    fn start_internal_drag(&self, _session_id: DragSessionId) -> anyhow::Result<()> {
+    fn start_internal_drag(
+        &self,
+        _session_id: DragSessionId,
+        _has_icon: bool,
+    ) -> anyhow::Result<()> {
         Err(anyhow::anyhow!(
             "internal cross-window drag-and-drop is not supported by this platform"
         ))
@@ -823,6 +853,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn set_app_id(&mut self, _app_id: &str) {}
     fn map_window(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Maps or unmaps the platform surface without destroying the logical GPUI window.
+    fn set_mapped(&self, _mapped: bool) -> anyhow::Result<()> {
         Ok(())
     }
     fn window_controls(&self) -> WindowControls {

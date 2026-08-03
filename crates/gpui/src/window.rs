@@ -5,22 +5,23 @@ use crate::{
     Arena, Asset, AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background,
     BorderGradient, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
     CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
-    DisplayId, DragEnd, DragOrigin, Edges, Effect, EffectQuad, EffectShader, EffectUniforms,
-    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
-    GpuSpecs, Hsla, InputHandler, InternalDragEvent, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    PaintBackdropEffect, PaintEffect, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, Render, RenderColorSvgParams, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, Transformation, TransformationMatrix, Underline,
-    UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls,
-    WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler,
-    px, rems, size, transparent_black,
+    DisplayId, DragEnd, DragIconPolicy, DragOrigin, DragPhase, DragSourceWindowPolicy, Edges,
+    Effect, EffectQuad, EffectShader, EffectUniforms, Entity, EntityId, EventEmitter,
+    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler,
+    InternalDragEvent, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintBackdropEffect, PaintEffect, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
+    RenderColorSvgParams, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
+    SubscriberSet, Subscription, SystemDragOptions, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement,
+    ThermalState, Transformation, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
+    transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -2291,6 +2292,15 @@ impl Window {
     /// This keeps the typed payload inside GPUI. The platform transports only the opaque session
     /// identifier and routes pointer events to other windows in this process.
     pub fn promote_active_drag_to_system(&mut self, cx: &mut App) -> Result<crate::DragSessionId> {
+        self.promote_active_drag_to_system_with_options(SystemDragOptions::default(), cx)
+    }
+
+    /// Promotes the active process-local drag with explicit platform presentation options.
+    pub fn promote_active_drag_to_system_with_options(
+        &mut self,
+        options: SystemDragOptions,
+        cx: &mut App,
+    ) -> Result<crate::DragSessionId> {
         let source_window = self.handle.id;
         let (session_id, phase) = match cx.active_drag.as_ref().map(|drag| &drag.origin) {
             Some(DragOrigin::Internal(session)) if session.source_window == source_window => {
@@ -2305,22 +2315,162 @@ impl Window {
             None => return Err(anyhow!("there is no active drag to promote")),
         };
 
-        if phase == crate::DragPhase::Native {
+        if phase == DragPhase::Native {
             return Ok(session_id);
         }
-        if phase != crate::DragPhase::Internal {
+        if phase != DragPhase::Internal {
             return Err(anyhow!("the active drag is already finishing"));
         }
 
-        self.platform_window.start_internal_drag(session_id)?;
+        if let Some(active_drag) = cx.active_drag.as_mut()
+            && let DragOrigin::Internal(session) = &mut active_drag.origin
+        {
+            session.phase = DragPhase::PreparingNative;
+            session.system_options = Some(options);
+        }
+
+        let icon_created = if options.icon == DragIconPolicy::ActiveDragView {
+            let (view, cursor_offset) = cx
+                .active_drag
+                .as_ref()
+                .map(|drag| (drag.view.clone(), drag.cursor_offset))
+                .ok_or_else(|| anyhow!("the active drag disappeared while preparing its icon"))?;
+            let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
+            let (mut scene, logical_size, hotspot) =
+                self.render_drag_icon_scene(view, cursor_offset, DrawPhase::None, cx);
+            scene.finish();
+            if let Err(error) = self.platform_window.create_internal_drag_icon(
+                session_id,
+                logical_size,
+                self.scale_factor(),
+                hotspot,
+                &scene,
+            ) {
+                self.rollback_system_drag_promotion(session_id, cx);
+                return Err(error.context("failed to create the platform drag icon"));
+            }
+            true
+        } else {
+            false
+        };
+
+        if let Err(error) = self
+            .platform_window
+            .start_internal_drag(session_id, icon_created)
+        {
+            if icon_created {
+                self.platform_window.destroy_internal_drag_icon(session_id);
+            }
+            self.rollback_system_drag_promotion(session_id, cx);
+            return Err(error.context("failed to start the platform drag"));
+        }
+
+        let mut source_was_unmapped = false;
+        if options.source_window == DragSourceWindowPolicy::HideWhileNative {
+            if let Err(error) = self.platform_window.set_mapped(false) {
+                self.platform_window.cancel_internal_drag(session_id);
+                if icon_created {
+                    self.platform_window.destroy_internal_drag_icon(session_id);
+                }
+                self.rollback_system_drag_promotion(session_id, cx);
+                return Err(error.context("failed to hide the native drag source window"));
+            }
+            source_was_unmapped = true;
+        }
+
         if let Some(active_drag) = cx.active_drag.as_mut()
             && let DragOrigin::Internal(session) = &mut active_drag.origin
             && session.session_id == session_id
         {
-            session.phase = crate::DragPhase::Native;
+            session.phase = DragPhase::Native;
+            session.icon_created = icon_created;
+            session.source_was_unmapped = source_was_unmapped;
         }
         self.refresh();
         Ok(session_id)
+    }
+
+    fn rollback_system_drag_promotion(&mut self, session_id: crate::DragSessionId, cx: &mut App) {
+        if let Some(active_drag) = cx.active_drag.as_mut()
+            && let DragOrigin::Internal(session) = &mut active_drag.origin
+            && session.session_id == session_id
+        {
+            session.phase = DragPhase::Internal;
+            session.system_options = None;
+            session.icon_created = false;
+            session.source_was_unmapped = false;
+        }
+        self.refresh();
+    }
+
+    fn render_drag_icon_scene(
+        &mut self,
+        view: AnyView,
+        cursor_offset: Point<Pixels>,
+        restore_phase: DrawPhase,
+        cx: &mut App,
+    ) -> (Scene, Size<Pixels>, Point<Pixels>) {
+        const PADDING: Pixels = px(16.);
+
+        let mut icon_frame = Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone()));
+        mem::swap(&mut self.next_frame, &mut icon_frame);
+
+        self.invalidator.set_phase(DrawPhase::Prepaint);
+        let mut element = view.into_any_element();
+        let content_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
+        element.prepaint_at(point(PADDING, PADDING), self, cx);
+        self.prepaint_deferred_draws(cx);
+
+        self.invalidator.set_phase(DrawPhase::Paint);
+        element.paint(self, cx);
+        self.paint_deferred_draws(cx);
+
+        let logical_size = Size {
+            width: content_size.width + PADDING * 2.,
+            height: content_size.height + PADDING * 2.,
+        };
+        let hotspot = cursor_offset + point(PADDING, PADDING);
+        let scene = mem::take(&mut self.next_frame.scene);
+
+        mem::swap(&mut self.next_frame, &mut icon_frame);
+        self.layout_engine.as_mut().unwrap().clear();
+        self.invalidator.set_phase(restore_phase);
+        (scene, logical_size, hotspot)
+    }
+
+    fn update_native_drag_icon_now(&mut self, session_id: crate::DragSessionId, cx: &mut App) {
+        let Some((view, cursor_offset)) =
+            cx.active_drag.as_ref().and_then(|drag| match &drag.origin {
+                DragOrigin::Internal(session)
+                    if session.session_id == session_id
+                        && session.source_window == self.handle.id
+                        && session.phase == DragPhase::Native
+                        && session.icon_created =>
+                {
+                    Some((drag.view.clone(), drag.cursor_offset))
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+
+        let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
+        let (mut scene, logical_size, hotspot) =
+            self.render_drag_icon_scene(view, cursor_offset, DrawPhase::None, cx);
+        scene.finish();
+        if let Err(error) = self.platform_window.update_internal_drag_icon(
+            session_id,
+            logical_size,
+            self.scale_factor(),
+            hotspot,
+            &scene,
+        ) {
+            log::error!(
+                "[gpui-drag-icon] update failed session={}: {error:#}",
+                session_id.as_u64()
+            );
+        }
     }
 
     pub(crate) fn cancel_internal_drag(&self, session_id: crate::DragSessionId) {
@@ -2905,6 +3055,7 @@ impl Window {
 
         let mut prompt_element = None;
         let mut active_drag_element = None;
+        let mut native_drag_icon = None;
         let mut tooltip_element = None;
         if let Some(prompt) = self.prompt.take() {
             let mut element = prompt.view.any_view().into_any_element();
@@ -2917,10 +3068,33 @@ impl Window {
             prompt_element = Some(element);
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
-            let mut element = active_drag.view.clone().into_any_element();
-            let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
-            active_drag_element = Some(element);
+            let renders_platform_icon = matches!(
+                &active_drag.origin,
+                DragOrigin::Internal(session)
+                    if session.source_window == self.handle.id
+                        && session.phase == DragPhase::Native
+                        && session.icon_created
+            );
+            let native_drag_has_icon = matches!(
+                &active_drag.origin,
+                DragOrigin::Internal(session)
+                    if session.phase == DragPhase::Native && session.icon_created
+            );
+            if renders_platform_icon {
+                native_drag_icon = Some((
+                    active_drag.view.clone(),
+                    active_drag.cursor_offset,
+                    match &active_drag.origin {
+                        DragOrigin::Internal(session) => session.session_id,
+                        DragOrigin::ExternalFiles => unreachable!(),
+                    },
+                ));
+            } else if !native_drag_has_icon {
+                let mut element = active_drag.view.clone().into_any_element();
+                let offset = self.mouse_position() - active_drag.cursor_offset;
+                element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+                active_drag_element = Some(element);
+            }
             cx.active_drag = Some(active_drag);
         } else {
             tooltip_element = self.prepaint_tooltip(cx);
@@ -2943,6 +3117,24 @@ impl Window {
             drag_element.paint(self, cx);
         } else if let Some(mut tooltip_element) = tooltip_element {
             tooltip_element.paint(self, cx);
+        }
+
+        if let Some((view, cursor_offset, session_id)) = native_drag_icon {
+            let (mut scene, logical_size, hotspot) =
+                self.render_drag_icon_scene(view, cursor_offset, DrawPhase::Paint, cx);
+            scene.finish();
+            if let Err(error) = self.platform_window.update_internal_drag_icon(
+                session_id,
+                logical_size,
+                self.scale_factor(),
+                hotspot,
+                &scene,
+            ) {
+                log::error!(
+                    "[gpui-drag-icon] update failed session={}: {error:#}",
+                    session_id.as_u64()
+                );
+            }
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -5059,6 +5251,7 @@ impl Window {
         cx.propagate_event = true;
         // Handlers may set this to true by calling `prevent_default`.
         self.default_prevented = false;
+        let mut refresh_native_drag_icon = None;
 
         // Once a drag is promoted, Wayland's data-device protocol owns release routing. The
         // pointer release still reaches the source wl_pointer, but dispatching it to normal GPUI
@@ -5190,6 +5383,7 @@ impl Window {
                     if !matches_session {
                         return DispatchEventResult::default();
                     }
+                    refresh_native_drag_icon = Some(session_id);
                     self.mouse_position = position;
                     PlatformInput::MouseMove(MouseMoveEvent {
                         position,
@@ -5207,6 +5401,7 @@ impl Window {
                     if !matches_session {
                         return DispatchEventResult::default();
                     }
+                    refresh_native_drag_icon = Some(session_id);
                     PlatformInput::MouseExited(crate::MouseExitEvent {
                         position: self.mouse_position,
                         pressed_button: Some(MouseButton::Left),
@@ -5286,6 +5481,24 @@ impl Window {
             self.dispatch_mouse_event(any_mouse_event, preserve_drag_on_mouse_up, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
+        }
+
+        if let Some(session_id) = refresh_native_drag_icon {
+            let source_window = cx.active_drag.as_ref().and_then(|drag| match &drag.origin {
+                DragOrigin::Internal(session) if session.session_id == session_id => {
+                    Some(session.source_window)
+                }
+                _ => None,
+            });
+            if source_window == Some(self.handle.id) {
+                self.update_native_drag_icon_now(session_id, cx);
+            } else if let Some(source_window) = source_window
+                && let Some(handle) = cx.window_handles.get(&source_window).copied()
+            {
+                let _ = handle.update(cx, move |_, window, cx| {
+                    window.update_native_drag_icon_now(session_id, cx);
+                });
+            }
         }
 
         if self.invalidator.update_count() > update_count_before {

@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context as _;
 use ashpd::WindowIdentifier;
 use calloop::{
     EventLoop, LoopHandle,
@@ -76,7 +77,7 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
 
 use super::{
     display::WaylandDisplay,
-    window::{ImeInput, WaylandWindowStatePtr},
+    window::{ImeInput, WaylandDragIcon, WaylandWindowStatePtr},
 };
 
 use crate::linux::{
@@ -241,6 +242,7 @@ pub(crate) struct WaylandClientState {
     data_device: Option<wl_data_device::WlDataDevice>,
     internal_drag_mime: String,
     native_drag_source: Option<NativeDragSource>,
+    pending_drag_icons: HashMap<DragSessionId, WaylandDragIcon>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pre_edit_text: Option<String>,
@@ -302,6 +304,7 @@ struct NativeDragSource {
     session_id: DragSessionId,
     window: WaylandWindowStatePtr,
     data_source: wl_data_source::WlDataSource,
+    icon: Option<WaylandDragIcon>,
 }
 
 #[derive(Clone, Copy)]
@@ -365,6 +368,7 @@ impl WaylandClientStatePtr {
         &self,
         source_window: WaylandWindowStatePtr,
         session_id: DragSessionId,
+        has_icon: bool,
     ) -> anyhow::Result<()> {
         let client = self.get_client();
         let mut state = client.borrow_mut();
@@ -381,6 +385,20 @@ impl WaylandClientStatePtr {
         if serial == 0 {
             anyhow::bail!("Wayland has no initiating mouse-press serial for this drag");
         }
+        if state.native_drag_source.is_some() {
+            anyhow::bail!("another Wayland native drag is already active");
+        }
+
+        let mut icon = if has_icon {
+            Some(
+                state
+                    .pending_drag_icons
+                    .remove(&session_id)
+                    .ok_or_else(|| anyhow::anyhow!("drag icon was not created for this session"))?,
+            )
+        } else {
+            None
+        };
 
         let data_source = manager.create_data_source(
             &state.globals.qh,
@@ -388,22 +406,101 @@ impl WaylandClientStatePtr {
         );
         data_source.offer(state.internal_drag_mime.clone());
         data_source.set_actions(DndAction::Move);
-        data_device.start_drag(Some(&data_source), &source_window.surface(), None, serial);
+        data_device.start_drag(
+            Some(&data_source),
+            &source_window.surface(),
+            icon.as_ref().map(WaylandDragIcon::surface),
+            serial,
+        );
+        if let Some(icon) = icon.as_mut() {
+            icon.activate_role();
+        }
+        if let Err(error) = source_window
+            .surface()
+            .backend()
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("Wayland connection is unavailable"))?
+            .flush()
+            .context("failed to flush the Wayland drag request")
+        {
+            data_source.destroy();
+            return Err(error);
+        }
         state.native_drag_source = Some(NativeDragSource {
             session_id,
             window: source_window,
             data_source,
+            icon,
         });
         Ok(())
+    }
+
+    pub fn create_internal_drag_icon(
+        &self,
+        source_window: &WaylandWindowStatePtr,
+        session_id: DragSessionId,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &gpui::Scene,
+    ) -> anyhow::Result<()> {
+        let icon = source_window.create_drag_icon(logical_size, scale_factor, hotspot, scene)?;
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        if let Some(mut old_icon) = state.pending_drag_icons.insert(session_id, icon) {
+            old_icon.destroy_once();
+        }
+        Ok(())
+    }
+
+    pub fn update_internal_drag_icon(
+        &self,
+        session_id: DragSessionId,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &gpui::Scene,
+    ) -> anyhow::Result<()> {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        if let Some(icon) = state
+            .native_drag_source
+            .as_mut()
+            .filter(|source| source.session_id == session_id)
+            .and_then(|source| source.icon.as_mut())
+        {
+            return icon.draw(logical_size, scale_factor, hotspot, scene);
+        }
+        if let Some(icon) = state.pending_drag_icons.get_mut(&session_id) {
+            return icon.draw(logical_size, scale_factor, hotspot, scene);
+        }
+        anyhow::bail!("drag icon is not active for this session")
+    }
+
+    pub fn destroy_internal_drag_icon(&self, session_id: DragSessionId) {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        if let Some(mut icon) = state.pending_drag_icons.remove(&session_id) {
+            icon.destroy_once();
+        }
+        if let Some(icon) = state
+            .native_drag_source
+            .as_mut()
+            .filter(|source| source.session_id == session_id)
+            .and_then(|source| source.icon.as_mut())
+        {
+            icon.destroy_once();
+        }
     }
 
     pub fn cancel_internal_drag(&self, session_id: DragSessionId) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
-        let Some(source) = state.native_drag_source.take() else {
+        let Some(mut source) = state.native_drag_source.take() else {
             return;
         };
         if source.session_id == session_id {
+            drop(source.icon.take());
             source.data_source.destroy();
         } else {
             state.native_drag_source = Some(source);
@@ -788,6 +885,7 @@ impl WaylandClient {
                 uuid::Uuid::new_v4().simple()
             ),
             native_drag_source: None,
+            pending_drag_icons: HashMap::default(),
             primary_selection,
             text_input: None,
             pre_edit_text: None,

@@ -82,6 +82,118 @@ impl rwh::HasDisplayHandle for RawWindow {
     }
 }
 
+pub(crate) struct WaylandDragIcon {
+    surface: wl_surface::WlSurface,
+    viewport: Option<wp_viewport::WpViewport>,
+    renderer: Option<WgpuRenderer>,
+    logical_size: Size<Pixels>,
+    scale_factor: f32,
+    hotspot: Point<Pixels>,
+    applied_hotspot: (i32, i32),
+    role_assigned: bool,
+    destroyed: bool,
+}
+
+fn drag_icon_hotspot_delta(applied: (i32, i32), next: (i32, i32)) -> (i32, i32) {
+    (applied.0 - next.0, applied.1 - next.1)
+}
+
+impl WaylandDragIcon {
+    fn update_surface_state(
+        &mut self,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+    ) {
+        self.logical_size = logical_size;
+        self.scale_factor = scale_factor;
+        self.hotspot = hotspot;
+
+        if let Some(viewport) = &self.viewport {
+            self.surface.set_buffer_scale(1);
+            viewport.set_destination(
+                f32::from(logical_size.width).ceil() as i32,
+                f32::from(logical_size.height).ceil() as i32,
+            );
+        } else {
+            self.surface
+                .set_buffer_scale(scale_factor.round().max(1.) as i32);
+        }
+
+        self.apply_hotspot_offset();
+    }
+
+    fn apply_hotspot_offset(&mut self) {
+        if !self.role_assigned || self.surface.version() < 5 {
+            return;
+        }
+        let hotspot = (
+            f32::from(self.hotspot.x).round() as i32,
+            f32::from(self.hotspot.y).round() as i32,
+        );
+        // wl_surface.offset is relative to the currently attached buffer, not an absolute
+        // surface position. Only submit the delta when the hotspot changes; resending the full
+        // negative hotspot each frame would make the icon drift away from the pointer.
+        let delta = drag_icon_hotspot_delta(self.applied_hotspot, hotspot);
+        if delta != (0, 0) {
+            self.surface.offset(delta.0, delta.1);
+            self.applied_hotspot = hotspot;
+        }
+    }
+
+    pub(crate) fn activate_role(&mut self) {
+        self.role_assigned = true;
+        self.apply_hotspot_offset();
+        self.surface.commit();
+    }
+
+    pub(crate) fn draw(
+        &mut self,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &Scene,
+    ) -> anyhow::Result<()> {
+        if self.destroyed {
+            anyhow::bail!("drag icon surface has already been destroyed");
+        }
+        self.update_surface_state(logical_size, scale_factor, hotspot);
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("drag icon renderer has been destroyed"))?;
+        renderer.update_drawable_size(logical_size.to_device_pixels(scale_factor));
+        if !renderer.draw(scene) {
+            anyhow::bail!("drag icon renderer did not present a frame");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn surface(&self) -> &wl_surface::WlSurface {
+        &self.surface
+    }
+
+    pub(crate) fn destroy_once(&mut self) {
+        if self.destroyed {
+            return;
+        }
+        self.destroyed = true;
+        if let Some(mut renderer) = self.renderer.take() {
+            renderer.destroy();
+        }
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+        self.surface.destroy();
+    }
+}
+
+impl Drop for WaylandDragIcon {
+    fn drop(&mut self) {
+        self.destroy_once();
+    }
+}
+
 #[derive(Debug)]
 struct InProgressConfigure {
     size: Option<Size<Pixels>>,
@@ -129,6 +241,7 @@ pub struct WaylandWindowState {
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
+    mapped: bool,
 }
 
 pub enum WaylandSurfaceState {
@@ -592,6 +705,7 @@ impl WaylandWindowState {
             window_controls: WindowControls::default(),
             client_inset: None,
             accesskit_adapter: None,
+            mapped: true,
         })
     }
 
@@ -763,6 +877,64 @@ impl WaylandWindowStatePtr {
 
     pub fn surface(&self) -> wl_surface::WlSurface {
         self.state.borrow().surface.clone()
+    }
+
+    pub(crate) fn create_drag_icon(
+        &self,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &Scene,
+    ) -> anyhow::Result<WaylandDragIcon> {
+        let state = self.state.borrow();
+        let surface = state
+            .globals
+            .compositor
+            .create_surface(&state.globals.qh, ());
+        let viewport = state
+            .globals
+            .viewporter
+            .as_ref()
+            .map(|viewporter| viewporter.get_viewport(&surface, &state.globals.qh, ()));
+        let raw_window = RawWindow {
+            window: surface.id().as_ptr().cast::<c_void>(),
+            display: surface
+                .backend()
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("Wayland display is unavailable"))?
+                .display_ptr()
+                .cast::<c_void>(),
+        };
+        let config = WgpuSurfaceConfig {
+            size: logical_size.to_device_pixels(scale_factor),
+            transparent: true,
+            preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+        };
+        let renderer = match state.renderer.new_with_shared_atlas(&raw_window, config) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                if let Some(viewport) = viewport {
+                    viewport.destroy();
+                }
+                surface.destroy();
+                return Err(error);
+            }
+        };
+        drop(state);
+
+        let mut icon = WaylandDragIcon {
+            surface,
+            viewport,
+            renderer: Some(renderer),
+            logical_size,
+            scale_factor,
+            hotspot,
+            applied_hotspot: (0, 0),
+            role_assigned: false,
+            destroyed: false,
+        };
+        icon.draw(logical_size, scale_factor, hotspot, scene)?;
+        Ok(icon)
     }
 
     pub fn toplevel(&self) -> Option<xdg_toplevel::XdgToplevel> {
@@ -1400,13 +1572,78 @@ impl rwh::HasDisplayHandle for WaylandWindow {
 }
 
 impl PlatformWindow for WaylandWindow {
-    fn start_internal_drag(&self, session_id: gpui::DragSessionId) -> anyhow::Result<()> {
+    fn create_internal_drag_icon(
+        &self,
+        session_id: gpui::DragSessionId,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &Scene,
+    ) -> anyhow::Result<()> {
         let client = self.borrow().client.clone();
-        client.start_internal_drag(self.0.clone(), session_id)
+        client.create_internal_drag_icon(
+            &self.0,
+            session_id,
+            logical_size,
+            scale_factor,
+            hotspot,
+            scene,
+        )
+    }
+
+    fn update_internal_drag_icon(
+        &self,
+        session_id: gpui::DragSessionId,
+        logical_size: Size<Pixels>,
+        scale_factor: f32,
+        hotspot: Point<Pixels>,
+        scene: &Scene,
+    ) -> anyhow::Result<()> {
+        self.borrow().client.update_internal_drag_icon(
+            session_id,
+            logical_size,
+            scale_factor,
+            hotspot,
+            scene,
+        )
+    }
+
+    fn destroy_internal_drag_icon(&self, session_id: gpui::DragSessionId) {
+        self.borrow().client.destroy_internal_drag_icon(session_id);
+    }
+
+    fn start_internal_drag(
+        &self,
+        session_id: gpui::DragSessionId,
+        has_icon: bool,
+    ) -> anyhow::Result<()> {
+        let client = self.borrow().client.clone();
+        client.start_internal_drag(self.0.clone(), session_id, has_icon)
     }
 
     fn cancel_internal_drag(&self, session_id: gpui::DragSessionId) {
         self.borrow().client.cancel_internal_drag(session_id);
+    }
+
+    fn set_mapped(&self, mapped: bool) -> anyhow::Result<()> {
+        let mut state = self.borrow_mut();
+        if state.mapped == mapped {
+            return Ok(());
+        }
+
+        if mapped {
+            state.mapped = true;
+            state.acknowledged_first_configure = false;
+            state.renderer_presented = false;
+            state.force_render_after_recovery = true;
+            state.surface.commit();
+        } else {
+            state.surface.attach(None, 0, 0);
+            state.surface.commit();
+            state.mapped = false;
+            state.renderer_presented = false;
+        }
+        Ok(())
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
@@ -1699,6 +1936,11 @@ impl PlatformWindow for WaylandWindow {
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
 
+        if !state.mapped {
+            state.renderer_presented = false;
+            return;
+        }
+
         if state.renderer.device_lost() {
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
@@ -1730,6 +1972,11 @@ impl PlatformWindow for WaylandWindow {
 
     fn completed_frame(&self) {
         let mut state = self.borrow_mut();
+
+        if !state.mapped {
+            state.renderer_presented = false;
+            return;
+        }
 
         // Work around a bug in old versions of wlroots where committing without a buffer attached
         // can cause invalid synchronization that leads to graphical corruption.
@@ -2058,7 +2305,14 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
 mod tests {
     use gpui::{px, size};
 
-    use super::xdg_toplevel_size;
+    use super::{drag_icon_hotspot_delta, xdg_toplevel_size};
+
+    #[test]
+    fn drag_icon_hotspot_offset_is_incremental() {
+        assert_eq!(drag_icon_hotspot_delta((0, 0), (42, 18)), (-42, -18));
+        assert_eq!(drag_icon_hotspot_delta((42, 18), (42, 18)), (0, 0));
+        assert_eq!(drag_icon_hotspot_delta((42, 18), (20, 30)), (22, -12));
+    }
 
     #[test]
     fn xdg_toplevel_sizes_are_rounded_and_nonzero() {
