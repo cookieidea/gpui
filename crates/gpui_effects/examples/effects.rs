@@ -47,7 +47,7 @@ impl Render for EffectsViewer {
             .bg(gpui::rgb(0x111318))
             .text_color(gpui::white())
             .child(effect_row(
-                "Album glow",
+                "Album flow",
                 album_glow(self.album_cover.clone())
                     .time(elapsed)
                     .size_full()
