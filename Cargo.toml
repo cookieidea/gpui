@@ -542,6 +542,13 @@ proc-macro2 = { opt-level = 3 }
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
 serde_json = { opt-level = 3 }
+# UI interaction paths need modest optimization even in debug builds. This keeps
+# debug assertions and symbols while avoiding frame stalls in pointer-driven controls.
+gpui = { opt-level = 1 }
+gpui_linux = { opt-level = 1 }
+gpui_platform = { opt-level = 1 }
+gpui_wgpu = { opt-level = 1 }
+uic = { opt-level = 1 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 collections = { codegen-units = 1 }
 refineable = { codegen-units = 1 }
