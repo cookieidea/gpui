@@ -4,8 +4,10 @@ use gpui::GpuSpecs;
 
 use crate::{
     MediaError, MediaInfo, MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode,
-    SubtitleEvent, VideoFrame, stats::PlaybackCounters,
+    SubtitleEvent, VideoFrame,
 };
+
+use super::stats::PlaybackCounters;
 
 // One queued frame is the current presentation candidate and the second
 // absorbs a single slow GPUI render/upload interval. A larger queue would turn
@@ -262,12 +264,12 @@ pub trait MediaBackend: Send + Sync + 'static {
 pub(crate) fn default_media_backend() -> MediaResult<Arc<dyn MediaBackend>> {
     #[cfg(feature = "backend-system")]
     {
-        return Ok(Arc::new(crate::backends::system::SystemBackend));
+        return Ok(Arc::new(super::backends::system::SystemBackend));
     }
 
     #[cfg(all(not(feature = "backend-system"), feature = "backend-decv"))]
     {
-        return Ok(Arc::new(crate::backends::decv::DecvBackend::default()));
+        return Ok(Arc::new(super::backends::decv::DecvBackend::default()));
     }
 
     #[cfg(not(any(feature = "backend-system", feature = "backend-decv")))]

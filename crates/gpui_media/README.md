@@ -8,6 +8,12 @@ built-in backend or inject their own implementation. Video frame rendering and
 extraction remain separate from player chrome so applications can build
 different interfaces on top of the same core.
 
+Pure audio playback is provided separately by `AudioPlayer`. It uses the same
+Symphonia and CPAL pipeline on every supported platform and does not depend on
+`VideoPlayer` or a built-in video backend. The default feature set enables
+both audio and video. See the complete
+[audio player guide](docs/audio-player.md).
+
 `SystemBackend` uses GStreamer on Linux and macOS, and Media Foundation on
 Windows.
 
@@ -43,22 +49,45 @@ the runtime dependency. See the
 - CPU, macOS CoreVideo and Linux DMA-BUF frame transport
 - HTTP request headers, authentication, proxy, timeout and source retry options
 - network buffering progress and an explicit host-controlled reload operation
+- standalone file, sequential HTTP and caller-fed encoded audio streams
+- bounded asynchronous backpressure for caller-fed audio chunks
 
-## Select a playback backend
+## Select media features and a playback backend
 
-The default Cargo feature enables `SystemBackend`:
+The default feature set enables standalone audio, video, and `SystemBackend`:
 
 ```toml
 gpui_media = { path = ".../gpui_media" }
 ```
 
-Applications that provide their own backend can omit built-in backends
-entirely:
+Enable only standalone audio when the application does not need video:
 
 ```toml
 gpui_media = {
     path = ".../gpui_media",
     default-features = false,
+    features = ["audio"],
+}
+```
+
+Enable video with the platform backend, without standalone audio:
+
+```toml
+gpui_media = {
+    path = ".../gpui_media",
+    default-features = false,
+    features = ["video", "backend-system"],
+}
+```
+
+Applications that provide their own video backend can omit both built-in
+backends:
+
+```toml
+gpui_media = {
+    path = ".../gpui_media",
+    default-features = false,
+    features = ["video"],
 }
 ```
 
@@ -69,7 +98,7 @@ or VP9 video, CPU-backed NV12 output, and AAC-LC audio. It is opt-in:
 gpui_media = {
     path = ".../gpui_media",
     default-features = false,
-    features = ["backend-decv"],
+    features = ["video", "backend-decv"],
 }
 ```
 

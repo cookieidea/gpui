@@ -1053,7 +1053,7 @@ impl Drop for MediaFoundationWorker {
 
 struct WindowsFrameExtractor {
     playback: WindowsPlayback,
-    output: crate::media_backend::MediaOutput,
+    output: crate::video::media_backend::MediaOutput,
     timeout: Duration,
 }
 

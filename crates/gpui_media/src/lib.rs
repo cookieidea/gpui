@@ -1,55 +1,35 @@
-//! Reusable GPUI video playback component.
+//! Reusable GPUI audio and video playback components.
 //!
-//! A pluggable [`MediaBackend`] owns demuxing, video/audio decoding, audio
-//! output and the shared playback clock. [`VideoPlayer`] renders only the
+//! A pluggable `MediaBackend` owns demuxing, video/audio decoding, audio
+//! output and the shared playback clock. `VideoPlayer` renders only the
 //! newest decoded video frame with GPUI's dynamic `surface` element. It
 //! deliberately contains no controls, pointer behavior, status overlay or
 //! fullscreen policy; host applications build those features from the
 //! exported state and events.
+//!
+//! `AudioPlayer` is independent from the video backend boundary. It uses
+//! Symphonia and CPAL consistently across platforms and exposes no built-in UI.
 
-mod backends;
-mod container;
+#[cfg(feature = "audio")]
+mod audio;
 mod error;
-mod frame;
-mod frame_extractor;
-mod media_backend;
-mod media_info;
-mod player;
+mod playback_state;
 mod source;
-mod stats;
-mod subtitles;
 mod timeline;
-mod window_sizing;
+#[cfg(feature = "video")]
+mod video;
 
-#[cfg(feature = "backend-decv")]
-pub use backends::decv::{DecvBackend, DecvBackendOptions, DecvParallelism};
-#[cfg(feature = "backend-system")]
-pub use backends::system::SystemBackend;
-pub use container::{VideoContainer, video_container};
+#[cfg(feature = "audio")]
+pub use audio::{
+    AudioInfo, AudioPlayer, AudioPlayerBuilder, AudioPlayerEvent, AudioPlayerOptions, AudioSource,
+    AudioStreamHint, AudioStreamWriter,
+};
 pub use error::{MediaError, MediaErrorKind, MediaRecovery, MediaResult};
-pub use frame::{FrameTransport, VideoFrame};
-pub use frame_extractor::{
-    FrameExtractionSuperseded, VideoFrameExtractor, VideoFrameExtractorOptions,
-};
-pub use media_backend::{
-    FrameExtractionSession, FrameExtractorBackendRequest, FrameTransportPreference, MediaBackend,
-    MediaBackendEvent, MediaCapabilities, MediaOutputSink, MediaPlaybackRequest,
-    MediaPlaybackSession, TransportChange,
-};
-pub use media_info::{
-    AudioStreamInfo, MediaInfo, MediaStreamId, SubtitleStreamInfo, VideoStreamInfo,
-};
-pub use player::{
-    PlaybackState, VideoPlayer, VideoPlayerBuilder, VideoPlayerEvent, VideoPlayerOptions,
-};
+pub use playback_state::PlaybackState;
 pub use source::{MediaSource, NetworkSourceOptions};
-pub use stats::VideoPlaybackStats;
-pub use subtitles::{
-    ParsedSubtitles, SubtitleCue, SubtitleEvent, SubtitleFormat, detect_subtitle_format,
-    parse_subtitles,
-};
 pub use timeline::{PlaybackTimeline, SeekMode};
-pub use window_sizing::{fit_video_window_bounds, fit_video_window_size};
+#[cfg(feature = "video")]
+pub use video::*;
 
 /// Initializes the default built-in backend, when it requires initialization.
 ///

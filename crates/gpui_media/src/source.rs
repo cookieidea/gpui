@@ -169,22 +169,18 @@ impl NetworkSourceOptions {
     }
 
     #[cfg(any(
-        feature = "backend-decv",
-        all(
-            feature = "backend-system",
-            any(target_os = "linux", target_os = "macos")
-        )
+        feature = "audio",
+        feature = "backend-system",
+        feature = "backend-decv"
     ))]
     pub(crate) fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
     }
 
     #[cfg(any(
-        feature = "backend-decv",
-        all(
-            feature = "backend-system",
-            any(target_os = "linux", target_os = "macos")
-        )
+        feature = "audio",
+        feature = "backend-system",
+        feature = "backend-decv"
     ))]
     pub(crate) fn user_password(&self) -> Option<&str> {
         self.user_password.as_deref()
@@ -360,11 +356,9 @@ impl MediaSource {
     }
 
     #[cfg(any(
+        feature = "audio",
+        feature = "backend-system",
         feature = "backend-decv",
-        all(
-            feature = "backend-system",
-            any(target_os = "linux", target_os = "macos")
-        ),
         test
     ))]
     pub(crate) fn redact_error_message(&self, message: &str) -> String {
@@ -385,11 +379,9 @@ impl MediaSource {
 
 impl NetworkSourceOptions {
     #[cfg(any(
+        feature = "audio",
+        feature = "backend-system",
         feature = "backend-decv",
-        all(
-            feature = "backend-system",
-            any(target_os = "linux", target_os = "macos")
-        ),
         test
     ))]
     fn sensitive_values(&self) -> impl Iterator<Item = &str> {

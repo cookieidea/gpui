@@ -10,10 +10,11 @@ use gpui::{DmaBufImportStatus, SurfaceFrameBacking};
 use crate::{
     FrameTransport, FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities,
     MediaError, MediaInfo, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession,
-    MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode, SubtitleEvent,
-    TransportChange, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
-    media_backend::default_media_backend, stats::PlaybackCounters,
+    MediaResult, MediaSource, MediaStreamId, PlaybackState, PlaybackTimeline, SeekMode,
+    SubtitleEvent, TransportChange, VideoFrame, VideoFrameExtractor, VideoPlaybackStats,
 };
+
+use super::{media_backend::default_media_backend, stats::PlaybackCounters};
 
 /// Initial behavior for a [`VideoPlayer`].
 #[derive(Clone, Copy, Debug)]
@@ -77,17 +78,6 @@ impl Default for VideoPlayerOptions {
             timeline_update_interval: Duration::from_millis(100),
         }
     }
-}
-
-/// Current high-level playback state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PlaybackState {
-    Loading,
-    Playing,
-    Paused,
-    Seeking,
-    Ended,
-    Error(Arc<MediaError>),
 }
 
 /// Events emitted by [`VideoPlayer`] for host controls and custom player UIs.

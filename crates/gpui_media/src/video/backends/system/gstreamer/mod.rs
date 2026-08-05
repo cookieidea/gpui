@@ -16,13 +16,14 @@ use gpui::{
 };
 use gst::prelude::*;
 
+use crate::video::subtitles::normalize_subtitle_text;
 use crate::{
     AudioStreamInfo, FrameExtractionSession, FrameExtractorBackendRequest,
     FrameTransportPreference, MediaBackend, MediaBackendEvent, MediaCapabilities, MediaError,
     MediaErrorKind, MediaInfo, MediaOutputSink, MediaPlaybackRequest, MediaPlaybackSession,
     MediaRecovery, MediaResult, MediaSource, MediaStreamId, PlaybackTimeline, SeekMode,
     SubtitleCue, SubtitleEvent, SubtitleFormat, SubtitleStreamInfo, TransportChange, VideoFrame,
-    VideoStreamInfo, subtitles::normalize_subtitle_text,
+    VideoStreamInfo,
 };
 use network::{configure_playbin_network, configure_playbin_progressive_download};
 

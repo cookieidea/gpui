@@ -414,6 +414,7 @@ unicode-segmentation = "1.10"
 unicode-width = "0.2"
 unindent = "0.2.0"
 url = "2.2"
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 urlencoding = "2.1.2"
 usvg = { version = "0.46.0", default-features = false }
 uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }

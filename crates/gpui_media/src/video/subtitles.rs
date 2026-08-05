@@ -369,7 +369,10 @@ fn split_blocks(source: &str) -> impl Iterator<Item = &str> {
         .filter(|block| !block.is_empty())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(
+    feature = "backend-system",
+    any(target_os = "linux", target_os = "macos")
+))]
 pub(crate) fn normalize_subtitle_text(source: &str) -> String {
     normalize_markup_text(source)
 }

@@ -11,8 +11,9 @@ use std::{
 use crate::{
     FrameExtractionSession, FrameExtractorBackendRequest, MediaBackend, MediaError, MediaErrorKind,
     MediaRecovery, MediaResult, MediaSource, SeekMode, VideoFrame,
-    media_backend::default_media_backend,
 };
+
+use super::media_backend::default_media_backend;
 
 /// Indicates that a pending latest-only preview request was replaced by a
 /// newer request before decoding started.

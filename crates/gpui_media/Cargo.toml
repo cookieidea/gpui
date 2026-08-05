@@ -6,11 +6,14 @@ edition.workspace = true
 license = "MIT"
 
 [features]
-default = ["backend-system"]
+default = ["audio", "video", "backend-system"]
+audio = ["dep:base64", "dep:cpal", "dep:symphonia", "dep:ureq"]
+video = []
 # Cargo features are target-independent, so this feature activates every
 # optional system dependency by name. The target dependency tables below
 # ensure that Cargo only resolves and builds the current OS's media stack.
 backend-system = [
+  "video",
   "dep:gst",
   "dep:gst-app",
   "dep:gst-video",
@@ -20,7 +23,7 @@ backend-system = [
   "dep:windows",
   "dep:windows-core",
 ]
-backend-decv = ["dep:base64", "dep:cpal", "dep:decv"]
+backend-decv = ["video", "dep:base64", "dep:cpal", "dep:decv"]
 
 [dependencies]
 async-channel.workspace = true
@@ -31,6 +34,8 @@ decv = { git = "https://github.com/cradiy/decv", rev = "747b168ce9aa13950a17b8b1
 ], optional = true }
 gpui.workspace = true
 log.workspace = true
+symphonia = { version = "0.6.0", default-features = false, features = ["all-codecs"], optional = true }
+ureq = { workspace = true, optional = true }
 url.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -65,8 +70,40 @@ gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true, features = ["wayland", "x11", "font-kit"] }
 
 [[example]]
+name = "audio"
+required-features = ["audio"]
+
+[[example]]
+name = "borderless"
+required-features = ["video", "backend-system"]
+
+[[example]]
 name = "decv_play"
-required-features = ["backend-decv"]
+required-features = ["video", "backend-decv"]
+
+[[example]]
+name = "frame_at"
+required-features = ["video", "backend-system"]
+
+[[example]]
+name = "overlay_controls"
+required-features = ["video", "backend-system"]
+
+[[example]]
+name = "play"
+required-features = ["video", "backend-system"]
+
+[[example]]
+name = "tracks_and_subtitles"
+required-features = ["video", "backend-system"]
+
+[[example]]
+name = "webdav"
+required-features = ["video", "backend-system"]
+
+[[test]]
+name = "custom_backend"
+required-features = ["video"]
 
 [lints]
 workspace = true
