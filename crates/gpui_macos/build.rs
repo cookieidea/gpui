@@ -15,6 +15,7 @@ mod macos_build {
     use cbindgen::Config;
 
     pub fn run() {
+        println!("cargo:rustc-link-lib=framework=MetalPerformanceShaders");
         let header_path = generate_shader_bindings();
 
         #[cfg(feature = "runtime_shaders")]

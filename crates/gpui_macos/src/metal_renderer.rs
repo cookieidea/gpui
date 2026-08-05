@@ -7,11 +7,11 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ColorRange, ContentMask, DevicePixels, EffectQuad,
-    EffectShader, MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch,
-    Quad, ScaledPixels, Scene, Shadow, Size, SurfaceColorInfo, SurfaceFormat, SurfaceFrame,
-    SurfaceFrameBacking, SurfaceId, TransformationMatrix, Underline, WeakSurfaceHandle, YuvMatrix,
-    point, size,
+    AtlasTextureId, BackdropBlur, BackdropShader, Background, Bounds, ColorRange, ContentMask,
+    DevicePixels, EffectQuad, EffectShader, MonochromeSprite, PaintSurface, Path, Point,
+    PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SurfaceColorInfo,
+    SurfaceFormat, SurfaceFrame, SurfaceFrameBacking, SurfaceId, TransformationMatrix, Underline,
+    WeakSurfaceHandle, YuvMatrix, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -158,6 +158,8 @@ pub(crate) struct MetalRenderer {
     quads_pipeline_state: metal::RenderPipelineState,
     effect_pipeline_states: HashMap<u64, metal::RenderPipelineState>,
     failed_effect_pipeline_states: HashSet<u64>,
+    backdrop_effect_pipeline_states: HashMap<u64, metal::RenderPipelineState>,
+    failed_backdrop_effect_pipeline_states: HashSet<u64>,
     effect_sampler: metal::SamplerState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
@@ -173,6 +175,8 @@ pub(crate) struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    backdrop_source_texture: Option<metal::Texture>,
+    backdrop_blurred_texture: Option<metal::Texture>,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "test-support"))]
@@ -252,6 +256,49 @@ struct EffectGlobalParams {
     pad: u32,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct BackdropInstance {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: Bounds<ScaledPixels>,
+    corner_radii: [f32; 4],
+    blur_radius: f32,
+    opacity: f32,
+    time: f32,
+    pointer_active: f32,
+    direction: [f32; 2],
+    pointer: [f32; 2],
+    uniforms: [[f32; 4]; gpui::EFFECT_UNIFORM_SLOTS],
+}
+
+impl From<&BackdropBlur> for BackdropInstance {
+    fn from(backdrop: &BackdropBlur) -> Self {
+        Self {
+            bounds: backdrop.bounds,
+            content_mask: backdrop.content_mask.bounds,
+            corner_radii: [
+                backdrop.corner_radii.top_left.0,
+                backdrop.corner_radii.top_right.0,
+                backdrop.corner_radii.bottom_right.0,
+                backdrop.corner_radii.bottom_left.0,
+            ],
+            blur_radius: backdrop.blur_radius.0,
+            opacity: backdrop.opacity,
+            time: backdrop.time,
+            pointer_active: u32::from(backdrop.pointer_active) as f32,
+            direction: [0.0; 2],
+            pointer: [backdrop.pointer.x, backdrop.pointer.y],
+            uniforms: *backdrop.uniforms.slots(),
+        }
+    }
+}
+
+const DEFAULT_BACKDROP_EFFECT: &str = r#"
+fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
+    return sample_blurred_backdrop(input, vec2<f32>(0.0));
+}
+"#;
+
 impl MetalRenderer {
     /// Creates a new MetalRenderer with a CAMetalLayer for window-based rendering.
     pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>, transparent: bool) -> Self {
@@ -264,8 +311,7 @@ impl MetalRenderer {
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
-        // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
-        #[cfg(any(test, feature = "test-support"))]
+        // Backdrop effects sample pixels already rendered into the drawable.
         layer.set_framebuffer_only(false);
         unsafe {
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
@@ -461,6 +507,8 @@ impl MetalRenderer {
             quads_pipeline_state,
             effect_pipeline_states: HashMap::default(),
             failed_effect_pipeline_states: HashSet::default(),
+            backdrop_effect_pipeline_states: HashMap::default(),
+            failed_backdrop_effect_pipeline_states: HashSet::default(),
             effect_sampler,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
@@ -475,6 +523,8 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            backdrop_source_texture: None,
+            backdrop_blurred_texture: None,
             #[cfg(any(test, feature = "test-support"))]
             headless_render_target: None,
         }
@@ -957,6 +1007,7 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
         self.ensure_effect_pipelines(scene);
+        self.ensure_backdrop_effect_pipelines(scene);
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
@@ -974,7 +1025,26 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             let ok = match batch {
-                PrimitiveBatch::BackdropBlurs(_) => true,
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    command_encoder.end_encoding();
+                    let did_draw = self.draw_backdrop_blurs(
+                        &scene.backdrop_blurs[range],
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_buffer,
+                        texture,
+                    );
+                    command_encoder = new_command_encoder_for_texture(
+                        command_buffer,
+                        texture,
+                        viewport_size,
+                        |color_attachment| {
+                            color_attachment.set_load_action(metal::MTLLoadAction::Load);
+                        },
+                    );
+                    did_draw
+                }
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(
                     &scene.shadows[range],
                     instance_buffer,
@@ -1343,6 +1413,196 @@ impl MetalRenderer {
                 }
             }
         }
+    }
+
+    fn ensure_backdrop_effect_pipelines(&mut self, scene: &Scene) {
+        let default_shader = BackdropShader::wgsl(DEFAULT_BACKDROP_EFFECT);
+        let shaders = std::iter::once(default_shader).chain(
+            scene
+                .backdrop_blurs
+                .iter()
+                .filter_map(|backdrop| backdrop.shader.clone()),
+        );
+        for shader in shaders {
+            let key = shader.id().as_u64();
+            if self.backdrop_effect_pipeline_states.contains_key(&key)
+                || self.failed_backdrop_effect_pipeline_states.contains(&key)
+            {
+                continue;
+            }
+            let result = translate_backdrop_to_msl(&shader).and_then(|source| {
+                let library = self
+                    .device
+                    .new_library_with_source(&source, &metal::CompileOptions::new())
+                    .map_err(|error| anyhow::anyhow!("MSL compile error: {error}"))?;
+                try_build_effect_pipeline_state(
+                    &self.device,
+                    &library,
+                    "gpui_backdrop_effect",
+                    "vs_backdrop",
+                    "fs_backdrop",
+                    MTLPixelFormat::BGRA8Unorm,
+                )
+            });
+            match result {
+                Ok(pipeline) => {
+                    self.backdrop_effect_pipeline_states.insert(key, pipeline);
+                }
+                Err(error) => {
+                    log::error!(
+                        "failed to compile GPUI Metal backdrop effect {key:016x}: {error:#}"
+                    );
+                    self.failed_backdrop_effect_pipeline_states.insert(key);
+                }
+            }
+        }
+    }
+
+    fn update_backdrop_textures(&mut self, viewport_size: Size<DevicePixels>) {
+        let width = viewport_size.width.0.max(1) as u64;
+        let height = viewport_size.height.0.max(1) as u64;
+        let needs_update = self
+            .backdrop_source_texture
+            .as_ref()
+            .is_none_or(|texture| texture.width() != width || texture.height() != height);
+        if !needs_update {
+            return;
+        }
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(width);
+        descriptor.set_height(height);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_usage(
+            metal::MTLTextureUsage::ShaderRead
+                | metal::MTLTextureUsage::ShaderWrite
+                | metal::MTLTextureUsage::RenderTarget,
+        );
+        descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+        self.backdrop_source_texture = Some(self.device.new_texture(&descriptor));
+        self.backdrop_blurred_texture = Some(self.device.new_texture(&descriptor));
+    }
+
+    fn draw_backdrop_blurs(
+        &mut self,
+        backdrops: &[BackdropBlur],
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_buffer: &metal::CommandBufferRef,
+        target: &metal::TextureRef,
+    ) -> bool {
+        self.update_backdrop_textures(viewport_size);
+        let (Some(source), Some(blurred)) = (
+            self.backdrop_source_texture.as_ref(),
+            self.backdrop_blurred_texture.as_ref(),
+        ) else {
+            return true;
+        };
+        let default_shader = BackdropShader::wgsl(DEFAULT_BACKDROP_EFFECT);
+        for backdrop in backdrops {
+            let blit = command_buffer.new_blit_command_encoder();
+            let size = metal::MTLSize {
+                width: target.width(),
+                height: target.height(),
+                depth: 1,
+            };
+            let origin = metal::MTLOrigin { x: 0, y: 0, z: 0 };
+            blit.copy_from_texture(target, 0, 0, origin, size, source, 0, 0, origin);
+            blit.end_encoding();
+
+            // MPSImageGaussianBlur is available on every macOS version supported by GPUI.
+            // Calling it dynamically keeps MetalPerformanceShaders out of the public API.
+            unsafe {
+                let Some(class) = objc::runtime::Class::get("MPSImageGaussianBlur") else {
+                    return true;
+                };
+                let filter: cocoa::base::id = msg_send![class, alloc];
+                let filter: cocoa::base::id = msg_send![
+                    filter,
+                    initWithDevice: self.device.as_ref()
+                    sigma: backdrop.blur_radius.0.max(0.01)
+                ];
+                let _: () = msg_send![
+                    filter,
+                    encodeToCommandBuffer: command_buffer
+                    sourceTexture: source.as_ref()
+                    destinationTexture: blurred.as_ref()
+                ];
+                let _: () = msg_send![filter, release];
+            }
+
+            let shader = backdrop.shader.as_ref().unwrap_or(&default_shader);
+            let Some(pipeline) = self
+                .backdrop_effect_pipeline_states
+                .get(&shader.id().as_u64())
+            else {
+                continue;
+            };
+            let instance = BackdropInstance::from(backdrop);
+            align_offset(instance_offset);
+            let bytes_len = mem::size_of::<BackdropInstance>();
+            let next_offset = *instance_offset + bytes_len;
+            if next_offset > instance_buffer.size {
+                return false;
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    &instance as *const BackdropInstance as *const u8,
+                    (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset),
+                    bytes_len,
+                );
+            }
+            let globals = EffectGlobalParams {
+                viewport_size: [viewport_size.width.0 as f32, viewport_size.height.0 as f32],
+                premultiplied_alpha: 0,
+                pad: 0,
+            };
+            let buffer_sizes = [bytes_len as u32];
+            let encoder = new_command_encoder_for_texture(
+                command_buffer,
+                target,
+                viewport_size,
+                |attachment| attachment.set_load_action(metal::MTLLoadAction::Load),
+            );
+            encoder.set_render_pipeline_state(pipeline);
+            encoder.set_vertex_bytes(
+                0,
+                mem::size_of_val(&globals) as u64,
+                &globals as *const _ as *const _,
+            );
+            encoder.set_fragment_bytes(
+                0,
+                mem::size_of_val(&globals) as u64,
+                &globals as *const _ as *const _,
+            );
+            encoder.set_vertex_buffer(
+                1,
+                Some(&instance_buffer.metal_buffer),
+                *instance_offset as u64,
+            );
+            encoder.set_fragment_buffer(
+                1,
+                Some(&instance_buffer.metal_buffer),
+                *instance_offset as u64,
+            );
+            encoder.set_vertex_bytes(
+                2,
+                mem::size_of_val(&buffer_sizes) as u64,
+                buffer_sizes.as_ptr() as *const _,
+            );
+            encoder.set_fragment_bytes(
+                2,
+                mem::size_of_val(&buffer_sizes) as u64,
+                buffer_sizes.as_ptr() as *const _,
+            );
+            encoder.set_fragment_texture(0, Some(source));
+            encoder.set_fragment_texture(1, Some(blurred));
+            encoder.set_fragment_sampler_state(0, Some(&self.effect_sampler));
+            encoder.draw_primitives_instanced(metal::MTLPrimitiveType::TriangleStrip, 0, 4, 1);
+            encoder.end_encoding();
+            *instance_offset = next_offset;
+        }
+        true
     }
 
     fn draw_effects(
@@ -2378,6 +2638,97 @@ fn translate_effect_to_msl(shader: &EffectShader) -> Result<String> {
             "MSL entry point generation failed: {:?}",
             translation.entry_point_names
         );
+    }
+    Ok(source)
+}
+
+fn translate_backdrop_to_msl(shader: &BackdropShader) -> Result<String> {
+    let source = gpui::compose_backdrop_shader_wgsl(shader);
+    let module = naga::front::wgsl::parse_str(&source)
+        .map_err(|error| anyhow::anyhow!("WGSL parse error: {error}"))?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|error| anyhow::anyhow!("WGSL validation error: {error}"))?;
+
+    let mut resources = naga::back::msl::EntryPointResources::default();
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 0,
+            binding: 0,
+        },
+        naga::back::msl::BindTarget {
+            buffer: Some(0),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 1,
+            binding: 0,
+        },
+        naga::back::msl::BindTarget {
+            buffer: Some(1),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 1,
+            binding: 1,
+        },
+        naga::back::msl::BindTarget {
+            texture: Some(0),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 1,
+            binding: 2,
+        },
+        naga::back::msl::BindTarget {
+            sampler: Some(naga::back::msl::BindSamplerTarget::Resource(0)),
+            ..Default::default()
+        },
+    );
+    resources.resources.insert(
+        naga::ResourceBinding {
+            group: 1,
+            binding: 3,
+        },
+        naga::back::msl::BindTarget {
+            texture: Some(1),
+            ..Default::default()
+        },
+    );
+    resources.sizes_buffer = Some(2);
+    let mut options = naga::back::msl::Options {
+        lang_version: (2, 0),
+        fake_missing_bindings: false,
+        ..Default::default()
+    };
+    options
+        .per_entry_point_map
+        .insert("vs_backdrop".into(), resources.clone());
+    options
+        .per_entry_point_map
+        .insert("fs_backdrop".into(), resources);
+    let (source, translation) = naga::back::msl::write_string(
+        &module,
+        &info,
+        &options,
+        &naga::back::msl::PipelineOptions::default(),
+    )
+    .map_err(|error| anyhow::anyhow!("MSL generation error: {error}"))?;
+    if translation
+        .entry_point_names
+        .iter()
+        .any(|name| name.is_err())
+    {
+        anyhow::bail!("MSL backdrop entry point generation failed");
     }
     Ok(source)
 }
