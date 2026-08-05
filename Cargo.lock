@@ -114,7 +114,7 @@ checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
 dependencies = [
  "cfg-if",
  "cipher",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "zeroize",
 ]
 
@@ -200,6 +200,16 @@ name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
+
+[[package]]
+name = "annotate-snippets"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "710e8eae58854cdc1790fcb56cca04d712a17be849eeb81da2a724bf4bae2bc4"
+dependencies = [
+ "anstyle",
+ "unicode-width",
+]
 
 [[package]]
 name = "anstream"
@@ -677,7 +687,7 @@ dependencies = [
  "anyhow",
  "arrayvec",
  "log",
- "nom",
+ "nom 7.1.3",
  "num-rational",
  "v_frame",
 ]
@@ -752,6 +762,25 @@ dependencies = [
  "itertools 0.11.0",
  "log",
  "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.1",
+ "shlex",
+ "syn",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "annotate-snippets",
+ "bitflags 2.10.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1045,7 +1074,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
 dependencies = [
- "nom",
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -1077,6 +1106,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "chacha20"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1386,6 +1426,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cookie-factory"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1607,6 +1653,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1742,6 +1797,17 @@ name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
+name = "dbus"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ab69f03cc8c4340c9c8e315114e1658e6775a9b16a04357973aa21cec22b32e"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "decv"
@@ -2577,6 +2643,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -2708,6 +2775,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glow"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263218b0ba2b0715c3370fb04674f5f8aa331594b521c94ff0a8e4a8472d1386"
+dependencies = [
+ "js-sys",
+ "slotmap",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "glutin_wgl_sys"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2750,7 +2829,7 @@ dependencies = [
  "async-channel 2.5.0",
  "async-task",
  "backtrace",
- "bindgen",
+ "bindgen 0.71.1",
  "bitflags 2.10.0",
  "block",
  "cbindgen",
@@ -2773,6 +2852,7 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
+ "gpui-scap",
  "gpui_macros",
  "gpui_platform",
  "gpui_shared_string",
@@ -2832,7 +2912,32 @@ dependencies = [
  "web-time",
  "windows 0.61.3",
  "zed-font-kit",
- "zed-scap",
+]
+
+[[package]]
+name = "gpui-scap"
+version = "0.0.9-gpui"
+source = "git+https://github.com/cradiy/scap.git?rev=2a9b6529dd45b861a263ee34af047c8ae495d6ec#2a9b6529dd45b861a263ee34af047c8ae495d6ec"
+dependencies = [
+ "anyhow",
+ "cocoa 0.25.0",
+ "core-graphics-helmer-fork",
+ "dbus",
+ "glow 0.18.0",
+ "khronos-egl",
+ "libc",
+ "log",
+ "objc",
+ "pipewire",
+ "rand 0.10.2",
+ "screencapturekit",
+ "screencapturekit-sys",
+ "sysinfo",
+ "tao-core-video-sys",
+ "windows 0.61.3",
+ "windows-capture",
+ "x11",
+ "xcb",
 ]
 
 [[package]]
@@ -2863,6 +2968,7 @@ dependencies = [
  "filedescriptor",
  "futures",
  "gpui",
+ "gpui-scap",
  "gpui_util",
  "gpui_wgpu",
  "http_client",
@@ -2892,7 +2998,6 @@ dependencies = [
  "x11-clipboard",
  "x11rb",
  "xkbcommon",
- "zed-scap",
  "zed-xim",
 ]
 
@@ -3083,6 +3188,7 @@ dependencies = [
  "etagere",
  "futures",
  "gpui",
+ "gpui-scap",
  "gpui_effects",
  "gpui_util",
  "image",
@@ -3098,7 +3204,6 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-numerics 0.2.0",
  "windows-registry",
- "zed-scap",
 ]
 
 [[package]]
@@ -3353,7 +3458,7 @@ dependencies = [
  "byteorder",
  "crossbeam-channel",
  "flate2",
- "nom",
+ "nom 7.1.3",
  "num-traits",
 ]
 
@@ -4002,13 +4107,12 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.97"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1840c94c045fbcf8ba2812c95db44499f7c64910a912551aaaa541decebcacf"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
  "futures-util",
- "once_cell",
  "wasm-bindgen",
 ]
 
@@ -4105,6 +4209,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "libfuzzer-sys"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4139,6 +4252,33 @@ dependencies = [
  "bitflags 2.10.0",
  "libc",
  "redox_syscall 0.5.18",
+]
+
+[[package]]
+name = "libspa"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2909f3be29d674e7f10604aff18d1bbe1bb03c4cd61c8a8ba19c0b1d162f7d4e"
+dependencies = [
+ "bitflags 2.10.0",
+ "cc",
+ "cookie-factory",
+ "libc",
+ "libspa-sys",
+ "nom 8.0.0",
+ "rustix 1.1.2",
+ "system-deps",
+]
+
+[[package]]
+name = "libspa-sys"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69ad52764fca54818486f3cf75afec844d1f1a1568c24dcee25d41b1ab007dda"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "system-deps",
 ]
 
 [[package]]
@@ -4329,7 +4469,7 @@ name = "media"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bindgen",
+ "bindgen 0.71.1",
  "core-foundation 0.10.0",
  "core-video",
  "ctor",
@@ -4575,6 +4715,15 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -4940,6 +5089,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4971,6 +5130,17 @@ dependencies = [
  "bitflags 2.10.0",
  "block2 0.6.2",
  "dispatch2",
+ "objc2 0.6.3",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-open-directory"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb82bed227edf5201dfedf072bba4015a33d3d4a98519837295a90f0a23f676d"
+dependencies = [
  "objc2 0.6.3",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -5315,6 +5485,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pipewire"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8585aba8a52ad74ccc633b8e293c1dc4277976bd5d510b925533f34fd6685f38"
+dependencies = [
+ "bitflags 2.10.0",
+ "libc",
+ "libspa",
+ "libspa-sys",
+ "pipewire-sys",
+ "rustix 1.1.2",
+]
+
+[[package]]
+name = "pipewire-sys"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2089f245b548723e60325773c27f586b7a2372c79ea941b246cd0d654706adc"
+dependencies = [
+ "bindgen 0.72.1",
+ "libspa-sys",
+ "system-deps",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5533,7 +5728,7 @@ dependencies = [
  "num-traits",
  "proptest-macro",
  "rand 0.9.4",
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_xorshift",
  "regex-syntax",
  "rusty-fork",
@@ -5693,33 +5888,23 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
-dependencies = [
- "libc",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_core 0.9.3",
 ]
 
 [[package]]
-name = "rand_chacha"
-version = "0.3.1"
+name = "rand"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
- "ppv-lite86",
- "rand_core 0.6.4",
+ "chacha20",
+ "getrandom 0.4.1",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -5734,21 +5919,18 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
-dependencies = [
- "getrandom 0.2.16",
-]
-
-[[package]]
-name = "rand_core"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_xorshift"
@@ -5799,7 +5981,7 @@ dependencies = [
  "paste",
  "profiling",
  "rand 0.9.4",
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "simd_helpers",
  "thiserror 2.0.17",
  "v_frame",
@@ -6598,7 +6780,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 
@@ -7149,16 +7331,17 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.31.4"
+version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "355dbe4f8799b304b05e1b0f05fc59b2a18d36645cf169607da45bde2f69a1be"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
 dependencies = [
- "core-foundation-sys",
  "libc",
  "memchr",
  "ntapi",
- "rayon",
- "windows 0.57.0",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "objc2-open-directory",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -8069,9 +8252,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.120"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df52b6d9b87e0c74c9edfa1eb2d9bf85e5d63515474513aa50fa181b3c4f5db1"
+checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -8082,9 +8265,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.70"
+version = "0.4.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af934872acec734c2d80e6617bbb5ff4f12b052dd8e6332b0817bce889516084"
+checksum = "c62df1340f32221cb9c54d6a27b030e3dba64361d4a95bed55f9aacb44da291d"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -8092,9 +8275,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.120"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78b1041f495fb322e64aca85f5756b2172e35cd459376e67f2a6c9dffcedb103"
+checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -8102,9 +8285,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.120"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dcd0ff20416988a18ac686d4d4d0f6aae9ebf08a389ff5d29012b05af2a1b41"
+checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -8115,9 +8298,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.120"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49757b3c82ebf16c57d69365a142940b384176c24df52a087fb748e2085359ea"
+checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
@@ -8281,9 +8464,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.97"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eadbac71025cd7b0834f20d1fe8472e8495821b4e9801eb0a60bd1f19827602"
+checksum = "8622dcb61c0bcc9fffa6938bed81210af2da9a7e4a1a834b2e37a59b6dfb6141"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -8438,7 +8621,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
- "glow",
+ "glow 0.17.0",
  "glutin_wgl_sys",
  "gpu-allocator",
  "hashbrown 0.17.1",
@@ -8550,16 +8733,6 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
-dependencies = [
- "windows-core 0.57.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
 version = "0.61.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
@@ -8617,24 +8790,12 @@ dependencies = [
 
 [[package]]
 name = "windows-core"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
-dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3"
 dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
+ "windows-implement",
+ "windows-interface",
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
@@ -8646,8 +8807,8 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
+ "windows-implement",
+ "windows-interface",
  "windows-link 0.2.1",
  "windows-result 0.4.1",
  "windows-strings 0.5.1",
@@ -8677,31 +8838,9 @@ dependencies = [
 
 [[package]]
 name = "windows-implement"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8760,15 +8899,6 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
-]
-
-[[package]]
-name = "windows-result"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
-dependencies = [
- "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -9484,27 +9614,6 @@ dependencies = [
  "walkdir",
  "winapi",
  "yeslogic-fontconfig-sys",
-]
-
-[[package]]
-name = "zed-scap"
-version = "0.0.8-zed"
-source = "git+https://github.com/zed-industries/scap?rev=4afea48c3b002197176fb19cd0f9b180dd36eaac#4afea48c3b002197176fb19cd0f9b180dd36eaac"
-dependencies = [
- "anyhow",
- "cocoa 0.25.0",
- "core-graphics-helmer-fork",
- "log",
- "objc",
- "rand 0.8.6",
- "screencapturekit",
- "screencapturekit-sys",
- "sysinfo",
- "tao-core-video-sys",
- "windows 0.61.3",
- "windows-capture",
- "x11",
- "xcb",
 ]
 
 [[package]]

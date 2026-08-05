@@ -330,8 +330,8 @@ rust-embed = { version = "8.11", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
 rustls = { version = "0.23.26" }
 rustls-platform-verifier = "0.5.0"
-# WARNING: If you change this, you must also publish a new version of zed-scap to crates.io
-scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed" }
+# WARNING: If you change this, you must also publish a new version of gpui-scap to crates.io
+scap = { git = "https://github.com/cradiy/scap.git", rev = "2a9b6529dd45b861a263ee34af047c8ae495d6ec", default-features = false, package = "gpui-scap", version = "0.0.9-gpui" }
 schemars = { version = "1.0", features = ["indexmap2"] }
 seccompiler = "0.5"
 semver = { version = "1.0", features = ["serde"] }

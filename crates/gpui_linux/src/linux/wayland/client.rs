@@ -1004,17 +1004,9 @@ impl LinuxClient for WaylandClient {
         &self,
     ) -> futures::channel::oneshot::Receiver<anyhow::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
     {
-        // TODO: Get screen capture working on wayland. Be sure to try window resizing as that may
-        // be tricky.
-        //
-        // start_scap_default_target_source()
-        let (sources_tx, sources_rx) = futures::channel::oneshot::channel();
-        sources_tx
-            .send(Err(anyhow::anyhow!(
-                "Wayland screen capture not yet implemented."
-            )))
-            .ok();
-        sources_rx
+        gpui::scap_screen_capture::start_scap_default_target_source(
+            &self.0.borrow().common.foreground_executor,
+        )
     }
 
     fn open_window(

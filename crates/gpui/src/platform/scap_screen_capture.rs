@@ -12,8 +12,8 @@ use std::sync::atomic::{self, AtomicBool};
 
 /// Populates the receiver with the screens that can be captured.
 ///
-/// `scap_default_target_source` should be used instead on Wayland, since `scap_screen_sources`
-/// won't return any results.
+/// [`start_scap_default_target_source`] should be used instead on Wayland, since
+/// `scap_screen_sources` won't return any results.
 #[allow(dead_code)]
 pub fn scap_screen_sources(
     foreground_executor: &ForegroundExecutor,
@@ -29,7 +29,8 @@ pub fn scap_screen_sources(
 /// On Wayland (Linux), prompts the user to select a target, and populates the receiver with a
 /// single screen capture source for their selection.
 #[allow(dead_code)]
-pub(crate) fn start_scap_default_target_source(
+#[doc(hidden)]
+pub fn start_scap_default_target_source(
     foreground_executor: &ForegroundExecutor,
 ) -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
     let (sources_tx, sources_rx) = oneshot::channel();
@@ -96,7 +97,12 @@ impl ScreenCaptureSource for ScapCaptureSource {
             match new_scap_capturer(Some(scap::Target::Display(target.clone()))) {
                 Ok(mut capturer) => {
                     capturer.start_capture();
-                    run_capture(capturer, target.clone(), frame_callback, stream_tx);
+                    let resolution = size(
+                        DevicePixels(target.width as i32),
+                        DevicePixels(target.height as i32),
+                    );
+                    let metadata = metadata_for_target(Some(&Target::Display(target)), resolution);
+                    run_capture(capturer, metadata, frame_callback, stream_tx);
                 }
                 Err(e) => {
                     stream_tx.send(Err(e)).ok();
@@ -116,8 +122,7 @@ struct ScapDefaultTargetCaptureSource {
         // Callback for frames.
         Box<dyn Fn(ScreenCaptureFrame) + Send>,
     )>,
-    target: scap::Display,
-    size: Size<DevicePixels>,
+    metadata: SourceMetadata,
 }
 
 /// Starts screen capture on the default capture target, and populates the sender with the source.
@@ -133,35 +138,26 @@ fn start_default_target_screen_capture(
                 .get_next_frame()
                 .context("Failed to get first frame of screenshare to get the size.")?;
             let size = frame_size(&first_frame);
-            let target = capturer
-                .target()
-                .context("Unable to determine the target display.")?;
-            let target = target.clone();
-            Ok((capturer, size, target))
+            let metadata = metadata_for_target(capturer.target(), size);
+            Ok((capturer, metadata))
         });
 
         match start_result {
-            Ok((capturer, size, Target::Display(display))) => {
+            Ok((capturer, metadata)) => {
                 let (stream_call_tx, stream_rx) = std::sync::mpsc::sync_channel(1);
                 sources_tx
                     .send(Ok(vec![ScapDefaultTargetCaptureSource {
                         stream_call_tx,
-                        size,
-                        target: display.clone(),
+                        metadata: metadata.clone(),
                     }]))
                     .ok();
                 let Ok((stream_tx, frame_callback)) = stream_rx.recv() else {
                     return;
                 };
-                run_capture(capturer, display, frame_callback, stream_tx);
+                run_capture(capturer, metadata, frame_callback, stream_tx);
             }
             Err(e) => {
                 sources_tx.send(Err(e)).ok();
-            }
-            _ => {
-                sources_tx
-                    .send(Err(anyhow!("The screen capture source is not a display")))
-                    .ok();
             }
         }
     });
@@ -169,12 +165,7 @@ fn start_default_target_screen_capture(
 
 impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
     fn metadata(&self) -> Result<SourceMetadata> {
-        Ok(SourceMetadata {
-            resolution: self.size,
-            label: None,
-            is_main: None,
-            id: self.target.id as u64,
-        })
+        Ok(self.metadata.clone())
     }
 
     fn stream(
@@ -214,19 +205,14 @@ fn new_scap_capturer(target: Option<scap::Target>) -> Result<scap::capturer::Cap
 
 fn run_capture(
     mut capturer: scap::capturer::Capturer,
-    display: scap::Display,
+    metadata: SourceMetadata,
     frame_callback: Box<dyn Fn(ScreenCaptureFrame) + Send>,
     stream_tx: oneshot::Sender<Result<ScapStream>>,
 ) {
     let cancel_stream = Arc::new(AtomicBool::new(false));
-    let size = Size {
-        width: DevicePixels(display.width as i32),
-        height: DevicePixels(display.height as i32),
-    };
     let stream_send_result = stream_tx.send(Ok(ScapStream {
         cancel_stream: cancel_stream.clone(),
-        display,
-        size,
+        metadata,
     }));
     if stream_send_result.is_err() {
         return;
@@ -245,18 +231,12 @@ fn run_capture(
 
 struct ScapStream {
     cancel_stream: Arc<AtomicBool>,
-    display: scap::Display,
-    size: Size<DevicePixels>,
+    metadata: SourceMetadata,
 }
 
 impl ScreenCaptureStream for ScapStream {
     fn metadata(&self) -> Result<SourceMetadata> {
-        Ok(SourceMetadata {
-            resolution: self.size,
-            label: Some(self.display.title.clone().into()),
-            is_main: None,
-            id: self.display.id as u64,
-        })
+        Ok(self.metadata.clone())
     }
 }
 
@@ -277,6 +257,37 @@ fn frame_size(frame: &scap::frame::Frame) -> Size<DevicePixels> {
         scap::frame::Frame::BGRA(frame) => (frame.width, frame.height),
     };
     size(DevicePixels(width), DevicePixels(height))
+}
+
+fn metadata_for_target(target: Option<&Target>, resolution: Size<DevicePixels>) -> SourceMetadata {
+    let (id, label) = match target {
+        Some(Target::Display(display)) => (display.id as u64, Some(display.title.clone().into())),
+        Some(Target::Window(window)) => (window.id as u64, Some(window.title.clone().into())),
+        None => (0, None),
+    };
+
+    SourceMetadata {
+        id,
+        label,
+        is_main: None,
+        resolution,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_target_metadata_uses_the_first_frame_resolution() {
+        let resolution = size(DevicePixels(1920), DevicePixels(1080));
+        let metadata = metadata_for_target(None, resolution);
+
+        assert_eq!(metadata.id, 0);
+        assert_eq!(metadata.label, None);
+        assert_eq!(metadata.is_main, None);
+        assert_eq!(metadata.resolution, resolution);
+    }
 }
 
 /// This is used by `get_screen_targets` and `start_default_target_screen_capture` to turn their
