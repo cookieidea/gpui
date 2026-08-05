@@ -34,7 +34,11 @@ decv = { git = "https://github.com/cradiy/decv", rev = "747b168ce9aa13950a17b8b1
 ], optional = true }
 gpui.workspace = true
 log.workspace = true
-symphonia = { version = "0.6.0", default-features = false, features = ["all-codecs"], optional = true }
+symphonia = { version = "0.6.0", default-features = false, features = [
+  "all-codecs",
+  "all-meta",
+  "all-formats",
+], optional = true }
 ureq = { workspace = true, optional = true }
 url.workspace = true
 
