@@ -2807,6 +2807,7 @@ impl Interactivity {
                                     source_window,
                                     phase: DragPhase::Internal,
                                     drop_performed: false,
+                                    pending_outcome: None,
                                     on_end,
                                     system_options: None,
                                     icon_created: false,
@@ -4311,6 +4312,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(&*events.borrow(), &["end:unaccepted"]);
+    }
+
+    #[test]
+    fn accepted_native_drop_waits_for_source_finished() {
+        let (mut cx, window, events) = setup_drag_session_test(true);
+        let session_id = start_test_drag(&mut cx, window);
+
+        cx.update_window(window, |_, window, cx| {
+            let DragOrigin::Internal(session) = &mut cx.active_drag.as_mut().unwrap().origin else {
+                panic!("test drag must be internal")
+            };
+            session.phase = DragPhase::Native;
+
+            let result = window.dispatch_event(
+                crate::PlatformInput::InternalDrag(InternalDragEvent::Dropped {
+                    session_id,
+                    position: point(px(75.), px(10.)),
+                }),
+                cx,
+            );
+            assert!(result.drag_drop_accepted);
+            let DragOrigin::Internal(session) = &cx.active_drag.as_ref().unwrap().origin else {
+                panic!("test drag must be internal")
+            };
+            assert_eq!(session.phase, DragPhase::Finishing);
+            assert!(matches!(
+                session.pending_outcome,
+                Some(DragEnd::Dropped { .. })
+            ));
+            assert_eq!(&*events.borrow(), &["target:drop"]);
+
+            window.dispatch_event(
+                crate::PlatformInput::InternalDrag(InternalDragEvent::SourceFinished {
+                    session_id,
+                }),
+                cx,
+            );
+            assert!(!cx.has_active_drag());
+        })
+        .unwrap();
+
+        assert_eq!(&*events.borrow(), &["target:drop", "end:dropped"]);
     }
 
     #[test]

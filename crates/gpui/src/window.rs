@@ -3080,6 +3080,10 @@ impl Window {
                 DragOrigin::Internal(session)
                     if session.phase == DragPhase::Native && session.icon_created
             );
+            let drag_is_finishing = matches!(
+                &active_drag.origin,
+                DragOrigin::Internal(session) if session.phase == DragPhase::Finishing
+            );
             if renders_platform_icon {
                 native_drag_icon = Some((
                     active_drag.view.clone(),
@@ -3089,7 +3093,7 @@ impl Window {
                         DragOrigin::ExternalFiles => unreachable!(),
                     },
                 ));
-            } else if !native_drag_has_icon {
+            } else if !native_drag_has_icon && !drag_is_finishing {
                 let mut element = active_drag.view.clone().into_any_element();
                 let offset = self.mouse_position() - active_drag.cursor_offset;
                 element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
@@ -5261,7 +5265,10 @@ impl Window {
                 matches!(
                     &drag.origin,
                     DragOrigin::Internal(session)
-                        if session.phase == crate::DragPhase::Native
+                        if matches!(
+                            session.phase,
+                            crate::DragPhase::Native | crate::DragPhase::Finishing
+                        )
                             && session.source_window == self.handle.id
                 )
             })
@@ -5445,14 +5452,14 @@ impl Window {
                     })
                 }
                 InternalDragEvent::SourceFinished { session_id } => {
-                    let matches_session = cx.active_drag.as_ref().is_some_and(|drag| {
-                        matches!(
-                            &drag.origin,
-                            DragOrigin::Internal(session) if session.session_id == session_id
-                        )
+                    let outcome = cx.active_drag.as_ref().and_then(|drag| match &drag.origin {
+                        DragOrigin::Internal(session) if session.session_id == session_id => {
+                            Some(session.pending_outcome.unwrap_or(DragEnd::Unaccepted))
+                        }
+                        _ => None,
                     });
-                    if matches_session {
-                        cx.finish_active_drag(DragEnd::Unaccepted, self);
+                    if let Some(outcome) = outcome {
+                        cx.finish_active_drag(outcome, self);
                     }
                     PlatformInput::InternalDrag(InternalDragEvent::SourceFinished { session_id })
                 }
@@ -5515,12 +5522,15 @@ impl Window {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
             drag_drop_accepted: dropped_session.is_some_and(|session_id| {
-                !cx.active_drag.as_ref().is_some_and(|drag| {
-                    matches!(
-                        &drag.origin,
-                        DragOrigin::Internal(session) if session.session_id == session_id
-                    )
-                })
+                cx.active_drag
+                    .as_ref()
+                    .is_none_or(|drag| match &drag.origin {
+                        DragOrigin::Internal(session) if session.session_id == session_id => {
+                            session.phase == DragPhase::Finishing
+                                && matches!(session.pending_outcome, Some(DragEnd::Dropped { .. }))
+                        }
+                        _ => true,
+                    })
             }),
         }
     }

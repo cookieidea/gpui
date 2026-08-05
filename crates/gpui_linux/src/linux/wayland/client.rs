@@ -4,6 +4,7 @@ use std::{
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -292,6 +293,46 @@ pub struct DragState {
     kind: Option<DragOfferKind>,
     window: Option<WaylandWindowStatePtr>,
     position: Point<Pixels>,
+}
+
+#[derive(Default)]
+struct WaylandDataOfferState {
+    selected_action: Mutex<Option<DndAction>>,
+}
+
+impl WaylandDataOfferState {
+    fn selected_action(&self) -> Option<DndAction> {
+        *self
+            .selected_action
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_selected_action(&self, action: Option<DndAction>) {
+        *self
+            .selected_action
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = action;
+    }
+}
+
+fn data_offer_can_finish(accepted: bool, selected_action: Option<DndAction>) -> bool {
+    accepted && selected_action.is_some_and(|action| !action.is_empty())
+}
+
+fn finish_data_offer(data_offer: wl_data_offer::WlDataOffer, accepted: bool) {
+    let selected_action = data_offer
+        .data::<WaylandDataOfferState>()
+        .and_then(WaylandDataOfferState::selected_action);
+    if data_offer_can_finish(accepted, selected_action) {
+        data_offer.finish();
+    } else if accepted {
+        log::warn!(
+            "[gpui-dnd] refusing wl_data_offer.finish without a valid action offer={:?}",
+            data_offer.id()
+        );
+    }
+    data_offer.destroy();
 }
 
 #[derive(Clone, Copy)]
@@ -2719,20 +2760,16 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                             },
                         ));
                         if let Some(data_offer) = data_offer {
-                            if result.drag_drop_accepted {
-                                data_offer.finish();
-                            }
-                            data_offer.destroy();
+                            finish_data_offer(data_offer, result.drag_drop_accepted);
                         }
                     }
                     Some(DragOfferKind::ExternalFiles) => {
+                        let result = drag_window.handle_input(PlatformInput::FileDrop(
+                            FileDropEvent::Submit { position },
+                        ));
                         if let Some(data_offer) = data_offer {
-                            data_offer.finish();
-                            data_offer.destroy();
+                            finish_data_offer(data_offer, result.drag_drop_accepted);
                         }
-                        drag_window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
-                            position,
-                        }));
                     }
                     None => {}
                 }
@@ -2742,31 +2779,41 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
     }
 
     event_created_child!(WaylandClientStatePtr, wl_data_device::WlDataDevice, [
-        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, WaylandDataOfferState::default()),
     ]);
 }
 
-impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
+impl Dispatch<wl_data_offer::WlDataOffer, WaylandDataOfferState> for WaylandClientStatePtr {
     fn event(
         this: &mut Self,
         data_offer: &wl_data_offer::WlDataOffer,
         event: wl_data_offer::Event,
-        _: &(),
+        data: &WaylandDataOfferState,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         let client = this.get_client();
         let mut state = client.borrow_mut();
 
-        if let wl_data_offer::Event::Offer { mime_type } = event {
-            // Clipboard
-            if let Some(offer) = state
-                .data_offers
-                .iter_mut()
-                .find(|wrapper| wrapper.inner.id() == data_offer.id())
-            {
-                offer.add_mime_type(mime_type);
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => {
+                // Clipboard
+                if let Some(offer) = state
+                    .data_offers
+                    .iter_mut()
+                    .find(|wrapper| wrapper.inner.id() == data_offer.id())
+                {
+                    offer.add_mime_type(mime_type);
+                }
             }
+            wl_data_offer::Event::Action { dnd_action } => {
+                let action = match dnd_action {
+                    WEnum::Value(action) if !action.is_empty() => Some(action),
+                    WEnum::Value(_) | WEnum::Unknown(_) => None,
+                };
+                data.set_selected_action(action);
+            }
+            _ => {}
         }
     }
 }
@@ -2964,5 +3011,19 @@ impl Dispatch<XdgDialogV1, ()> for WaylandClientStatePtr {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_offer_finish_requires_acceptance_and_selected_action() {
+        assert!(data_offer_can_finish(true, Some(DndAction::Move)));
+        assert!(data_offer_can_finish(true, Some(DndAction::Copy)));
+        assert!(!data_offer_can_finish(false, Some(DndAction::Move)));
+        assert!(!data_offer_can_finish(true, Some(DndAction::empty())));
+        assert!(!data_offer_can_finish(true, None));
     }
 }

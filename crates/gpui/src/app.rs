@@ -2367,7 +2367,7 @@ impl App {
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
         if let Some(active_drag) = &self.active_drag
             && let DragOrigin::Internal(session) = &active_drag.origin
-            && session.phase == DragPhase::Native
+            && matches!(session.phase, DragPhase::Native | DragPhase::Finishing)
         {
             window.cancel_internal_drag(session.session_id);
         }
@@ -2375,6 +2375,17 @@ impl App {
     }
 
     pub(crate) fn finish_active_drag(&mut self, outcome: DragEnd, window: &mut Window) -> bool {
+        if let Some(active_drag) = self.active_drag.as_mut()
+            && let DragOrigin::Internal(session) = &mut active_drag.origin
+            && session.phase == DragPhase::Native
+            && matches!(outcome, DragEnd::Dropped { .. })
+        {
+            session.phase = DragPhase::Finishing;
+            session.pending_outcome = Some(outcome);
+            window.refresh();
+            return true;
+        }
+
         let Some(active_drag) = self.active_drag.take() else {
             return false;
         };
@@ -2875,6 +2886,7 @@ pub(crate) struct InternalDragSession {
     pub source_window: WindowId,
     pub phase: DragPhase,
     pub drop_performed: bool,
+    pub pending_outcome: Option<DragEnd>,
     pub on_end: Option<DragEndListener>,
     pub system_options: Option<SystemDragOptions>,
     pub icon_created: bool,
