@@ -266,6 +266,7 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
     color -= blurred.rgb
         * edge
         * facing_shadow
+        * edge_light.a
         * (0.055 + speed * 0.035);
 
     let source_alpha = max(max(red.a, green.a), max(blue.a, blurred.a));

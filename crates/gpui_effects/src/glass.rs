@@ -1,14 +1,15 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AbsoluteLength, Animation, AnimationExt, AnyElement, Div, EffectUniforms, ElementId, Hsla,
-    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, Point,
-    RenderOnce, Rgba, StyleRefinement, Styled, div, hsla, px,
+    AbsoluteLength, BorderStyle, Bounds, Div, Edges, EffectUniforms, ElementId, Hsla,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, PaintBackdropEffect,
+    ParentElement, Pixels, Point, RenderOnce, Rgba, StyleRefinement, Styled, div, hsla, point, px,
+    quad, size,
 };
 
 use crate::{
     GLASS_GEOMETRY_SLOT, GLASS_INTERACTION_SLOT, GLASS_LIGHT_SLOT, GLASS_OPTICS_SLOT,
-    GLASS_SURFACE_SLOT, GLASS_TINT_SLOT, backdrop_effect, frosted_glass_shader, gel_glass_shader,
+    GLASS_SURFACE_SLOT, GLASS_TINT_SLOT, frosted_glass_shader, gel_glass_shader,
 };
 
 const GLASS_OVERSCAN: f32 = 32.0;
@@ -34,6 +35,24 @@ fn normalize_translation_velocity(velocity: Point<f32>) -> Point<f32> {
         y: velocity.y / GLASS_REFERENCE_VELOCITY,
     })
     .0
+}
+
+fn scale_glass_pixel_uniforms(
+    mut uniforms: EffectUniforms,
+    scale_factor: f32,
+    radius: Pixels,
+) -> EffectUniforms {
+    let mut optics = uniforms.slots()[GLASS_OPTICS_SLOT];
+    optics[0] *= scale_factor;
+    optics[1] *= scale_factor;
+    uniforms.set_slot(GLASS_OPTICS_SLOT, optics);
+
+    let mut geometry = uniforms.slots()[GLASS_GEOMETRY_SLOT];
+    geometry[0] *= scale_factor;
+    geometry[1] = radius.as_f32() * scale_factor;
+    geometry[2] *= scale_factor;
+    uniforms.set_slot(GLASS_GEOMETRY_SLOT, geometry);
+    uniforms
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -199,18 +218,19 @@ impl GlassMaterial {
 /// Content is painted after the material, while the effect itself samples only
 /// scene content already behind the panel. On renderers without backdrop
 /// support, the translucent tint and border remain visible as a fallback.
+/// Its container has the same default style and child layout behavior as
+/// [`gpui::div`]; the material is painted without adding layout children.
 ///
 /// See the [`glass_guide`](crate::glass_guide) for the rendering model,
 /// layer-ordering rules, recipes, and a complete parameter reference.
 pub struct GlassPanel {
     div: Div,
-    children: Vec<AnyElement>,
     style: GlassStyle,
     material: GlassMaterial,
     blur_radius: Option<Pixels>,
-    radius: AbsoluteLength,
     tint: Option<Hsla>,
     edge_color: Hsla,
+    edge_visible: bool,
     animated: bool,
     animation_id: ElementId,
     animation_duration: Duration,
@@ -233,14 +253,13 @@ impl GlassPanel {
     /// Creates regular frosted glass.
     pub fn new() -> Self {
         Self {
-            div: div().relative().rounded(px(16.0)),
-            children: Vec::new(),
+            div: div(),
             style: GlassStyle::Frosted,
             material: GlassMaterial::Regular,
             blur_radius: None,
-            radius: px(16.0).into(),
             tint: None,
             edge_color: hsla(0.0, 0.0, 1.0, 0.78),
+            edge_visible: true,
             animated: true,
             animation_id: "gpui-liquid-glass".into(),
             animation_duration: Duration::from_secs(7),
@@ -298,13 +317,12 @@ impl GlassPanel {
         self
     }
 
-    /// Sets both the GPUI container radius and shader silhouette radius.
+    /// Sets a uniform radius for both the GPUI container and glass silhouette.
     ///
-    /// Prefer this over applying only a generic rounded style, which does not
-    /// update the shader geometry.
+    /// Generic [`Styled`] rounding methods are also reflected by the material;
+    /// this method is the convenient uniform-radius form.
     pub fn radius(mut self, radius: impl Into<AbsoluteLength>) -> Self {
         let radius = radius.into();
-        self.radius = radius;
         self.div = self.div.rounded(radius);
         self
     }
@@ -325,6 +343,15 @@ impl GlassPanel {
     /// passed to [`Self::surface`].
     pub fn edge_color(mut self, color: impl Into<Hsla>) -> Self {
         self.edge_color = color.into();
+        self
+    }
+
+    /// Shows or hides the bright and shaded material edge.
+    ///
+    /// Hiding the edge preserves the glass silhouette, tint, blur, and
+    /// refraction. It also removes the unsupported-renderer fallback border.
+    pub fn edge_visible(mut self, visible: bool) -> Self {
+        self.edge_visible = visible;
         self
     }
 
@@ -437,8 +464,8 @@ impl InteractiveElement for GlassPanel {
 }
 
 impl ParentElement for GlassPanel {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.children.extend(elements);
+    fn extend(&mut self, elements: impl IntoIterator<Item = gpui::AnyElement>) {
+        self.div.extend(elements);
     }
 }
 
@@ -481,7 +508,10 @@ impl RenderOnce for GlassPanel {
                 GlassStyle::Gel => hsla(0.58, 0.55, 0.96, 0.055),
             })
             .into();
-        let edge_light: Rgba = self.edge_color.into();
+        let mut edge_light: Rgba = self.edge_color.into();
+        if !self.edge_visible {
+            edge_light.a = 0.0;
+        }
         let mut optics = self.optics.unwrap_or(preset_optics);
         optics[0] *= self.deformation;
         optics[1] *= self.deformation;
@@ -501,7 +531,7 @@ impl RenderOnce for GlassPanel {
                 GLASS_GEOMETRY_SLOT,
                 [
                     GLASS_OVERSCAN,
-                    self.radius.to_pixels(window.rem_size()).as_f32(),
+                    0.0,
                     18.0 + blur_radius.as_f32() * 0.22,
                     0.092 * self.deformation,
                 ],
@@ -531,39 +561,75 @@ impl RenderOnce for GlassPanel {
             GlassStyle::Frosted => frosted_glass_shader(),
             GlassStyle::Gel => gel_glass_shader(),
         };
-        let overlay = backdrop_effect(shader)
-            .uniforms(uniforms)
-            .blur_radius(blur_radius)
-            .effect_opacity(self.glass_opacity)
-            .absolute()
-            .left(px(-GLASS_OVERSCAN))
-            .right(px(-GLASS_OVERSCAN))
-            .top(px(-GLASS_OVERSCAN))
-            .bottom(px(-GLASS_OVERSCAN));
-        let overlay = if should_animate {
-            overlay
-                .with_animation(
-                    self.animation_id,
-                    Animation::new(self.animation_duration).repeat(),
-                    |effect, time| effect.time(time),
-                )
-                .into_any_element()
+        let animation_time = if should_animate {
+            let animation_started_at =
+                window.use_keyed_state(self.animation_id, cx, |_, _| Instant::now());
+            window.request_animation_frame();
+            animation_started_at
+                .read(cx)
+                .elapsed()
+                .as_secs_f32()
+                .rem_euclid(self.animation_duration.as_secs_f32().max(f32::EPSILON))
+                / self.animation_duration.as_secs_f32().max(f32::EPSILON)
         } else {
-            overlay.into_any_element()
-        };
-
-        let fallback_alpha = if backdrop_supported {
             0.0
-        } else {
-            self.glass_opacity
         };
-        let fallback = div()
-            .absolute()
-            .inset_0()
-            .rounded(self.radius)
-            .bg(tint.opacity(fallback_alpha))
-            .border_1()
-            .border_color(self.edge_color.opacity(fallback_alpha));
+        let glass_opacity = self.glass_opacity;
+        let fallback_edge_color =
+            self.edge_color
+                .opacity(if self.edge_visible { 1.0 } else { 0.0 });
+        let decoration = move |bounds: Bounds<Pixels>,
+                               resolved_style: &gpui::Style,
+                               window: &mut gpui::Window,
+                               _cx: &mut gpui::App| {
+            let corner_radii = resolved_style
+                .corner_radii
+                .clone()
+                .to_pixels(window.rem_size())
+                .clamp_radii_for_quad_size(bounds.size);
+            let shader_radius = corner_radii
+                .top_left
+                .max(corner_radii.top_right)
+                .max(corner_radii.bottom_right)
+                .max(corner_radii.bottom_left);
+            let paint_uniforms =
+                scale_glass_pixel_uniforms(uniforms, window.scale_factor(), shader_radius);
+
+            let overscan = px(GLASS_OVERSCAN);
+            let effect_bounds = Bounds {
+                origin: point(bounds.origin.x - overscan, bounds.origin.y - overscan),
+                size: size(
+                    bounds.size.width + overscan * 2.0,
+                    bounds.size.height + overscan * 2.0,
+                ),
+            };
+            let mouse = window.mouse_position();
+            let width = effect_bounds.size.width.as_f32().max(f32::EPSILON);
+            let height = effect_bounds.size.height.as_f32().max(f32::EPSILON);
+            let pointer = Point {
+                x: (mouse.x.as_f32() - effect_bounds.origin.x.as_f32()) / width,
+                y: (mouse.y.as_f32() - effect_bounds.origin.y.as_f32()) / height,
+            };
+
+            window.paint_backdrop_effect(
+                PaintBackdropEffect::new(effect_bounds, blur_radius, shader.clone())
+                    .uniforms(paint_uniforms)
+                    .time(animation_time)
+                    .pointer(pointer, effect_bounds.contains(&mouse))
+                    .opacity(glass_opacity),
+            );
+
+            if !backdrop_supported {
+                window.paint_quad(quad(
+                    bounds,
+                    corner_radii,
+                    tint.opacity(glass_opacity),
+                    Edges::all(px(1.0)),
+                    Edges::all(fallback_edge_color.opacity(glass_opacity)),
+                    BorderStyle::default(),
+                ));
+            }
+        };
 
         let move_state = interaction.clone();
         let down_state = interaction.clone();
@@ -574,6 +640,7 @@ impl RenderOnce for GlassPanel {
         let up_style = self.style;
         let up_out_style = self.style;
         self.div
+            .on_paint_before_children(decoration)
             .on_mouse_move(move |event, window, cx| {
                 if move_style != GlassStyle::Gel {
                     return;
@@ -614,9 +681,6 @@ impl RenderOnce for GlassPanel {
                 });
                 window.refresh();
             })
-            .child(overlay)
-            .child(fallback)
-            .children(self.children)
     }
 }
 
@@ -719,6 +783,12 @@ mod tests {
     }
 
     #[test]
+    fn glass_edge_can_be_hidden() {
+        assert!(GlassPanel::new().edge_visible);
+        assert!(!GlassPanel::new().edge_visible(false).edge_visible);
+    }
+
+    #[test]
     fn component_id_preserves_the_panel_type_and_forwards_to_the_div() {
         let mut panel = GlassPanel::new().id("documented-glass-panel").child(div());
         assert_eq!(
@@ -726,5 +796,23 @@ mod tests {
             Some(&ElementId::from("documented-glass-panel"))
         );
         let _: gpui::ViewElement<GlassPanel> = panel.into_element();
+    }
+
+    #[test]
+    fn default_container_style_matches_div() {
+        let mut panel = GlassPanel::new();
+        let mut ordinary_div = div();
+        assert_eq!(Styled::style(&mut panel), ordinary_div.style());
+    }
+
+    #[test]
+    fn glass_pixel_uniforms_follow_device_scale() {
+        let uniforms = EffectUniforms::new()
+            .with_slot(GLASS_OPTICS_SLOT, [12.0, 2.0, 0.5, 1.0])
+            .with_slot(GLASS_GEOMETRY_SLOT, [32.0, 0.0, 20.0, 0.1]);
+        let scaled = scale_glass_pixel_uniforms(uniforms, 2.0, px(48.0));
+
+        assert_eq!(scaled.slots()[GLASS_OPTICS_SLOT], [24.0, 4.0, 0.5, 1.0]);
+        assert_eq!(scaled.slots()[GLASS_GEOMETRY_SLOT], [64.0, 96.0, 40.0, 0.1]);
     }
 }

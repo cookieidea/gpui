@@ -90,7 +90,12 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
         * highlight_strength
         * (0.10 + pow(facing_light, 2.6) * 0.48);
     color += edge_light.rgb * edge_light.a * (highlight + inner_rim * 0.035);
-    color *= 1.0 - outer_rim * facing_away * highlight_strength * 0.035;
+    color *= 1.0
+        - outer_rim
+            * facing_away
+            * highlight_strength
+            * edge_light.a
+            * 0.035;
 
     let source_alpha = max(raw.a, blurred.a);
     return vec4<f32>(max(color, vec3<f32>(0.0)), source_alpha * coverage);

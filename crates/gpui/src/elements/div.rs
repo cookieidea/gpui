@@ -1634,6 +1634,9 @@ pub(crate) type ModifiersChangedListener =
 pub(crate) type ActionListener =
     Box<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
 
+type BeforeChildrenPaintListener =
+    Box<dyn Fn(Bounds<Pixels>, &Style, &mut Window, &mut App) + 'static>;
+
 /// Construct a new [`Div`] element
 #[track_caller]
 pub fn div() -> Div {
@@ -1641,6 +1644,7 @@ pub fn div() -> Div {
         interactivity: Interactivity::new(),
         children: SmallVec::default(),
         prepaint_listener: None,
+        before_children_paint_listener: None,
         image_cache: None,
         prepaint_order_fn: None,
     }
@@ -1651,11 +1655,26 @@ pub struct Div {
     interactivity: Interactivity,
     children: SmallVec<[StackSafe<AnyElement>; 2]>,
     prepaint_listener: Option<Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static>>,
+    before_children_paint_listener: Option<BeforeChildrenPaintListener>,
     image_cache: Option<Box<dyn ImageCacheProvider>>,
     prepaint_order_fn: Option<Box<dyn Fn(&mut Window, &mut App) -> SmallVec<[usize; 8]>>>,
 }
 
 impl Div {
+    /// Paints a decoration after this div's background and before its children.
+    ///
+    /// The decoration uses this div's resolved bounds and style directly and
+    /// does not create a child layout node. This is intended for material or
+    /// surface effects that must not affect child layout, scrolling extent, or
+    /// child prepaint observation.
+    pub fn on_paint_before_children(
+        mut self,
+        listener: impl Fn(Bounds<Pixels>, &Style, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.before_children_paint_listener = Some(Box::new(listener));
+        self
+    }
+
     /// Add a listener to be called when the children of this `Div` are prepainted.
     /// This allows you to store the [`Bounds`] of the children for later use.
     pub fn on_children_prepainted(
@@ -1925,6 +1944,10 @@ impl Element for Div {
                     // skip children
                     if style.display == Display::None {
                         return;
+                    }
+
+                    if let Some(listener) = self.before_children_paint_listener.as_ref() {
+                        listener(bounds, style, window, cx);
                     }
 
                     for child in &mut self.children {

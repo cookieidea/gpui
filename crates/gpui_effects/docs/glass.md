@@ -16,6 +16,12 @@ GlassPanel::frosted()
 
 `GlassPanel::new()` is equivalent to `GlassPanel::frosted()`.
 
+`GlassPanel` has the same default container style and child-layout behavior as
+`div()`. The material is painted on that container without inserting hidden
+flex/grid children or expanding its scrollable content. This makes an existing
+`div()` replaceable with `GlassPanel::new()` while preserving its layout; add a
+radius explicitly when the design calls for one.
+
 ## Styles
 
 ```rust,ignore
@@ -48,6 +54,7 @@ blur with `.blur_radius(px(...))`.
 | `radius(...)` | Sets container and shader radius together |
 | `tint(...)` | Sets material tint and fallback color |
 | `edge_color(...)` | Sets refractive edge color |
+| `edge_visible(false)` | Hides material edge lighting and fallback border |
 | `deformation(...)` | Scales Gel refraction and dispersion |
 | `wave_strength(...)` | Scales Gel ambient motion |
 | `translation_velocity(...)` | Supplies Gel body velocity in logical px/s |
