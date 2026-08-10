@@ -143,7 +143,6 @@ impl RenameRule {
 struct FileEntry {
     variant: Ident,
     file_name: String,
-    absolute_path: String,
 }
 
 fn expand_asset_enum(
@@ -186,7 +185,6 @@ fn expand_asset_enum(
         let file_name = &asset.file_name;
         quote!(Self::#variant => formatter.write_str(#file_name))
     });
-    let tracked_files = assets.iter().map(|asset| &asset.absolute_path);
 
     Ok(quote! {
         #input
@@ -202,9 +200,6 @@ fn expand_asset_enum(
             }
         }
 
-        const _: () = {
-            #(let _ = ::core::include_bytes!(#tracked_files);)*
-        };
     })
 }
 
@@ -293,24 +288,7 @@ fn collect_assets(args: &FileEnumArgs) -> syn::Result<Vec<FileEntry>> {
             ));
         }
 
-        let absolute_path = entry.path().canonicalize().map_err(|error| {
-            syn::Error::new(
-                args.path.span(),
-                format!("failed to resolve `{}`: {error}", entry.path().display()),
-            )
-        })?;
-        let absolute_path = absolute_path.into_os_string().into_string().map_err(|_| {
-            syn::Error::new(
-                args.path.span(),
-                format!("path for `{file_name}` is not valid UTF-8"),
-            )
-        })?;
-
-        assets.push(FileEntry {
-            variant,
-            file_name,
-            absolute_path,
-        });
+        assets.push(FileEntry { variant, file_name });
     }
 
     assets.sort_by(|left, right| left.file_name.cmp(&right.file_name));
