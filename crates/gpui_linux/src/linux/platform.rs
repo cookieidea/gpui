@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
     rc::Rc,
@@ -20,13 +21,13 @@ use gpui_util::{ResultExt as _, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
-use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
+use crate::linux::{GpuiTray, LinuxDispatcher, LinuxTrayMessage, PriorityQueueCalloopReceiver};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
     ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowButtonLayout, WindowParams,
+    PlatformWindow, Result, RunnableVariant, Task, ThermalState, TrayEvent, TrayId, TrayOptions,
+    WindowAppearance, WindowButtonLayout, WindowParams,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{Pixels, Point, px};
@@ -111,6 +112,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
     pub(crate) system_wake: Option<Box<dyn FnMut()>>,
+    pub(crate) tray_event: Option<Box<dyn FnMut(TrayId, TrayEvent)>>,
 }
 
 pub(crate) struct LinuxCommon {
@@ -123,6 +125,8 @@ pub(crate) struct LinuxCommon {
     pub(crate) callbacks: PlatformHandlers,
     pub(crate) signal: LoopSignal,
     pub(crate) menus: Vec<OwnedMenu>,
+    pub(crate) trays: HashMap<TrayId, ksni::Handle<GpuiTray>>,
+    pub(crate) tray_sender: Sender<LinuxTrayMessage>,
     #[cfg_attr(
         not(all(target_os = "linux", any(feature = "wayland", feature = "x11"))),
         allow(dead_code)
@@ -138,9 +142,11 @@ impl LinuxCommon {
         Self,
         PriorityQueueCalloopReceiver<RunnableVariant>,
         calloop::channel::Channel<()>,
+        calloop::channel::Channel<LinuxTrayMessage>,
     ) {
         let (main_sender, main_receiver) = PriorityQueueCalloopReceiver::new();
         let (wake_sender, wake_receiver) = calloop::channel::channel();
+        let (tray_sender, tray_receiver) = calloop::channel::channel();
 
         #[cfg(any(feature = "wayland", feature = "x11"))]
         let text_system = Arc::new(crate::linux::CosmicTextSystem::new("IBM Plex Sans"));
@@ -163,11 +169,13 @@ impl LinuxCommon {
             callbacks,
             signal,
             menus: Vec::new(),
+            trays: HashMap::new(),
+            tray_sender,
             wake_sender,
             wake_listener_started: false,
         };
 
-        (common, main_receiver, wake_receiver)
+        (common, main_receiver, wake_receiver, tray_receiver)
     }
 
     pub(crate) fn start_wake_listener(&mut self) {
@@ -191,6 +199,29 @@ impl LinuxCommon {
         if let Some(mut callback) = self.callbacks.system_wake.take() {
             callback();
             self.callbacks.system_wake = Some(callback);
+        }
+    }
+}
+
+pub(crate) fn dispatch_tray_message(client: &impl LinuxClient, message: LinuxTrayMessage) {
+    match message {
+        LinuxTrayMessage::Event(id, event) => {
+            let callback = client.with_common(|common| common.callbacks.tray_event.take());
+            if let Some(mut callback) = callback {
+                callback(id, event);
+                client.with_common(|common| {
+                    common.callbacks.tray_event.get_or_insert(callback);
+                });
+            }
+        }
+        LinuxTrayMessage::Action(action) => {
+            let callback = client.with_common(|common| common.callbacks.app_menu_action.take());
+            if let Some(mut callback) = callback {
+                callback(action.as_ref());
+                client.with_common(|common| {
+                    common.callbacks.app_menu_action.get_or_insert(callback);
+                });
+            }
         }
     }
 }
@@ -571,6 +602,47 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
         self.inner.with_common(|common| {
             common.callbacks.validate_app_menu_command = Some(callback);
+        });
+    }
+
+    fn create_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            !self
+                .inner
+                .with_common(|common| common.trays.contains_key(&id)),
+            "system tray item {id:?} already exists"
+        );
+        let sender = self.inner.with_common(|common| common.tray_sender.clone());
+        let handle = GpuiTray::new(id, options, sender).spawn()?;
+        self.inner.with_common(|common| {
+            common.trays.insert(id, handle);
+        });
+        Ok(())
+    }
+
+    fn update_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        let handle = self
+            .inner
+            .with_common(|common| common.trays.get(&id).cloned())
+            .ok_or_else(|| anyhow!("unknown system tray item {id:?}"))?;
+        let updated = smol::block_on(handle.update(move |tray| tray.replace_options(options)));
+        anyhow::ensure!(
+            updated.is_some(),
+            "system tray item {id:?} is no longer running"
+        );
+        Ok(())
+    }
+
+    fn remove_tray(&self, id: TrayId) {
+        let handle = self.inner.with_common(|common| common.trays.remove(&id));
+        if let Some(handle) = handle {
+            smol::block_on(handle.shutdown());
+        }
+    }
+
+    fn on_tray_event(&self, callback: Box<dyn FnMut(TrayId, TrayEvent)>) {
+        self.inner.with_common(|common| {
+            common.callbacks.tray_event = Some(callback);
         });
     }
 

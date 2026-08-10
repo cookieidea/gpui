@@ -5,7 +5,7 @@ use calloop::{EventLoop, LoopHandle};
 use gpui_util::ResultExt;
 
 use crate::linux::headless::window::{HeadlessDisplay, HeadlessWindow};
-use crate::linux::{LinuxClient, LinuxCommon, LinuxKeyboardLayout};
+use crate::linux::{LinuxClient, LinuxCommon, LinuxKeyboardLayout, dispatch_tray_message};
 use gpui::{
     AnyWindowHandle, CursorStyle, DisplayId, PlatformDisplay, PlatformKeyboardLayout,
     PlatformWindow, WindowParams,
@@ -25,7 +25,8 @@ impl HeadlessClient {
     pub(crate) fn new() -> Self {
         let event_loop = EventLoop::try_new().unwrap();
 
-        let (common, main_receiver, wake_receiver) = LinuxCommon::new(event_loop.get_signal());
+        let (common, main_receiver, wake_receiver, tray_receiver) =
+            LinuxCommon::new(event_loop.get_signal());
 
         let handle = event_loop.handle();
 
@@ -41,6 +42,14 @@ impl HeadlessClient {
             .insert_source(wake_receiver, |event, _, client: &mut HeadlessClient| {
                 if let calloop::channel::Event::Msg(()) = event {
                     client.with_common(|common| common.handle_system_wake());
+                }
+            })
+            .ok();
+
+        handle
+            .insert_source(tray_receiver, |event, _, client: &mut HeadlessClient| {
+                if let calloop::channel::Event::Msg(message) = event {
+                    dispatch_tray_message(client, message);
                 }
             })
             .ok();

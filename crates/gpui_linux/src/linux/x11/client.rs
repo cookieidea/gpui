@@ -50,7 +50,7 @@ use super::{
 
 use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
-    get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
+    dispatch_tray_message, get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
     keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, open_uri_internal,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
     reveal_path_internal,
@@ -309,7 +309,8 @@ impl X11Client {
     pub(crate) fn new() -> anyhow::Result<Self> {
         let event_loop = EventLoop::try_new()?;
 
-        let (common, main_receiver, wake_receiver) = LinuxCommon::new(event_loop.get_signal());
+        let (common, main_receiver, wake_receiver, tray_receiver) =
+            LinuxCommon::new(event_loop.get_signal());
 
         let handle = event_loop.handle();
 
@@ -344,6 +345,14 @@ impl X11Client {
             .map_err(|err| {
                 anyhow!("Failed to initialize event loop handling of wake events: {err:?}")
             })?;
+
+        handle
+            .insert_source(tray_receiver, |event, _, client: &mut X11Client| {
+                if let calloop::channel::Event::Msg(message) = event {
+                    dispatch_tray_message(client, message);
+                }
+            })
+            .map_err(|err| anyhow!("Failed to initialize tray event handling: {err:?}"))?;
 
         let (xcb_connection, x_root_index) = XCBConnection::connect(None)?;
         xcb_connection.prefetch_extension_information(xkb::X11_EXTENSION_NAME)?;

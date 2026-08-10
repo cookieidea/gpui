@@ -25,6 +25,8 @@ mod open_type;
 #[cfg(feature = "font-kit")]
 mod text_system;
 
+mod tray;
+
 mod platform;
 mod window;
 mod window_appearance;
@@ -49,6 +51,7 @@ pub(crate) use window::*;
 
 #[cfg(feature = "font-kit")]
 pub(crate) use text_system::*;
+pub(crate) use tray::*;
 
 pub use platform::MacPlatform;
 

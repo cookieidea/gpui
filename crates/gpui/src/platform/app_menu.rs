@@ -77,6 +77,11 @@ pub enum MenuItem {
     /// A separator between items
     Separator,
 
+    /// Non-interactive text used to label a group of menu items.
+    ///
+    /// Platforms may represent this as a disabled native menu item.
+    Label(SharedString),
+
     /// A submenu
     Submenu(Menu),
 
@@ -107,6 +112,11 @@ impl MenuItem {
     /// Creates a new menu item that is a separator
     pub fn separator() -> Self {
         Self::Separator
+    }
+
+    /// Creates a non-interactive menu label.
+    pub fn label(name: impl Into<SharedString>) -> Self {
+        Self::Label(name.into())
     }
 
     /// Creates a new menu item that is a submenu
@@ -152,6 +162,7 @@ impl MenuItem {
     pub fn owned(self) -> OwnedMenuItem {
         match self {
             MenuItem::Separator => OwnedMenuItem::Separator,
+            MenuItem::Label(name) => OwnedMenuItem::Label(name),
             MenuItem::Submenu(submenu) => OwnedMenuItem::Submenu(submenu.owned()),
             MenuItem::Action {
                 name,
@@ -251,6 +262,11 @@ pub enum OwnedMenuItem {
     /// A separator between items
     Separator,
 
+    /// Non-interactive text used to label a group of menu items.
+    ///
+    /// Platforms may represent this as a disabled native menu item.
+    Label(SharedString),
+
     /// A submenu
     Submenu(OwnedMenu),
 
@@ -281,6 +297,7 @@ impl Clone for OwnedMenuItem {
     fn clone(&self) -> Self {
         match self {
             OwnedMenuItem::Separator => OwnedMenuItem::Separator,
+            OwnedMenuItem::Label(name) => OwnedMenuItem::Label(name.clone()),
             OwnedMenuItem::Submenu(submenu) => OwnedMenuItem::Submenu(submenu.clone()),
             OwnedMenuItem::Action {
                 name,

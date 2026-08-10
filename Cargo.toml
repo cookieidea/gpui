@@ -206,6 +206,7 @@ indexmap = { version = "2.7.0", features = ["serde"] }
 indoc = "2"
 inventory = "0.3.19"
 itertools = "0.14.0"
+ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 json_dotpath = "1.1"
 jsonschema = "0.37.0"
 jsonwebtoken = "10.0"

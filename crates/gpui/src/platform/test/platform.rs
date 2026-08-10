@@ -3,11 +3,11 @@ use crate::{
     DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, PathPromptOptions, Platform,
     PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper,
     PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
-    SourceMetadata, Task, TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams,
-    size,
+    SourceMetadata, Task, TestDisplay, TestWindow, ThermalState, TrayEvent, TrayId, TrayOptions,
+    WindowAppearance, WindowParams, size,
 };
 use anyhow::Result;
-use collections::VecDeque;
+use collections::{HashMap, VecDeque};
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
@@ -35,6 +35,9 @@ pub(crate) struct TestPlatform {
     pub opened_url: RefCell<Option<String>>,
     pub text_system: Arc<dyn PlatformTextSystem>,
     pub expect_restart: RefCell<Option<oneshot::Sender<Option<PathBuf>>>>,
+    trays: RefCell<HashMap<TrayId, TrayOptions>>,
+    tray_event_callback: RefCell<Option<Box<dyn FnMut(TrayId, TrayEvent)>>>,
+    app_menu_action_callback: RefCell<Option<Box<dyn FnMut(&dyn crate::Action)>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
     weak: Weak<Self>,
 }
@@ -134,6 +137,9 @@ impl TestPlatform {
             current_find_pasteboard_item: Mutex::new(None),
             weak: weak.clone(),
             opened_url: Default::default(),
+            trays: Default::default(),
+            tray_event_callback: Default::default(),
+            app_menu_action_callback: Default::default(),
             text_system,
             headless_renderer_factory,
         })
@@ -257,6 +263,25 @@ impl TestPlatform {
 
     pub(crate) fn did_prompt_for_new_path(&self) -> bool {
         !self.prompts.borrow().new_path.is_empty()
+    }
+
+    pub(crate) fn simulate_tray_event(&self, id: TrayId, event: TrayEvent) {
+        let activate = self
+            .trays
+            .borrow()
+            .get(&id)
+            .and_then(|options| options.activate.as_ref())
+            .map(|action| action.boxed_clone());
+
+        if let Some(callback) = self.tray_event_callback.borrow_mut().as_mut() {
+            callback(id, event);
+        }
+        if event == TrayEvent::PrimaryActivate
+            && let Some(action) = activate
+            && let Some(callback) = self.app_menu_action_callback.borrow_mut().as_mut()
+        {
+            callback(action.as_ref());
+        }
     }
 }
 
@@ -421,11 +446,39 @@ impl Platform for TestPlatform {
 
     fn add_recent_document(&self, _paths: &Path) {}
 
-    fn on_app_menu_action(&self, _callback: Box<dyn FnMut(&dyn crate::Action)>) {}
+    fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn crate::Action)>) {
+        self.app_menu_action_callback.replace(Some(callback));
+    }
 
     fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn crate::Action) -> bool>) {}
+
+    fn create_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            !self.trays.borrow().contains_key(&id),
+            "duplicate system tray item {id:?}"
+        );
+        self.trays.borrow_mut().insert(id, options);
+        Ok(())
+    }
+
+    fn update_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            self.trays.borrow().contains_key(&id),
+            "unknown system tray item {id:?}"
+        );
+        self.trays.borrow_mut().insert(id, options);
+        Ok(())
+    }
+
+    fn remove_tray(&self, id: TrayId) {
+        self.trays.borrow_mut().remove(&id);
+    }
+
+    fn on_tray_event(&self, callback: Box<dyn FnMut(TrayId, TrayEvent)>) {
+        self.tray_event_callback.replace(Some(callback));
+    }
 
     fn app_path(&self) -> Result<std::path::PathBuf> {
         unimplemented!()

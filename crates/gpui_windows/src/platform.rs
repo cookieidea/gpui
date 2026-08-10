@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
@@ -62,6 +63,8 @@ pub(crate) struct WindowsPlatformState {
     callbacks: PlatformCallbacks,
     menus: RefCell<Vec<OwnedMenu>>,
     jump_list: RefCell<JumpList>,
+    trays: RefCell<HashMap<TrayId, WindowsTray>>,
+    taskbar_created_message: u32,
     // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with each window so `WM_SETCURSOR` can read it directly.
@@ -79,6 +82,7 @@ struct PlatformCallbacks {
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
+    tray_event: Cell<Option<Box<dyn FnMut(TrayId, TrayEvent)>>>,
 }
 
 impl WindowsPlatformState {
@@ -90,6 +94,8 @@ impl WindowsPlatformState {
         Self {
             callbacks,
             jump_list: RefCell::new(jump_list),
+            trays: RefCell::new(HashMap::new()),
+            taskbar_created_message: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             current_cursor: Cell::new(current_cursor),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             directx_devices: RefCell::new(directx_devices),
@@ -682,6 +688,38 @@ impl Platform for WindowsPlatform {
             .set(Some(callback));
     }
 
+    fn create_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            !self.inner.state.trays.borrow().contains_key(&id),
+            "system tray item {id:?} already exists"
+        );
+        let mut tray = WindowsTray::new(id, self.handle, options)?;
+        tray.add()?;
+        self.inner.state.trays.borrow_mut().insert(id, tray);
+        Ok(())
+    }
+
+    fn update_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            self.inner.state.trays.borrow().contains_key(&id),
+            "unknown system tray item {id:?}"
+        );
+        let tray = WindowsTray::new(id, self.handle, options)?;
+        tray.modify()?;
+        self.inner.state.trays.borrow_mut().insert(id, tray);
+        Ok(())
+    }
+
+    fn remove_tray(&self, id: TrayId) {
+        if let Some(tray) = self.inner.state.trays.borrow_mut().remove(&id) {
+            tray.delete();
+        }
+    }
+
+    fn on_tray_event(&self, callback: Box<dyn FnMut(TrayId, TrayEvent)>) {
+        self.inner.state.callbacks.tray_event.set(Some(callback));
+    }
+
     fn app_path(&self) -> Result<PathBuf> {
         Ok(std::env::current_exe()?)
     }
@@ -903,19 +941,85 @@ impl WindowsPlatformInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        let handled = match msg {
-            WM_GPUI_CLOSE_ONE_WINDOW
-            | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
-            | WM_GPUI_DOCK_MENU_ACTION
-            | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
-            WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
-            _ => None,
+        let handled = if self.state.taskbar_created_message != 0
+            && msg == self.state.taskbar_created_message
+        {
+            self.restore_tray_items()
+        } else {
+            match msg {
+                WM_GPUI_CLOSE_ONE_WINDOW
+                | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
+                | WM_GPUI_DOCK_MENU_ACTION
+                | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
+                | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+                WM_GPUI_TRAY => self.handle_tray_event(handle, wparam, lparam),
+                WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
+                _ => None,
+            }
         };
         if let Some(result) = handled {
             LRESULT(result)
         } else {
             unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
+        }
+    }
+
+    fn restore_tray_items(&self) -> Option<isize> {
+        for tray in self.state.trays.borrow_mut().values_mut() {
+            tray.add().log_err();
+        }
+        Some(0)
+    }
+
+    fn handle_tray_event(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
+
+        let id = TrayId::from_u32(((lparam.0 as u32) >> 16) & 0xffff);
+        let notification = (lparam.0 as u32) & 0xffff;
+        let position = POINT {
+            x: wparam.0 as u16 as i16 as i32,
+            y: (wparam.0 >> 16) as u16 as i16 as i32,
+        };
+        match notification {
+            NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP => {
+                let action = self
+                    .state
+                    .trays
+                    .borrow()
+                    .get(&id)
+                    .and_then(WindowsTray::activation_action);
+                self.with_callback(
+                    |callbacks| &callbacks.tray_event,
+                    |callback| callback(id, TrayEvent::PrimaryActivate),
+                );
+                if let Some(action) = action {
+                    self.with_callback(
+                        |callbacks| &callbacks.app_menu_action,
+                        |callback| callback(action.as_ref()),
+                    );
+                }
+                Some(0)
+            }
+            WM_CONTEXTMENU | WM_RBUTTONUP | WM_MBUTTONUP => {
+                self.with_callback(
+                    |callbacks| &callbacks.tray_event,
+                    |callback| callback(id, TrayEvent::SecondaryActivate),
+                );
+                let action = self
+                    .state
+                    .trays
+                    .borrow()
+                    .get(&id)
+                    .and_then(|tray| tray.show_menu(hwnd, position));
+                if let Some(action) = action {
+                    self.with_callback(
+                        |callbacks| &callbacks.app_menu_action,
+                        |callback| callback(action.as_ref()),
+                    );
+                }
+                Some(0)
+            }
+            _ => Some(0),
         }
     }
 

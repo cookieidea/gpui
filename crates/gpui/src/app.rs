@@ -54,8 +54,8 @@ use crate::{
     PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
     PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
     SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
-    WindowInvalidator,
+    ThermalState, TrayEvent, TrayId, TrayOptions, Window, WindowAppearance, WindowButtonLayout,
+    WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -328,6 +328,7 @@ pub(crate) type KeystrokeObserver =
     Box<dyn FnMut(&KeystrokeEvent, &mut Window, &mut App) -> bool + 'static>;
 type QuitHandler = Box<dyn FnOnce(&mut App) -> LocalBoxFuture<'static, ()> + 'static>;
 type WindowClosedHandler = Box<dyn FnMut(&mut App, WindowId)>;
+type TrayEventHandler = Box<dyn FnMut(&mut App, TrayEvent)>;
 type ReleaseListener = Box<dyn FnOnce(&mut dyn Any, &mut App) + 'static>;
 type NewEntityListener = Box<dyn FnMut(AnyEntity, &mut Option<&mut Window>, &mut App) + 'static>;
 
@@ -711,6 +712,7 @@ pub struct App {
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
     pub(crate) restart_observers: SubscriberSet<(), Handler>,
     pub(crate) window_closed_observers: SubscriberSet<(), WindowClosedHandler>,
+    pub(crate) tray_event_observers: SubscriberSet<TrayId, TrayEventHandler>,
 
     /// Per-App element arena. This isolates element allocations between different
     /// App instances (important for tests where multiple Apps run concurrently).
@@ -759,6 +761,8 @@ pub struct App {
     pending_updates: usize,
     quit_mode: QuitMode,
     quitting: bool,
+    next_tray_id: u32,
+    trays: FxHashSet<TrayId>,
 
     // We need to ensure the leak detector drops last, after all tasks, callbacks and things have been dropped.
     // Otherwise it may report false positives.
@@ -834,6 +838,7 @@ impl App {
                 restart_observers: SubscriberSet::new(),
                 restart_path: None,
                 window_closed_observers: SubscriberSet::new(),
+                tray_event_observers: SubscriberSet::new(),
                 layout_id_buffer: Default::default(),
                 propagate_event: true,
                 prompt_builder: Some(PromptBuilder::Default),
@@ -843,6 +848,8 @@ impl App {
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quit_mode: QuitMode::default(),
                 quitting: false,
+                next_tray_id: 1,
+                trays: FxHashSet::default(),
                 cursor_hide_mode: CursorHideMode::default(),
                 accessibility_force_disabled: false,
 
@@ -858,6 +865,19 @@ impl App {
 
         init_app_menus(platform.as_ref(), &app.borrow());
         SystemWindowTabController::init(&mut app.borrow_mut());
+
+        platform.on_tray_event(Box::new({
+            let app = Rc::downgrade(&app);
+            move |id, event| {
+                if let Some(app) = app.upgrade() {
+                    let cx = &mut app.borrow_mut();
+                    cx.tray_event_observers.clone().retain(&id, |callback| {
+                        callback(cx, event);
+                        true
+                    });
+                }
+            }
+        }));
 
         platform.on_keyboard_layout_change(Box::new({
             let app = Rc::downgrade(&app);
@@ -935,6 +955,11 @@ impl App {
 
         for observer in self.quit_observers.remove(&()) {
             futures.push(observer(self));
+        }
+
+        for tray in self.trays.drain() {
+            self.platform.remove_tray(tray);
+            self.tray_event_observers.remove(&tray);
         }
 
         self.windows.clear();
@@ -2234,6 +2259,58 @@ impl App {
                 })
                 .ok();
         }
+    }
+
+    /// Creates a system tray item and returns its process-local identifier.
+    ///
+    /// The tray remains alive until it is removed with [`Self::remove_tray`] or
+    /// the application shuts down.
+    pub fn create_tray(&mut self, options: TrayOptions) -> Result<TrayId> {
+        let id = TrayId(self.next_tray_id);
+        let next_id = self
+            .next_tray_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("system tray identifier space exhausted"))?;
+        self.platform
+            .create_tray(id, options, &self.keymap.borrow())?;
+        self.next_tray_id = next_id;
+        self.trays.insert(id);
+        Ok(id)
+    }
+
+    /// Replaces the icon, tooltip, menu, and activation action of a tray item.
+    pub fn update_tray(&self, id: TrayId, options: TrayOptions) -> Result<()> {
+        anyhow::ensure!(self.trays.contains(&id), "unknown system tray item {id:?}");
+        self.platform
+            .update_tray(id, options, &self.keymap.borrow())
+    }
+
+    /// Removes a system tray item.
+    ///
+    /// Returns whether the identifier referred to a live tray item.
+    pub fn remove_tray(&mut self, id: TrayId) -> bool {
+        if !self.trays.remove(&id) {
+            return false;
+        }
+        self.platform.remove_tray(id);
+        self.tray_event_observers.remove(&id);
+        true
+    }
+
+    /// Registers a callback for interactions with a specific tray item.
+    ///
+    /// Dropping the returned subscription stops delivery. Menu item selections
+    /// are dispatched through the normal [`Action`] system instead.
+    pub fn on_tray_event(
+        &self,
+        id: TrayId,
+        mut callback: impl FnMut(&mut App, TrayEvent) + 'static,
+    ) -> Subscription {
+        let (subscription, activate) = self
+            .tray_event_observers
+            .insert(id, Box::new(move |cx, event| callback(cx, event)));
+        activate();
+        subscription
     }
 
     /// Checks if the given action is bound in the current context, as defined by the app's current focus,

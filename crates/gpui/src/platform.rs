@@ -1,6 +1,7 @@
 mod app_menu;
 mod keyboard;
 mod keystroke;
+mod tray;
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 #[expect(missing_docs)]
@@ -77,6 +78,7 @@ use uuid::Uuid;
 pub use app_menu::*;
 pub use keyboard::*;
 pub use keystroke::*;
+pub use tray::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use test::*;
@@ -236,6 +238,18 @@ pub trait Platform: 'static {
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>);
     fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>);
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
+
+    fn create_tray(&self, _id: TrayId, _options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::bail!("system tray items are not supported on this platform")
+    }
+
+    fn update_tray(&self, _id: TrayId, _options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::bail!("system tray items are not supported on this platform")
+    }
+
+    fn remove_tray(&self, _id: TrayId) {}
+
+    fn on_tray_event(&self, _callback: Box<dyn FnMut(TrayId, TrayEvent)>) {}
 
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);

@@ -168,6 +168,11 @@ impl TestAppContext {
         self.test_platform.did_prompt_for_new_path()
     }
 
+    /// Simulates an interaction with a system tray item.
+    pub fn simulate_tray_event(&self, id: crate::TrayId, event: crate::TrayEvent) {
+        self.test_platform.simulate_tray_event(id, event);
+    }
+
     /// returns a new `TestAppContext` re-using the same executors to interleave tasks.
     pub fn new_app(&self) -> TestAppContext {
         Self::build(self.dispatcher.clone(), self.fn_name)

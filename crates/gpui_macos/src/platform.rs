@@ -1,5 +1,5 @@
 use crate::{
-    BoolExt, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
+    BoolExt, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacTray, MacWindow,
     events::key_to_native, ns_string, pasteboard::Pasteboard, renderer,
     set_active_window_cursor_style,
 };
@@ -31,8 +31,8 @@ use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
     KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind,
-    WindowParams, popup::PopupNotSupportedError,
+    PlatformWindow, Result, SystemMenuType, Task, ThermalState, TrayEvent, TrayId, TrayOptions,
+    WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -48,6 +48,7 @@ use ptr::null_mut;
 use semver::Version;
 use std::{
     cell::Cell,
+    collections::HashMap,
     ffi::{CStr, OsStr, c_void},
     os::{raw::c_char, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
@@ -182,6 +183,8 @@ pub(crate) struct MacPlatformState {
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
     menu_actions: Vec<Box<dyn Action>>,
+    tray_items: HashMap<TrayId, MacTray>,
+    tray_event: Option<Box<dyn FnMut(TrayId, TrayEvent)>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<id>,
@@ -225,6 +228,8 @@ impl MacPlatform {
             validate_menu_command: None,
             will_open_menu: None,
             menu_actions: Default::default(),
+            tray_items: HashMap::new(),
+            tray_event: None,
             open_urls: None,
             finish_launching: None,
             dock_menu: None,
@@ -313,6 +318,12 @@ impl MacPlatform {
         unsafe {
             match item {
                 MenuItem::Separator => NSMenuItem::separatorItem(nil),
+                MenuItem::Label(name) => {
+                    let item = NSMenuItem::new(nil).autorelease();
+                    item.setTitle_(ns_string(name));
+                    item.setEnabled_(NO);
+                    item
+                }
                 MenuItem::Action {
                     name,
                     action,
@@ -456,6 +467,65 @@ impl MacPlatform {
                     item
                 }
             }
+        }
+    }
+
+    pub(crate) fn handle_tray_activation(&self, id: TrayId, secondary: bool) {
+        let (mut event_callback, action, menu_handles) = {
+            let mut state = self.0.lock();
+            let Some(tray) = state.tray_items.get(&id) else {
+                return;
+            };
+            let action = (!secondary).then(|| tray.activation_action()).flatten();
+            let menu_handles = secondary.then(|| tray.menu_handles());
+            (state.tray_event.take(), action, menu_handles)
+        };
+
+        if let Some(callback) = event_callback.as_mut() {
+            callback(
+                id,
+                if secondary {
+                    TrayEvent::SecondaryActivate
+                } else {
+                    TrayEvent::PrimaryActivate
+                },
+            );
+        }
+        if let Some(callback) = event_callback {
+            self.0.lock().tray_event.get_or_insert(callback);
+        }
+
+        if let Some((status_item, menu)) = menu_handles {
+            unsafe {
+                if menu.numberOfItems() > 0 {
+                    let _: () = msg_send![status_item, popUpStatusItemMenu: menu];
+                }
+            }
+        } else if let Some(action) = action {
+            let mut callback = self.0.lock().menu_command.take();
+            if let Some(callback) = callback.as_mut() {
+                callback(action.as_ref());
+            }
+            if let Some(callback) = callback {
+                self.0.lock().menu_command.get_or_insert(callback);
+            }
+        }
+    }
+
+    pub(crate) fn handle_tray_menu_action(&self, id: TrayId, index: usize) {
+        let (action, mut callback) = {
+            let mut state = self.0.lock();
+            let action = state
+                .tray_items
+                .get(&id)
+                .and_then(|tray| tray.menu_action(index));
+            (action, state.menu_command.take())
+        };
+        if let (Some(action), Some(callback)) = (action, callback.as_mut()) {
+            callback(action.as_ref());
+        }
+        if let Some(callback) = callback {
+            self.0.lock().menu_command.get_or_insert(callback);
         }
     }
 
@@ -929,6 +999,34 @@ impl Platform for MacPlatform {
 
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
         self.0.lock().validate_menu_command = Some(callback);
+    }
+
+    fn create_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            !self.0.lock().tray_items.contains_key(&id),
+            "system tray item {id:?} already exists"
+        );
+        let tray = MacTray::new(self as *const _, id, options)?;
+        self.0.lock().tray_items.insert(id, tray);
+        Ok(())
+    }
+
+    fn update_tray(&self, id: TrayId, options: TrayOptions, _keymap: &Keymap) -> Result<()> {
+        anyhow::ensure!(
+            self.0.lock().tray_items.contains_key(&id),
+            "unknown system tray item {id:?}"
+        );
+        let tray = MacTray::new(self as *const _, id, options)?;
+        self.0.lock().tray_items.insert(id, tray);
+        Ok(())
+    }
+
+    fn remove_tray(&self, id: TrayId) {
+        self.0.lock().tray_items.remove(&id);
+    }
+
+    fn on_tray_event(&self, callback: Box<dyn FnMut(TrayId, TrayEvent)>) {
+        self.0.lock().tray_event = Some(callback);
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {

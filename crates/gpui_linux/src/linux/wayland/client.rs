@@ -83,9 +83,10 @@ use super::{
 
 use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
-    SCROLL_LINES, capslock_from_xkb, cursor_style_to_icon_names, get_xkb_compose_state,
-    is_within_click_distance, keystroke_from_xkb, keystroke_underlying_dead_key,
-    modifiers_from_xkb, open_uri_internal, read_fd_with_timeout, reveal_path_internal,
+    SCROLL_LINES, capslock_from_xkb, cursor_style_to_icon_names, dispatch_tray_message,
+    get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
+    keystroke_underlying_dead_key, modifiers_from_xkb, open_uri_internal, read_fd_with_timeout,
+    reveal_path_internal,
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
@@ -812,7 +813,8 @@ impl WaylandClient {
 
         let event_loop = EventLoop::<WaylandClientStatePtr>::try_new().unwrap();
 
-        let (common, main_receiver, wake_receiver) = LinuxCommon::new(event_loop.get_signal());
+        let (common, main_receiver, wake_receiver, tray_receiver) =
+            LinuxCommon::new(event_loop.get_signal());
 
         let handle = event_loop.handle();
         handle
@@ -838,6 +840,17 @@ impl WaylandClient {
                 |event, _, client: &mut WaylandClientStatePtr| {
                     if let calloop::channel::Event::Msg(()) = event {
                         client.get_client().borrow_mut().common.handle_system_wake();
+                    }
+                },
+            )
+            .unwrap();
+
+        handle
+            .insert_source(
+                tray_receiver,
+                |event, _, client: &mut WaylandClientStatePtr| {
+                    if let calloop::channel::Event::Msg(message) = event {
+                        dispatch_tray_message(&WaylandClient(client.get_client()), message);
                     }
                 },
             )
