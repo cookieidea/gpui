@@ -48,6 +48,18 @@ pub fn gel_glass() -> BackdropEffect {
         .uniform(GLASS_LIGHT_SLOT, [1.0, 1.0, 1.0, 0.72])
 }
 
+/// Constructs a clear liquid-glass material with rounded lens refraction.
+pub fn liquid_glass() -> BackdropEffect {
+    backdrop_effect(liquid_glass_shader())
+        .blur_radius(gpui::px(2.0))
+        .uniform(GLASS_OPTICS_SLOT, [18.0, 0.55, 0.94, 1.10])
+        .uniform(GLASS_SURFACE_SLOT, [0.16, 0.34, 0.0, 1.20])
+        .uniform(GLASS_TINT_SLOT, [0.82, 0.93, 1.0, 0.055])
+        .uniform(GLASS_GEOMETRY_SLOT, [0.0, 16.0, 18.0, 0.092])
+        .uniform(GLASS_INTERACTION_SLOT, [0.0; 4])
+        .uniform(GLASS_LIGHT_SLOT, [0.88, 0.96, 1.0, 0.72])
+}
+
 /// Returns the portable shader used by [`frosted_glass`].
 pub fn frosted_glass_shader() -> BackdropShader {
     BackdropShader::wgsl(include_str!("shaders/frosted_glass.wgsl"))
@@ -56,6 +68,11 @@ pub fn frosted_glass_shader() -> BackdropShader {
 /// Returns the portable shader used by [`gel_glass`].
 pub fn gel_glass_shader() -> BackdropShader {
     BackdropShader::wgsl(include_str!("shaders/gel_glass.wgsl"))
+}
+
+/// Returns the portable shader used by [`liquid_glass`].
+pub fn liquid_glass_shader() -> BackdropShader {
+    BackdropShader::wgsl(include_str!("shaders/liquid_glass.wgsl"))
 }
 
 /// A styled leaf element that samples both raw and blurred scene content.
@@ -217,6 +234,9 @@ mod tests {
     fn optical_shader_identities_are_stable_and_distinct() {
         assert_eq!(frosted_glass_shader().id(), frosted_glass_shader().id());
         assert_eq!(gel_glass_shader().id(), gel_glass_shader().id());
+        assert_eq!(liquid_glass_shader().id(), liquid_glass_shader().id());
         assert_ne!(frosted_glass_shader().id(), gel_glass_shader().id());
+        assert_ne!(frosted_glass_shader().id(), liquid_glass_shader().id());
+        assert_ne!(gel_glass_shader().id(), liquid_glass_shader().id());
     }
 }

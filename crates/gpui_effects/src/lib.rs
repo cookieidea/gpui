@@ -4,7 +4,7 @@
 //! native MSL and HLSL implementations through [`gpui::EffectShader`] when an
 //! effect needs platform-specific tuning.
 //!
-//! See [`glass_guide`] for frosted and gel glass materials.
+//! See [`glass_guide`] for frosted, gel, and liquid glass materials.
 //! See [`timed_text_guide`] for karaoke timelines, grouped emphasis, and
 //! playback-clock integration.
 

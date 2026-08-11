@@ -10,6 +10,7 @@ use gpui::{
 use crate::{
     GLASS_GEOMETRY_SLOT, GLASS_INTERACTION_SLOT, GLASS_LIGHT_SLOT, GLASS_OPTICS_SLOT,
     GLASS_SURFACE_SLOT, GLASS_TINT_SLOT, frosted_glass_shader, gel_glass_shader,
+    liquid_glass_shader,
 };
 
 const GLASS_OVERSCAN: f32 = 32.0;
@@ -174,6 +175,8 @@ pub enum GlassStyle {
     Frosted,
     /// Continuously animated elastic glass with pronounced deformation.
     Gel,
+    /// Clear rounded lens glass with strong edge refraction and magnification.
+    Liquid,
 }
 
 /// Optical density presets for [`GlassPanel`].
@@ -209,11 +212,20 @@ impl GlassMaterial {
             (GlassStyle::Gel, Self::Thick) => {
                 (px(22.0), [19.0, 2.4, 0.42, 1.14], [0.22, 0.62, 0.82, 0.86])
             }
+            (GlassStyle::Liquid, Self::Thin) => {
+                (px(0.25), [14.0, 0.35, 0.97, 1.06], [0.13, 0.26, 0.0, 1.14])
+            }
+            (GlassStyle::Liquid, Self::Regular) => {
+                (px(2.0), [18.0, 0.55, 0.94, 1.10], [0.16, 0.34, 0.0, 1.20])
+            }
+            (GlassStyle::Liquid, Self::Thick) => {
+                (px(6.0), [22.0, 0.80, 0.88, 1.12], [0.20, 0.44, 0.0, 1.24])
+            }
         }
     }
 }
 
-/// A container backed by frosted or elastic gel glass.
+/// A container backed by frosted, elastic gel, or refractive liquid glass.
 ///
 /// Content is painted after the material, while the effect itself samples only
 /// scene content already behind the panel. On renderers without backdrop
@@ -283,7 +295,12 @@ impl GlassPanel {
         Self::new().style(GlassStyle::Gel)
     }
 
-    /// Selects the frosted or elastic gel material model.
+    /// Creates clear liquid glass with rounded lens refraction.
+    pub fn liquid() -> Self {
+        Self::new().style(GlassStyle::Liquid)
+    }
+
+    /// Selects the frosted, elastic gel, or liquid material model.
     pub fn style(mut self, style: GlassStyle) -> Self {
         self.style = style;
         self
@@ -357,8 +374,8 @@ impl GlassPanel {
 
     /// Enables or disables Gel's time- and pointer-driven response.
     ///
-    /// Frosted is time-independent; its pixels still update when the live
-    /// backdrop or panel geometry changes.
+    /// Frosted and Liquid are time-independent; their pixels still update when
+    /// the live backdrop or panel geometry changes.
     pub fn animated(mut self, animated: bool) -> Self {
         self.animated = animated;
         self
@@ -442,7 +459,7 @@ impl GlassPanel {
     /// Pointer motion describes interaction across the surface, while this
     /// value describes movement of the glass body itself. Draggable or
     /// spring-animated Gel callers should update it every frame. Frosted and
-    /// Frosted ignores it.
+    /// Liquid ignore it.
     /// Around 600 px/s reaches the reference motion strength; larger values
     /// are normalized without changing direction.
     pub fn translation_velocity(mut self, velocity: Point<f32>) -> Self {
@@ -506,6 +523,7 @@ impl RenderOnce for GlassPanel {
             .unwrap_or_else(|| match self.style {
                 GlassStyle::Frosted => hsla(0.58, 0.45, 0.96, 0.10),
                 GlassStyle::Gel => hsla(0.58, 0.55, 0.96, 0.055),
+                GlassStyle::Liquid => hsla(0.56, 0.55, 0.96, 0.055),
             })
             .into();
         let mut edge_light: Rgba = self.edge_color.into();
@@ -560,6 +578,7 @@ impl RenderOnce for GlassPanel {
         let shader = match self.style {
             GlassStyle::Frosted => frosted_glass_shader(),
             GlassStyle::Gel => gel_glass_shader(),
+            GlassStyle::Liquid => liquid_glass_shader(),
         };
         let animation_time = if should_animate {
             let animation_started_at =
@@ -695,7 +714,7 @@ mod tests {
 
     #[test]
     fn material_density_increases_blur() {
-        for style in [GlassStyle::Frosted, GlassStyle::Gel] {
+        for style in [GlassStyle::Frosted, GlassStyle::Gel, GlassStyle::Liquid] {
             assert!(
                 GlassMaterial::Thin.parameters(style).0
                     < GlassMaterial::Regular.parameters(style).0
@@ -733,6 +752,7 @@ mod tests {
         assert_eq!(GlassPanel::new().style, GlassStyle::Frosted);
         assert_eq!(GlassPanel::frosted().style, GlassStyle::Frosted);
         assert_eq!(GlassPanel::gel().style, GlassStyle::Gel);
+        assert_eq!(GlassPanel::liquid().style, GlassStyle::Liquid);
     }
 
     #[test]
@@ -752,21 +772,22 @@ mod tests {
             x: px(20.0),
             y: px(20.0),
         };
-        let style = GlassStyle::Frosted;
-        let mut state = GlassInteractionState::default();
-        state.set_pressed(true, position, style);
-        state.record_pointer_by(position, 1.0 / 60.0, style);
-        state.record_pointer_by(
-            Point {
-                x: px(80.0),
-                y: px(40.0),
-            },
-            1.0 / 60.0,
-            style,
-        );
-        let frame = state.advance_by(1.0 / 60.0, style);
-        assert_eq!(frame.pressure, 0.0);
-        assert_eq!(frame.velocity, Point::default());
+        for style in [GlassStyle::Frosted, GlassStyle::Liquid] {
+            let mut state = GlassInteractionState::default();
+            state.set_pressed(true, position, style);
+            state.record_pointer_by(position, 1.0 / 60.0, style);
+            state.record_pointer_by(
+                Point {
+                    x: px(80.0),
+                    y: px(40.0),
+                },
+                1.0 / 60.0,
+                style,
+            );
+            let frame = state.advance_by(1.0 / 60.0, style);
+            assert_eq!(frame.pressure, 0.0);
+            assert_eq!(frame.velocity, Point::default());
+        }
     }
 
     #[test]
