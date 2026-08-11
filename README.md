@@ -6,6 +6,48 @@ GPUI is a GPU-accelerated UI framework written in Rust. It provides core buildin
 
 It currently includes support for Linux, macOS, Windows, and the web, along with the WGPU rendering backend and Tokio integration.
 
+## What This Fork Adds
+
+Development after the initial GPUI import focuses on reusable visual effects,
+media playback, UI components, and desktop integration.
+
+### `gpui_effects`
+
+![Liquid Glass material demo](docs/images/gpui-effects-liquid-glass.png)
+
+[`gpui_effects`](crates/gpui_effects) extends GPUI with reusable GPU-backed
+visual components:
+
+- Extensible WGSL effects with uniforms and zero-, one-, two-, or four-image
+  inputs.
+- Built-in Aurora, Plasma, Color Orbs, Album Glow, and Album Ripples effects.
+- Shader effects and gradient fills masked by arbitrary elements, including
+  ready-to-use text and SVG helpers.
+- `GlassPanel` materials including Frosted, Gel, and Liquid Glass, with the
+  same layout behavior as a regular `div()` and configurable glass optics.
+- A page-flip component with rigid, soft, and curl styles, single- or
+  double-page layouts, lazy content providers, and preloading.
+- `MotionLayer` for coordinated movement along linear, curved, or custom paths.
+- Timed text with character or word timing, gradient reveal, grouped emphasis,
+  and playback-clock integration.
+
+See the [glass guide](crates/gpui_effects/docs/glass.md) and the complete
+[`gpui_effects` documentation](crates/gpui_effects/README.md).
+
+### `gpui_media`
+
+[`gpui_media`](crates/gpui_media) provides reusable video playback for GPUI
+applications. See its [documentation](crates/gpui_media/README.md) for usage.
+
+### Other Extensions
+
+- Additional rendering and styling primitives, including per-side border
+  colors, animated gradients, color SVGs, and platform backdrop effects.
+- Desktop integrations such as native system trays, Wayland internal drag and
+  drop, drag icons, and screen capture.
+- [`uic`](uic), a reusable component library with generated Lucide icons and
+  components such as `ColorPicker`.
+
 ## Getting Started
 
 The Rust toolchain is defined in `rust-toolchain.toml`. After cloning the repository, run an example with:
