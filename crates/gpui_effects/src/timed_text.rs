@@ -62,6 +62,13 @@ pub struct TimedTextEmphasis {
     pub exit_fraction: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TimedTextMotion {
+    Elastic(TimedTextEmphasis),
+    ProgressiveLift(Pixels),
+    None,
+}
+
 impl Default for TimedTextEmphasis {
     fn default() -> Self {
         Self {
@@ -96,7 +103,7 @@ pub struct TimedText {
     position: Duration,
     active_fill: Background,
     inactive_opacity: f32,
-    emphasis: TimedTextEmphasis,
+    motion: TimedTextMotion,
     elastic_groups: Option<BTreeSet<usize>>,
     interactivity: Interactivity,
 }
@@ -119,7 +126,7 @@ impl TimedText {
             position: Duration::ZERO,
             active_fill: white().into(),
             inactive_opacity: 0.34,
-            emphasis: TimedTextEmphasis::default(),
+            motion: TimedTextMotion::Elastic(TimedTextEmphasis::default()),
             elastic_groups: None,
             interactivity: Interactivity::new(),
         }
@@ -145,7 +152,17 @@ impl TimedText {
 
     /// Sets the paint-only scale/lift animation for the active group.
     pub fn emphasis(mut self, emphasis: TimedTextEmphasis) -> Self {
-        self.emphasis = emphasis;
+        self.motion = TimedTextMotion::Elastic(emphasis);
+        self
+    }
+
+    /// Lifts each word or phrase progressively over its playback interval.
+    ///
+    /// A group starts on the baseline, reaches the requested height exactly at
+    /// its end time, and remains lifted afterward. The motion is paint-only and
+    /// does not change text layout or push neighboring words.
+    pub fn progressive_lift(mut self, height: Pixels) -> Self {
+        self.motion = TimedTextMotion::ProgressiveLift(height.max(px(0.)));
         self
     }
 
@@ -160,11 +177,9 @@ impl TimedText {
         self
     }
 
-    /// Disables the active word/phrase transform while keeping timed reveal.
+    /// Disables word/phrase motion while keeping timed reveal.
     pub fn without_emphasis(mut self) -> Self {
-        self.emphasis.scale = 1.0;
-        self.emphasis.translation = Point::default();
-        self.emphasis.surrounding_spread = px(0.);
+        self.motion = TimedTextMotion::None;
         self
     }
 }
@@ -329,14 +344,20 @@ impl Element for TimedText {
 
                 let align = window.text_style().text_align;
                 let align_width = layout.content_bounds.size.width;
-                let transform = active_transform(
-                    &layout.line,
-                    layout.line_height,
-                    &self.units,
-                    self.position,
-                    self.emphasis,
-                    self.elastic_groups.as_ref(),
-                );
+                let transform = match self.motion {
+                    TimedTextMotion::Elastic(emphasis) => active_transform(
+                        &layout.line,
+                        layout.line_height,
+                        &self.units,
+                        self.position,
+                        emphasis,
+                        self.elastic_groups.as_ref(),
+                    ),
+                    TimedTextMotion::ProgressiveLift(height) => {
+                        progressive_lift_transforms(&self.units, self.position, height)
+                    }
+                    TimedTextMotion::None => Vec::new(),
+                };
                 let transforms = transform.as_slice();
 
                 layout
@@ -367,9 +388,16 @@ impl Element for TimedText {
                             + (align_width - layout.line.width()).max(px(0.))
                     }
                 };
+                let lift_overscan = match self.motion {
+                    TimedTextMotion::ProgressiveLift(height) => height,
+                    _ => px(0.),
+                };
                 let clip = Bounds::new(
-                    point(aligned_x, layout.content_bounds.origin.y),
-                    size(reveal_x.min(layout.line.width()), layout.line_height),
+                    point(aligned_x, layout.content_bounds.origin.y - lift_overscan),
+                    size(
+                        reveal_x.min(layout.line.width()),
+                        layout.line_height + lift_overscan,
+                    ),
                 );
 
                 window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
@@ -455,6 +483,54 @@ fn reveal_x(line: &ShapedLine, units: &[TimedTextUnit], position: Duration) -> P
         reached = end_x;
     }
     reached
+}
+
+fn progressive_lift_transforms(
+    units: &[TimedTextUnit],
+    position: Duration,
+    height: Pixels,
+) -> Vec<GlyphRunTransform> {
+    struct GroupTiming {
+        id: usize,
+        range: Range<usize>,
+        start: Duration,
+        end: Duration,
+    }
+
+    let mut groups: Vec<GroupTiming> = Vec::new();
+    for unit in units {
+        if let Some(group) = groups.iter_mut().find(|group| group.id == unit.group) {
+            group.range.start = group.range.start.min(unit.range.start);
+            group.range.end = group.range.end.max(unit.range.end);
+            group.start = group.start.min(unit.start);
+            group.end = group.end.max(unit.end);
+        } else {
+            groups.push(GroupTiming {
+                id: unit.group,
+                range: unit.range.clone(),
+                start: unit.start,
+                end: unit.end,
+            });
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            if position < group.start || height <= px(0.) {
+                return None;
+            }
+            let amount = smootherstep(duration_progress(position, group.start, group.end));
+            if amount <= f32::EPSILON {
+                return None;
+            }
+            Some(GlyphRunTransform::new(
+                group.range,
+                Point::default(),
+                Transformation::translate(point(px(0.), -height * amount)),
+            ))
+        })
+        .collect()
 }
 
 fn active_transform(
@@ -570,5 +646,65 @@ mod tests {
         assert!(group_is_elastic(Some(&groups), 3));
         assert!(!group_is_elastic(Some(&groups), 2));
         assert!(!group_is_elastic(Some(&BTreeSet::new()), 1));
+    }
+
+    #[test]
+    fn progressive_lift_rises_over_the_group_and_then_holds() {
+        let units = [
+            TimedTextUnit::new(0..2, Duration::ZERO, Duration::from_millis(500)).group(0),
+            TimedTextUnit::new(
+                2..4,
+                Duration::from_millis(500),
+                Duration::from_millis(1000),
+            )
+            .group(0),
+            TimedTextUnit::new(
+                5..9,
+                Duration::from_millis(1000),
+                Duration::from_millis(2000),
+            )
+            .group(1),
+        ];
+        let height = px(4.);
+
+        assert!(progressive_lift_transforms(&units, Duration::ZERO, height).is_empty());
+        assert_eq!(
+            progressive_lift_transforms(&units, Duration::from_millis(500), height),
+            vec![GlyphRunTransform::new(
+                0..4,
+                Point::default(),
+                Transformation::translate(point(px(0.), px(-2.))),
+            )]
+        );
+        assert_eq!(
+            progressive_lift_transforms(&units, Duration::from_millis(1500), height),
+            vec![
+                GlyphRunTransform::new(
+                    0..4,
+                    Point::default(),
+                    Transformation::translate(point(px(0.), px(-4.))),
+                ),
+                GlyphRunTransform::new(
+                    5..9,
+                    Point::default(),
+                    Transformation::translate(point(px(0.), px(-2.))),
+                ),
+            ]
+        );
+        assert_eq!(
+            progressive_lift_transforms(&units, Duration::from_millis(2500), height),
+            vec![
+                GlyphRunTransform::new(
+                    0..4,
+                    Point::default(),
+                    Transformation::translate(point(px(0.), px(-4.))),
+                ),
+                GlyphRunTransform::new(
+                    5..9,
+                    Point::default(),
+                    Transformation::translate(point(px(0.), px(-4.))),
+                ),
+            ]
+        );
     }
 }

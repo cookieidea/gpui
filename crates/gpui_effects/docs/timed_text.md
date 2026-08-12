@@ -2,7 +2,8 @@
 
 `TimedText` is a single-line text element for karaoke lyrics, timed captions,
 and playback-synchronized labels. It supports progressive solid or gradient
-fills and optional elastic emphasis for selected words or phrases.
+fills, cumulative lyric lift, and elastic emphasis for selected words or
+phrases.
 
 The complete line is shaped once. Timed units and elastic groups are painted
 from the resulting glyph data, without creating a GPUI element for every word.
@@ -11,8 +12,8 @@ from the resulting glyph data, without creating a GPUI element for every word.
 
 ```rust,ignore
 use std::time::Duration;
-use gpui::{linear_gradient, point, px, rgb};
-use gpui_effects::{TimedText, TimedTextEmphasis, TimedTextUnit};
+use gpui::{linear_gradient, px, rgb};
+use gpui_effects::{TimedText, TimedTextUnit};
 
 let text = "hello world";
 let units = [
@@ -34,13 +35,7 @@ TimedText::new(text, units)
     .position(playback_position)
     .active_fill(linear_gradient(90., rgb(0x67e8f9), rgb(0xf9a8d4)))
     .inactive_opacity(0.28)
-    .elastic_groups([0])
-    .emphasis(TimedTextEmphasis {
-        scale: 1.10,
-        translation: point(px(0.), px(-3.)),
-        surrounding_spread: px(5.),
-        ..Default::default()
-    })
+    .progressive_lift(px(3.))
     .text_size(px(32.))
 ```
 
@@ -85,6 +80,18 @@ let units = [
 
 The characters reveal according to their individual intervals. Scale, lift,
 and surrounding displacement use the union of the ranges in group `4`.
+
+## Progressive lyric lift
+
+`.progressive_lift(px(...))` raises every group smoothly over its complete
+playback interval. A group begins on the baseline, reaches the requested
+height at its end time, and remains there. Previously completed groups stay
+lifted while the current group continues rising.
+
+The movement is derived entirely from `.position(...)`, so pausing freezes the
+motion and seeking immediately reconstructs the correct state. It is a
+paint-only Y translation and does not reshape the line or move neighboring
+words.
 
 ## Selecting elastic groups
 

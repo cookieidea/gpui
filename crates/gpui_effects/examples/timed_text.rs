@@ -2,10 +2,10 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, App, Background, Bounds, Context, FontWeight, Render, Window,
-    WindowBounds, WindowOptions, div, linear_color_stop, multi_linear_gradient, point, prelude::*,
-    px, rgb, rgba, size,
+    WindowBounds, WindowOptions, div, linear_color_stop, multi_linear_gradient, prelude::*, px,
+    rgb, rgba, size,
 };
-use gpui_effects::{GlassMaterial, GlassPanel, TimedText, TimedTextEmphasis, TimedTextUnit};
+use gpui_effects::{GlassMaterial, GlassPanel, TimedText, TimedTextUnit};
 use gpui_platform::application;
 
 type Piece = (&'static str, u64, u64, usize);
@@ -13,40 +13,40 @@ type Piece = (&'static str, u64, u64, usize);
 const CHINESE_LINE: &str = "长音符短长旋律快长回声啪";
 const ENGLISH_LINE: &str = "sustain  short  melody  tap  long echo  pop";
 const MIXED_LINE: &str = "长音符short长旋律tap long echo快";
-const LOOP_SECONDS: f32 = 8.5;
+const LOOP_SECONDS: f32 = 6.0;
 
 const CHINESE_PIECES: &[Piece] = &[
-    ("长音符", 300, 1800, 0),
-    ("短", 2050, 2350, 1),
-    ("长旋律", 2700, 4300, 2),
-    ("快", 4550, 4800, 3),
-    ("长回声", 5200, 7200, 4),
-    ("啪", 7480, 7720, 5),
+    ("长音符", 0, 1500, 0),
+    ("短", 1500, 1850, 1),
+    ("长旋律", 1850, 3450, 2),
+    ("快", 3450, 3750, 3),
+    ("长回声", 3750, 5750, 4),
+    ("啪", 5750, 6000, 5),
 ];
 
 const ENGLISH_PIECES: &[Piece] = &[
-    ("sustain", 300, 1800, 0),
-    ("short", 2050, 2350, 1),
-    ("melody", 2700, 4300, 2),
-    ("tap", 4550, 4800, 3),
-    ("long", 5200, 6000, 4),
-    ("echo", 6000, 7200, 4),
-    ("pop", 7480, 7720, 5),
+    ("sustain", 0, 1500, 0),
+    ("short", 1500, 1850, 1),
+    ("melody", 1850, 3450, 2),
+    ("tap", 3450, 3750, 3),
+    ("long", 3750, 4550, 4),
+    ("echo", 4550, 5750, 5),
+    ("pop", 5750, 6000, 6),
 ];
 
 const MIXED_PIECES: &[Piece] = &[
-    ("长音符", 300, 1800, 0),
-    ("short", 2050, 2350, 1),
-    ("长旋律", 2700, 4300, 2),
-    ("tap", 4550, 4800, 3),
-    ("long", 5200, 6000, 4),
-    ("echo", 6000, 7200, 4),
-    ("快", 7480, 7720, 5),
+    ("长音符", 0, 1500, 0),
+    ("short", 1500, 1850, 1),
+    ("长旋律", 1850, 3450, 2),
+    ("tap", 3450, 3750, 3),
+    ("long", 3750, 4550, 4),
+    ("echo", 4550, 5750, 5),
+    ("快", 5750, 6000, 6),
 ];
 
 fn timings(line: &'static str, pieces: &'static [Piece]) -> Vec<TimedTextUnit> {
     // Units can be graphemes, words, or arbitrary UTF-8 ranges. Characters in
-    // the same group reveal independently but lift/scale as one phrase.
+    // the same group reveal independently but lift as one phrase.
     let mut search_from = 0;
     pieces
         .iter()
@@ -90,14 +90,7 @@ fn timed_row(
             TimedText::new(line, timings(line, pieces))
                 .active_fill(fill)
                 .inactive_opacity(0.25)
-                // Only these semantic groups receive elastic emphasis.
-                .elastic_groups([0, 2, 4])
-                .emphasis(TimedTextEmphasis {
-                    scale: 1.12,
-                    translation: point(px(0.), px(-5.)),
-                    surrounding_spread: px(7.),
-                    ..Default::default()
-                })
+                .progressive_lift(px(3.))
                 .text_color(rgb(0xe7edf8))
                 .text_size(px(28.))
                 .font_weight(FontWeight::SEMIBOLD)
@@ -149,12 +142,12 @@ impl Render for TimedTextExample {
                             .child(
                                 div()
                                     .text_color(rgb(0x8be9fd))
-                                    .child("ELASTIC GROUPS  ·  0 / 2 / 4"),
+                                    .child("PROGRESSIVE WORD LIFT"),
                             )
                             .child(
                                 div()
                                     .text_color(rgba(0xe7edf880))
-                                    .child("STEADY GROUPS   ·  1 / 3 / 5"),
+                                    .child("RISES DURING PLAYBACK · HOLDS AT WORD END"),
                             )
                             .child(
                                 div()
