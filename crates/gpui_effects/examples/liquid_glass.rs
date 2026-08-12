@@ -3,7 +3,8 @@ use std::time::Instant;
 use gpui::{
     App, Bounds, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, Window, WindowBounds, WindowOptions, div,
-    linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba, size,
+    gradient_left_to_right, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
+    size,
 };
 use gpui_effects::{GlassMaterial, GlassPanel};
 use gpui_platform::application;
@@ -197,7 +198,7 @@ impl LiquidGlassDemo {
             .id("draggable-liquid-glass")
             .material(GlassMaterial::Regular)
             .radius(GLASS_RADIUS)
-            .tint(rgba(0xd1efff0e))
+            .tint_gradient(gradient_left_to_right(rgba(0xd1efff12), rgba(0x8b5cf60c)))
             .edge_color(rgba(0xe1f5ffb8))
             .absolute()
             .left(position.x)

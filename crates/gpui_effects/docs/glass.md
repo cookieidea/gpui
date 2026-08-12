@@ -56,6 +56,7 @@ blur with `.blur_radius(px(...))`.
 | `blur_radius(...)` | Overrides backdrop blur |
 | `radius(...)` | Sets container and shader radius together |
 | `tint(...)` | Sets material tint and fallback color |
+| `tint_gradient(...)` | Sets a GPUI gradient tint |
 | `edge_color(...)` | Sets refractive edge color |
 | `edge_visible(false)` | Hides material edge lighting and fallback border |
 | `deformation(...)` | Scales refraction and dispersion |

@@ -996,6 +996,54 @@ pub fn linear_gradient(
     }
 }
 
+/// Creates a two-color linear gradient from the left edge to the right edge.
+///
+/// Use [`linear_gradient`] when custom stop positions or an arbitrary angle
+/// are needed.
+pub fn gradient_left_to_right(left: impl Into<Hsla>, right: impl Into<Hsla>) -> Background {
+    linear_gradient(
+        90.0,
+        linear_color_stop(left, 0.0),
+        linear_color_stop(right, 1.0),
+    )
+}
+
+/// Creates a two-color linear gradient from the right edge to the left edge.
+///
+/// Use [`linear_gradient`] when custom stop positions or an arbitrary angle
+/// are needed.
+pub fn gradient_right_to_left(right: impl Into<Hsla>, left: impl Into<Hsla>) -> Background {
+    linear_gradient(
+        270.0,
+        linear_color_stop(right, 0.0),
+        linear_color_stop(left, 1.0),
+    )
+}
+
+/// Creates a two-color linear gradient from the top edge to the bottom edge.
+///
+/// Use [`linear_gradient`] when custom stop positions or an arbitrary angle
+/// are needed.
+pub fn gradient_top_to_bottom(top: impl Into<Hsla>, bottom: impl Into<Hsla>) -> Background {
+    linear_gradient(
+        180.0,
+        linear_color_stop(top, 0.0),
+        linear_color_stop(bottom, 1.0),
+    )
+}
+
+/// Creates a two-color linear gradient from the bottom edge to the top edge.
+///
+/// Use [`linear_gradient`] when custom stop positions or an arbitrary angle
+/// are needed.
+pub fn gradient_bottom_to_top(bottom: impl Into<Hsla>, top: impl Into<Hsla>) -> Background {
+    linear_gradient(
+        0.0,
+        linear_color_stop(bottom, 0.0),
+        linear_color_stop(top, 1.0),
+    )
+}
+
 /// Creates a linear gradient background with between two and four color stops.
 ///
 /// Stop percentages must be in the range `0.0..=1.0` and ordered from low to
@@ -1214,6 +1262,24 @@ mod tests {
         assert_eq!(background.opacity(0.5).colors[1], to.opacity(0.5));
         assert!(!background.is_transparent());
         assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn test_directional_gradient_shortcuts() {
+        let first = rgba(0xff0099ff);
+        let second = rgba(0x00ff99ff);
+        let expected = |angle| {
+            linear_gradient(
+                angle,
+                linear_color_stop(first, 0.0),
+                linear_color_stop(second, 1.0),
+            )
+        };
+
+        assert_eq!(gradient_left_to_right(first, second), expected(90.0));
+        assert_eq!(gradient_top_to_bottom(first, second), expected(180.0));
+        assert_eq!(gradient_right_to_left(first, second), expected(270.0));
+        assert_eq!(gradient_bottom_to_top(first, second), expected(0.0));
     }
 
     #[test]

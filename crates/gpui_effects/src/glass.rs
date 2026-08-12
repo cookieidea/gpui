@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AbsoluteLength, BorderStyle, Bounds, Div, Edges, EffectUniforms, ElementId, Hsla,
+    AbsoluteLength, Background, BorderStyle, Bounds, Div, Edges, EffectUniforms, ElementId, Hsla,
     InteractiveElement, Interactivity, IntoElement, MouseButton, PaintBackdropEffect,
     ParentElement, Pixels, Point, RenderOnce, Rgba, StyleRefinement, Styled, div, hsla, point, px,
     quad, size,
@@ -241,6 +241,7 @@ pub struct GlassPanel {
     material: GlassMaterial,
     blur_radius: Option<Pixels>,
     tint: Option<Hsla>,
+    tint_gradient: Option<Background>,
     edge_color: Hsla,
     edge_visible: bool,
     animated: bool,
@@ -270,6 +271,7 @@ impl GlassPanel {
             material: GlassMaterial::Regular,
             blur_radius: None,
             tint: None,
+            tint_gradient: None,
             edge_color: hsla(0.0, 0.0, 1.0, 0.78),
             edge_visible: true,
             animated: true,
@@ -350,6 +352,21 @@ impl GlassPanel {
     /// is set.
     pub fn tint(mut self, tint: impl Into<Hsla>) -> Self {
         self.tint = Some(tint.into());
+        self.tint_gradient = None;
+        self
+    }
+
+    /// Replaces the solid material tint with a GPUI background gradient.
+    ///
+    /// The gradient is composited over the glass material and below its
+    /// children using the panel's resolved bounds and corner radii. Stop alpha
+    /// controls tint strength, so translucent colors preserve the refracted
+    /// backdrop. GPUI's [`gpui::gradient_left_to_right`] and
+    /// [`gpui::gradient_top_to_bottom`] helpers cover common two-color
+    /// gradients.
+    pub fn tint_gradient(mut self, gradient: impl Into<Background>) -> Self {
+        self.tint_gradient = Some(gradient.into());
+        self.shader_tint = None;
         self
     }
 
@@ -423,6 +440,7 @@ impl GlassPanel {
     /// `tint` remains the unsupported-renderer fallback color.
     pub fn shader_tint(mut self, value: [f32; 4]) -> Self {
         self.shader_tint = Some(value);
+        self.tint_gradient = None;
         self
     }
 
@@ -526,6 +544,7 @@ impl RenderOnce for GlassPanel {
                 GlassStyle::Liquid => hsla(0.56, 0.55, 0.96, 0.055),
             })
             .into();
+        let tint_gradient = self.tint_gradient;
         let mut edge_light: Rgba = self.edge_color.into();
         if !self.edge_visible {
             edge_light.a = 0.0;
@@ -543,7 +562,11 @@ impl RenderOnce for GlassPanel {
             .with_slot(GLASS_SURFACE_SLOT, surface)
             .with_slot(
                 GLASS_TINT_SLOT,
-                self.shader_tint.unwrap_or([tint.r, tint.g, tint.b, tint.a]),
+                if tint_gradient.is_some() {
+                    [0.0; 4]
+                } else {
+                    self.shader_tint.unwrap_or([tint.r, tint.g, tint.b, tint.a])
+                },
             )
             .with_slot(
                 GLASS_GEOMETRY_SLOT,
@@ -603,7 +626,6 @@ impl RenderOnce for GlassPanel {
                                _cx: &mut gpui::App| {
             let corner_radii = resolved_style
                 .corner_radii
-                .clone()
                 .to_pixels(window.rem_size())
                 .clamp_radii_for_quad_size(bounds.size);
             let shader_radius = corner_radii
@@ -638,7 +660,17 @@ impl RenderOnce for GlassPanel {
                     .opacity(glass_opacity),
             );
 
-            if !backdrop_supported {
+            if let Some(tint_gradient) = tint_gradient {
+                let border_width = if backdrop_supported { px(0.0) } else { px(1.0) };
+                window.paint_quad(quad(
+                    bounds,
+                    corner_radii,
+                    tint_gradient.opacity(glass_opacity),
+                    Edges::all(border_width),
+                    Edges::all(fallback_edge_color.opacity(glass_opacity)),
+                    BorderStyle::default(),
+                ));
+            } else if !backdrop_supported {
                 window.paint_quad(quad(
                     bounds,
                     corner_radii,
@@ -710,6 +742,8 @@ pub fn glass_panel() -> GlassPanel {
 
 #[cfg(test)]
 mod tests {
+    use gpui::rgba;
+
     use super::*;
 
     #[test]
@@ -753,6 +787,30 @@ mod tests {
         assert_eq!(GlassPanel::frosted().style, GlassStyle::Frosted);
         assert_eq!(GlassPanel::gel().style, GlassStyle::Gel);
         assert_eq!(GlassPanel::liquid().style, GlassStyle::Liquid);
+    }
+
+    #[test]
+    fn solid_and_gradient_tint_setters_replace_each_other() {
+        let first = rgba(0xff4e8528);
+        let second = rgba(0x00cfff18);
+        let solid = rgba(0xd1efff0e);
+
+        let solid_panel = GlassPanel::new()
+            .tint_gradient(gpui::gradient_left_to_right(first, second))
+            .tint(solid);
+        assert_eq!(solid_panel.tint, Some(solid.into()));
+        assert_eq!(solid_panel.tint_gradient, None);
+
+        let gradient_panel = GlassPanel::new()
+            .shader_tint([0.8, 0.9, 1.0, 0.1])
+            .tint_gradient(gpui::gradient_top_to_bottom(first, second));
+        assert_eq!(gradient_panel.shader_tint, None);
+        assert!(gradient_panel.tint_gradient.is_some());
+
+        let shader_panel = GlassPanel::new()
+            .tint_gradient(gpui::gradient_top_to_bottom(first, second))
+            .shader_tint([0.8, 0.9, 1.0, 0.1]);
+        assert_eq!(shader_panel.tint_gradient, None);
     }
 
     #[test]
