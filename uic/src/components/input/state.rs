@@ -1,13 +1,98 @@
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, FocusHandle, Focusable,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ShapedLine,
-    SharedString, UTF16Selection, Window, div, point, prelude::*,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    SharedString, UTF16Selection, Window, WrappedLine, div, point, prelude::*, px,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{InputAppearance, InputEvent, InputMode, actions::*, element::TextElement};
+
+pub(super) struct TextLayout {
+    pub(super) lines: Vec<WrappedLine>,
+    pub(super) line_starts: Vec<usize>,
+    pub(super) line_height: Pixels,
+}
+
+impl TextLayout {
+    pub(super) fn new(
+        lines: Vec<WrappedLine>,
+        line_starts: Vec<usize>,
+        line_height: Pixels,
+    ) -> Self {
+        Self {
+            lines,
+            line_starts,
+            line_height,
+        }
+    }
+
+    pub(super) fn visual_row_count(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|line| line.wrap_boundaries().len() + 1)
+            .sum::<usize>()
+            .max(1)
+    }
+
+    fn line_for_offset(&self, offset: usize) -> (usize, usize) {
+        let line_ix = self
+            .line_starts
+            .partition_point(|start| *start <= offset)
+            .saturating_sub(1)
+            .min(self.lines.len().saturating_sub(1));
+        let line_start = self.line_starts.get(line_ix).copied().unwrap_or(0);
+        let local_offset = offset
+            .saturating_sub(line_start)
+            .min(self.lines.get(line_ix).map_or(0, WrappedLine::len));
+        (line_ix, local_offset)
+    }
+
+    pub(super) fn position_for_offset(&self, offset: usize) -> Point<Pixels> {
+        let (line_ix, local_offset) = self.line_for_offset(offset);
+        let rows_before = self
+            .lines
+            .iter()
+            .take(line_ix)
+            .map(|line| line.wrap_boundaries().len() + 1)
+            .sum::<usize>();
+        let local = self.lines[line_ix]
+            .position_for_index(local_offset, self.line_height)
+            .unwrap_or_default();
+        point(local.x, local.y + self.line_height * rows_before as f32)
+    }
+
+    pub(super) fn offset_for_position(&self, position: Point<Pixels>) -> usize {
+        if position.y < px(0.) {
+            return 0;
+        }
+
+        let target_row = (position.y / self.line_height).floor() as usize;
+        let mut rows_before = 0;
+        for (line_ix, line) in self.lines.iter().enumerate() {
+            let rows = line.wrap_boundaries().len() + 1;
+            if target_row < rows_before + rows {
+                let local_y = self.line_height * (target_row - rows_before) as f32;
+                let local = line
+                    .closest_index_for_position(point(position.x, local_y), self.line_height)
+                    .unwrap_or_else(|index| index);
+                return self.line_starts[line_ix] + local;
+            }
+            rows_before += rows;
+        }
+
+        self.line_starts.last().copied().unwrap_or(0)
+            + self.lines.last().map_or(0, WrappedLine::len)
+    }
+
+    fn row_range_for_offset(&self, offset: usize) -> Range<usize> {
+        let position = self.position_for_offset(offset);
+        let start = self.offset_for_position(point(px(-1_000_000.), position.y));
+        let end = self.offset_for_position(point(px(1_000_000.), position.y));
+        start..end.max(start)
+    }
+}
 
 pub struct TextInput {
     pub(super) focus_handle: FocusHandle,
@@ -16,12 +101,15 @@ pub struct TextInput {
     pub(super) selected_range: Range<usize>,
     pub(super) selection_reversed: bool,
     pub(super) marked_range: Option<Range<usize>>,
-    pub(super) last_layout: Option<ShapedLine>,
+    pub(super) last_layout: Option<TextLayout>,
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) is_selecting: bool,
     pub(super) disabled: bool,
     pub(super) mode: InputMode,
     pub(super) appearance: InputAppearance,
+    pub(super) preferred_x: Option<Pixels>,
+    pub(super) scroll_handle: ScrollHandle,
+    pub(super) scroll_cursor_pending: bool,
 }
 
 impl gpui::EventEmitter<InputEvent> for TextInput {}
@@ -41,6 +129,9 @@ impl TextInput {
             disabled: false,
             mode: InputMode::Text,
             appearance: InputAppearance::default(),
+            preferred_x: None,
+            scroll_handle: ScrollHandle::new(),
+            scroll_cursor_pending: true,
         }
     }
 
@@ -51,6 +142,12 @@ impl TextInput {
 
     pub fn password(mut self) -> Self {
         self.mode = InputMode::Password;
+        self
+    }
+
+    /// Enables multi-line editing with soft wrapping and newline insertion on Enter.
+    pub fn multiline(mut self) -> Self {
+        self.mode = InputMode::Multiline;
         self
     }
 
@@ -77,6 +174,8 @@ impl TextInput {
 
     pub fn set_mode(&mut self, mode: InputMode) {
         self.mode = mode;
+        self.preferred_x = None;
+        self.scroll_cursor_pending = true;
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
@@ -107,6 +206,7 @@ impl TextInput {
         self.content = value.into();
         self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
+        self.scroll_cursor_pending = true;
         cx.emit(InputEvent::Change(self.content.clone()));
         cx.notify();
     }
@@ -149,10 +249,19 @@ impl TextInput {
         }
     }
 
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1., false, cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1., false, cx);
+    }
+
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
         if self.disabled {
             return;
         }
+        self.preferred_x = None;
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
@@ -160,7 +269,16 @@ impl TextInput {
         if self.disabled {
             return;
         }
+        self.preferred_x = None;
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(-1., true, cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_vertical(1., true, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -175,14 +293,30 @@ impl TextInput {
         if self.disabled {
             return;
         }
-        self.move_to(0, cx);
+        let offset = if self.mode == InputMode::Multiline {
+            self.last_layout
+                .as_ref()
+                .map(|layout| layout.row_range_for_offset(self.cursor_offset()).start)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.move_to(offset, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         if self.disabled {
             return;
         }
-        self.move_to(self.content.len(), cx);
+        let offset = if self.mode == InputMode::Multiline {
+            self.last_layout
+                .as_ref()
+                .map(|layout| layout.row_range_for_offset(self.cursor_offset()).end)
+                .unwrap_or(self.content.len())
+        } else {
+            self.content.len()
+        };
+        self.move_to(offset, cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -215,6 +349,14 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled || self.mode != InputMode::Multiline {
+            return;
+        }
+        self.replace_text_in_range(None, "\n", window, cx);
+        cx.stop_propagation();
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -228,6 +370,7 @@ impl TextInput {
         self.is_selecting = true;
 
         if event.modifiers.shift {
+            self.preferred_x = None;
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else {
             self.move_to(self.index_for_mouse_position(event.position), cx)
@@ -243,6 +386,7 @@ impl TextInput {
             return;
         }
         if self.is_selecting {
+            self.preferred_x = None;
             self.select_to(self.index_for_mouse_position(event.position), cx);
         }
     }
@@ -264,7 +408,7 @@ impl TextInput {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -292,7 +436,33 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        self.preferred_x = None;
+        self.scroll_cursor_pending = true;
         cx.notify()
+    }
+
+    fn move_vertical(&mut self, rows: f32, selecting: bool, cx: &mut Context<Self>) {
+        if self.disabled || self.mode != InputMode::Multiline {
+            return;
+        }
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let cursor = self.cursor_offset();
+        let position = layout.position_for_offset(cursor);
+        let preferred_x = self.preferred_x.unwrap_or(position.x);
+        let target =
+            layout.offset_for_position(point(preferred_x, position.y + layout.line_height * rows));
+        self.preferred_x = Some(preferred_x);
+        if selecting {
+            self.select_to(target, cx);
+        } else {
+            self.selected_range = target..target;
+            self.selection_reversed = false;
+            self.scroll_cursor_pending = true;
+            cx.notify();
+        }
     }
 
     pub(super) fn cursor_offset(&self) -> usize {
@@ -318,7 +488,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.offset_for_position(point(position.x - bounds.left(), position.y - bounds.top()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -331,6 +501,7 @@ impl TextInput {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.scroll_cursor_pending = true;
         cx.notify()
     }
 
@@ -387,6 +558,18 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
+    fn normalize_inserted_text<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if !text.contains(['\r', '\n']) {
+            return Cow::Borrowed(text);
+        }
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if self.mode == InputMode::Multiline {
+            Cow::Owned(normalized)
+        } else {
+            Cow::Owned(normalized.replace('\n', " "))
+        }
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.content = "".into();
         self.selected_range = 0..0;
@@ -395,6 +578,8 @@ impl TextInput {
         self.last_layout = None;
         self.last_bounds = None;
         self.is_selecting = false;
+        self.preferred_x = None;
+        self.scroll_cursor_pending = true;
         cx.emit(InputEvent::Change(self.content.clone()));
         cx.notify();
     }
@@ -449,6 +634,8 @@ impl EntityInputHandler for TextInput {
         if self.disabled {
             return;
         }
+        let new_text = self.normalize_inserted_text(new_text);
+        let new_text = new_text.as_ref();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -460,6 +647,8 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.preferred_x = None;
+        self.scroll_cursor_pending = true;
         cx.emit(InputEvent::Change(self.content.clone()));
         cx.notify();
     }
@@ -475,6 +664,8 @@ impl EntityInputHandler for TextInput {
         if self.disabled {
             return;
         }
+        let new_text = self.normalize_inserted_text(new_text);
+        let new_text = new_text.as_ref();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -494,6 +685,8 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.preferred_x = None;
+        self.scroll_cursor_pending = true;
 
         cx.emit(InputEvent::Change(self.content.clone()));
         cx.notify();
@@ -508,16 +701,25 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
+        let start = last_layout.position_for_offset(range.start);
+        let end = last_layout.position_for_offset(range.end);
+        let top_left = if start.y == end.y {
+            point(bounds.left() + start.x, bounds.top() + start.y)
+        } else {
+            point(bounds.left(), bounds.top() + start.y)
+        };
+        let bottom_right = if start.y == end.y {
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
+                bounds.left() + end.x,
+                bounds.top() + end.y + last_layout.line_height,
+            )
+        } else {
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
-            ),
-        ))
+                bounds.right(),
+                bounds.top() + end.y + last_layout.line_height,
+            )
+        };
+        Some(Bounds::from_corners(top_left, bottom_right))
     }
 
     fn character_index_for_point(
@@ -526,21 +728,40 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let line_point = self.last_bounds?.localize(&point)?;
+        let bounds = self.last_bounds?;
+        let line_point = bounds.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout.offset_for_position(line_point);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
 
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let multiline = self.mode == InputMode::Multiline;
+        let line_height = if multiline {
+            self.appearance.line_height
+        } else {
+            self.appearance.height
+        };
+        let scroll_handle = self.scroll_handle.clone();
         div()
+            .id(("uic-text-input", cx.entity_id()))
             .flex()
             .w_full()
             .min_w_0()
-            .key_context("TextInput")
+            .when(multiline, |this| {
+                this.h_full()
+                    .flex_col()
+                    .overflow_scroll()
+                    .track_scroll(&scroll_handle)
+            })
+            .key_context(if multiline {
+                "TextInput multiline"
+            } else {
+                "TextInput"
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(if self.disabled {
                 CursorStyle::Arrow
@@ -551,8 +772,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -560,17 +785,19 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::submit))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(self.appearance.height)
+            .line_height(line_height)
             .text_size(self.appearance.font_size)
             .child(
                 div()
                     .w_full()
                     .min_w_0()
+                    .when(multiline, |this| this.flex_none())
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -579,5 +806,265 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window, px, size,
+    };
+
+    use super::*;
+    use crate::components::input::Input;
+
+    struct TestInput {
+        state: Entity<TextInput>,
+        rows: Option<usize>,
+    }
+
+    impl Render for TestInput {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Input::new(&self.state).when_some(self.rows, Input::rows)
+        }
+    }
+
+    fn open_input(
+        cx: &mut TestAppContext,
+        build: impl FnOnce(&mut Context<TextInput>) -> TextInput + 'static,
+    ) -> gpui::WindowHandle<TestInput> {
+        cx.update(crate::components::input::init);
+        cx.open_window(size(px(220.), px(180.)), move |_, cx| TestInput {
+            state: cx.new(build),
+            rows: None,
+        })
+    }
+
+    fn open_input_with_rows(
+        cx: &mut TestAppContext,
+        rows: usize,
+        build: impl FnOnce(&mut Context<TextInput>) -> TextInput + 'static,
+    ) -> gpui::WindowHandle<TestInput> {
+        cx.update(crate::components::input::init);
+        cx.open_window(size(px(220.), px(180.)), move |_, cx| TestInput {
+            state: cx.new(build),
+            rows: Some(rows),
+        })
+    }
+
+    fn draw_and_focus(
+        window: &gpui::WindowHandle<TestInput>,
+        cx: &mut TestAppContext,
+    ) -> VisualTestContext {
+        let mut visual = VisualTestContext::from_window((*window).into(), cx);
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                let focus_handle = view.state.read(cx).focus_handle.clone();
+                window.focus(&focus_handle, cx);
+            })
+            .unwrap();
+        visual
+    }
+
+    #[gpui::test]
+    fn multiline_enter_inserts_newline(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| {
+            TextInput::new(cx).multiline().initial_value("first")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+
+        visual.simulate_keystrokes("enter");
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert_eq!(view.state.read(cx).value().as_ref(), "first\n");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn multiline_vertical_navigation_uses_visual_rows(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| {
+            TextInput::new(cx).multiline().initial_value("abc\ndef")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+
+        visual.simulate_keystrokes("up enter");
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert_eq!(view.state.read(cx).value().as_ref(), "abc\n\ndef");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn multiline_soft_wraps_to_the_available_width(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| {
+            TextInput::new(cx)
+                .multiline()
+                .initial_value("A deliberately long line that must wrap inside the input.")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert!(
+                    view.state
+                        .read(cx)
+                        .last_layout
+                        .as_ref()
+                        .unwrap()
+                        .visual_row_count()
+                        > 1
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn multiline_content_taller_than_the_viewport_is_scrollable(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| {
+            TextInput::new(cx)
+                .multiline()
+                .initial_value("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let scroll_handle = &view.state.read(cx).scroll_handle;
+                assert!(scroll_handle.max_offset().y > px(0.));
+                assert!(scroll_handle.offset().y < px(0.));
+            })
+            .unwrap();
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                view.state
+                    .read(cx)
+                    .scroll_handle
+                    .set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert_eq!(view.state.read(cx).scroll_handle.offset().y, px(0.));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn multiline_enter_scrolls_as_soon_as_the_cursor_adds_a_row(cx: &mut TestAppContext) {
+        let window = open_input_with_rows(cx, 3, |cx| {
+            TextInput::new(cx)
+                .multiline()
+                .initial_value("one\ntwo\nthree")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+
+        visual.simulate_keystrokes("enter");
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let input = view.state.read(cx);
+                assert_eq!(input.value().as_ref(), "one\ntwo\nthree\n");
+                assert!(input.scroll_handle.max_offset().y > px(0.));
+                assert!(input.scroll_handle.offset().y < px(0.));
+            })
+            .unwrap();
+
+        visual.simulate_keystrokes("enter");
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.draw(cx).clear();
+            });
+        }
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let input = view.state.read(cx);
+                let layout = input.last_layout.as_ref().unwrap();
+                let bounds = input.last_bounds.unwrap();
+                let cursor = layout.position_for_offset(input.cursor_offset());
+                let cursor_bottom = bounds.top() + cursor.y + layout.line_height;
+                assert_eq!(input.value().as_ref(), "one\ntwo\nthree\n\n");
+                assert!(
+                    cursor_bottom <= input.scroll_handle.bounds().bottom(),
+                    "cursor_bottom={cursor_bottom:?}, viewport={:?}, offset={:?}, max_offset={:?}, bounds={bounds:?}, cursor={cursor:?}",
+                    input.scroll_handle.bounds(),
+                    input.scroll_handle.offset(),
+                    input.scroll_handle.max_offset(),
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn repeated_select_all_keeps_every_multiline_row_selected(cx: &mut TestAppContext) {
+        let window = open_input_with_rows(cx, 3, |cx| {
+            TextInput::new(cx)
+                .multiline()
+                .initial_value("one\ntwo\nthree")
+        });
+        let mut visual = draw_and_focus(&window, cx);
+
+        visual.simulate_keystrokes("ctrl-a");
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let input = view.state.read(cx);
+                assert_eq!(input.selected_range, 0..input.content.len());
+            })
+            .unwrap();
+        visual.simulate_keystrokes("ctrl-a");
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let input = view.state.read(cx);
+                assert_eq!(input.selected_range, 0..input.content.len());
+                let quads = super::super::element::selection_quads(
+                    input.last_layout.as_ref().unwrap(),
+                    input.selected_range.clone(),
+                    input.last_bounds.unwrap(),
+                    input.appearance.selection,
+                );
+                assert_eq!(quads.len(), 3);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn single_line_enter_does_not_insert_newline(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| TextInput::new(cx).initial_value("first"));
+        let mut visual = draw_and_focus(&window, cx);
+
+        visual.simulate_keystrokes("enter");
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert_eq!(view.state.read(cx).value().as_ref(), "first");
+            })
+            .unwrap();
     }
 }

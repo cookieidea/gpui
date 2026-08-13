@@ -265,7 +265,13 @@ impl Render for ModalLayer {
                 if close_on_escape && event.keystroke.key == "escape" {
                     layer.dismiss(window, cx);
                     cx.stop_propagation();
-                } else if ok_on_enter && event.keystroke.key == "enter" {
+                } else if ok_on_enter
+                    && event.keystroke.key == "enter"
+                    && !window
+                        .context_stack()
+                        .iter()
+                        .any(|context| context.contains("multiline"))
+                {
                     layer.execute_ok(window, cx);
                     cx.stop_propagation();
                 }
@@ -330,4 +336,68 @@ pub fn dismiss(window: &mut Window, cx: &mut App) {
 
 pub fn is_open(cx: &App) -> bool {
     layer(cx).read(cx).is_open()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        Context, Entity, Focusable, IntoElement, Keystroke, Render, TestAppContext,
+        VisualTestContext, Window, div, prelude::*, px, size,
+    };
+
+    use super::*;
+    use crate::components::input::{Input, TextInput};
+
+    struct ModalInputTest {
+        input: Entity<TextInput>,
+        modal_layer: Entity<ModalLayer>,
+    }
+
+    impl Render for ModalInputTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.modal_layer.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn multiline_enter_does_not_accept_the_modal(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::components::input::init(cx);
+            init(cx);
+        });
+        let window = cx.open_window(size(px(420.), px(320.)), |_, cx| ModalInputTest {
+            input: cx.new(|cx| TextInput::new(cx).multiline()),
+            modal_layer: layer(cx),
+        });
+        window
+            .update(cx, |view, window, cx| {
+                let input = view.input.clone();
+                show(Modal::new(move |_, _| Input::new(&input)), window, cx);
+            })
+            .unwrap();
+
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                let focus_handle = view.input.read(cx).focus_handle(cx);
+                window.focus(&focus_handle, cx);
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+        visual.update(|window, cx| {
+            window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert!(is_open(cx));
+                assert_eq!(view.input.read(cx).value().as_ref(), "\n");
+            })
+            .unwrap();
+    }
 }

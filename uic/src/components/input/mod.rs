@@ -48,6 +48,30 @@ macro_rules! input_appearance {
 
             pub fn height(mut self, height: gpui::Pixels) -> Self {
                 self.appearance.height = height;
+                self.appearance.multiline_height = height;
+                self.rows = None;
+                self
+            }
+
+            pub fn multiline_height(mut self, height: gpui::Pixels) -> Self {
+                self.appearance.multiline_height = height;
+                self.rows = None;
+                self
+            }
+
+            /// Sets the number of visible rows for a multi-line input.
+            ///
+            /// The final height is derived from the effective line height, vertical padding,
+            /// and border width at render time, so the order of these builder calls does not
+            /// matter.
+            pub fn rows(mut self, rows: usize) -> Self {
+                self.rows = Some(rows.max(1));
+                self
+            }
+
+            pub fn line_height(mut self, line_height: gpui::Pixels) -> Self {
+                self.appearance.line_height = line_height;
+                self.line_height_explicit = true;
                 self
             }
 
@@ -66,6 +90,11 @@ macro_rules! input_appearance {
                 self
             }
 
+            pub fn padding_y(mut self, padding_y: gpui::Pixels) -> Self {
+                self.appearance.padding_y = padding_y;
+                self
+            }
+
             pub fn gap(mut self, gap: gpui::Pixels) -> Self {
                 self.appearance.gap = gap;
                 self
@@ -73,6 +102,9 @@ macro_rules! input_appearance {
 
             pub fn font_size(mut self, font_size: gpui::Pixels) -> Self {
                 self.appearance.font_size = font_size;
+                if !self.line_height_explicit {
+                    self.appearance.line_height = font_size * 1.5;
+                }
                 self
             }
         }
@@ -99,8 +131,12 @@ pub use state::TextInput;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
     #[default]
+    /// A single-line plain-text field. Enter emits [`InputEvent::Submit`].
     Text,
+    /// A single-line field that masks its displayed value.
     Password,
+    /// A soft-wrapping multi-line editor. Enter inserts a newline and Ctrl/Cmd+Enter submits.
+    Multiline,
 }
 
 #[derive(Clone, Debug)]

@@ -11,6 +11,8 @@ pub struct Input {
     prefix: Option<AnyElement>,
     suffix: Option<AnyElement>,
     appearance: InputAppearance,
+    rows: Option<usize>,
+    line_height_explicit: bool,
 }
 
 input_appearance!(Input);
@@ -22,6 +24,8 @@ impl Input {
             prefix: None,
             suffix: None,
             appearance: InputAppearance::default(),
+            rows: None,
+            line_height_explicit: false,
         }
     }
 
@@ -37,31 +41,44 @@ impl Input {
 
     pub fn appearance(mut self, appearance: InputAppearance) -> Self {
         self.appearance = appearance;
+        self.line_height_explicit = true;
         self
     }
 }
 
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let appearance = self.appearance;
+        let mut appearance = self.appearance;
+        if let Some(rows) = self.rows {
+            appearance.multiline_height = appearance.height_for_rows(rows);
+        }
         self.state
             .update(cx, |state, _cx| state.appearance = appearance);
 
-        let (focused, focus_handle, disabled) = {
+        let (focused, focus_handle, disabled, multiline) = {
             let state = self.state.read(cx);
             (
                 state.focus_handle.is_focused(window),
                 state.focus_handle.clone(),
                 state.disabled,
+                state.mode == super::InputMode::Multiline,
             )
+        };
+
+        let height = if multiline {
+            appearance.multiline_height
+        } else {
+            appearance.height
         };
 
         div()
             .flex()
-            .items_center()
+            .when(multiline, |this| this.items_start())
+            .when(!multiline, |this| this.items_center())
             .w_full()
-            .h(appearance.height)
+            .h(height)
             .px(appearance.padding_x)
+            .when(multiline, |this| this.py(appearance.padding_y))
             .gap(appearance.gap)
             .rounded(appearance.radius)
             .border(appearance.border_width)
