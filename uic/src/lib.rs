@@ -7,6 +7,7 @@ pub mod desktop;
 pub mod utils;
 
 pub fn init(cx: &mut gpui::App) {
+    components::context_menu::init(cx);
     components::input::init(cx);
     components::modal::init(cx);
     components::toast::init(cx);

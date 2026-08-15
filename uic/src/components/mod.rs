@@ -1,4 +1,5 @@
 pub mod color_picker;
+pub mod context_menu;
 pub mod dropdown;
 pub mod input;
 pub mod modal;

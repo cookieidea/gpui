@@ -7957,6 +7957,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gpui_effects",
  "gpui_platform",
  "rust-embed",
  "serde",
