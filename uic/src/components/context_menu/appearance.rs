@@ -1,7 +1,7 @@
 use gpui::{Hsla, Pixels, px, rgb};
 
 /// Visual defaults used when a context menu does not supply a custom surface.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct ContextMenuAppearance {
     pub muted_foreground: Hsla,
     pub danger_foreground: Hsla,

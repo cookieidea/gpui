@@ -1,3 +1,5 @@
+mod chainable;
+
 use std::{
     collections::HashMap,
     env, fs,
@@ -9,11 +11,34 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    Ident, ItemEnum, LitStr, Token,
+    DeriveInput, Ident, ItemEnum, LitStr, Token,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
 };
+
+/// Generates consuming, same-name setter methods for every named field.
+///
+/// Use `#[chain(skip)]` on fields that should not receive a generated method.
+/// Setter visibility matches the corresponding field visibility.
+///
+/// ```ignore
+/// #[derive(Default, uic_macros::Chainable)]
+/// struct Appearance {
+///     pub background: Background,
+///     #[chain(skip)]
+///     internal_cache: Cache,
+/// }
+///
+/// let appearance = Appearance::default().background(color.into());
+/// ```
+#[proc_macro_derive(Chainable, attributes(chain))]
+pub fn derive_chainable(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    chainable::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
 /// Generates an enum from the files in a directory.
 ///

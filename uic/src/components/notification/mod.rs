@@ -27,7 +27,7 @@ pub enum NotificationPlacement {
     BottomRight,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct NotificationColors {
     pub info: Hsla,
     pub success: Hsla,
@@ -46,13 +46,15 @@ impl NotificationColors {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, uic_macros::Chainable)]
 pub struct NotificationAppearance {
     pub colors: NotificationColors,
     pub description_foreground: Hsla,
     pub close_foreground: Hsla,
     pub gap: Pixels,
+    #[chain(skip)]
     style: StyleRefinement,
+    #[chain(skip)]
     viewport_margin: Pixels,
 }
 

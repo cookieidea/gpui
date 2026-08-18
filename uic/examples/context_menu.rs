@@ -51,17 +51,18 @@ impl ContextMenuExample {
         let archive_entity = entity.clone();
 
         ContextMenu::new()
-            .appearance(ContextMenuAppearance {
-                muted_foreground: rgb(0x94a3b8).into(),
-                danger_foreground: rgb(0xfb7185).into(),
-                selected_background: rgba(0x94a3b829).into(),
-                selected_foreground: rgb(0xffffff).into(),
-                item_height: px(34.0),
-                item_padding_x: px(10.0),
-                item_radius: px(8.0),
-                separator: rgb(0x64748b).into(),
-                separator_margin: px(5.0),
-            })
+            .appearance(
+                ContextMenuAppearance::default()
+                    .muted_foreground(rgb(0x94a3b8).into())
+                    .danger_foreground(rgb(0xfb7185).into())
+                    .selected_background(rgba(0x94a3b829).into())
+                    .selected_foreground(rgb(0xffffff).into())
+                    .item_height(px(34.0))
+                    .item_padding_x(px(10.0))
+                    .item_radius(px(8.0))
+                    .separator(rgb(0x64748b).into())
+                    .separator_margin(px(5.0)),
+            )
             .w(px(220.0))
             .max_h(px(420.0))
             .p(px(8.0))

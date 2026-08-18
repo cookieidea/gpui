@@ -1,6 +1,6 @@
 use gpui::{Hsla, Pixels, hsla, px};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct ModalButtonAppearance {
     pub background: Hsla,
     pub foreground: Hsla,
@@ -14,7 +14,7 @@ pub struct ModalButtonAppearance {
 
 /// Appearance of the modal's internal sections and default controls.
 /// The panel itself is styled through `Styled` on `Modal`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct ModalAppearance {
     pub backdrop: Hsla,
     pub section_borders: bool,
@@ -64,5 +64,26 @@ impl Default for ModalAppearance {
                 padding_x: px(16.),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::rgba;
+
+    #[test]
+    fn appearance_fields_support_chainable_construction() {
+        let defaults = ModalAppearance::default();
+        let appearance = defaults.backdrop(rgba(0x080a10a8).into()).ok_button(
+            defaults
+                .ok_button
+                .background(rgba(0x171a24f2).into())
+                .foreground(rgba(0xf4f4f7f2).into()),
+        );
+
+        assert_eq!(appearance.backdrop, rgba(0x080a10a8).into());
+        assert_eq!(appearance.ok_button.background, rgba(0x171a24f2).into());
+        assert_eq!(appearance.ok_button.foreground, rgba(0xf4f4f7f2).into());
     }
 }

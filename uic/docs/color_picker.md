@@ -211,22 +211,18 @@ Both `ColorPicker` and `AlphaSlider` emit through the same state entity.
 
 ## Appearance
 
-Start from the default appearance and replace the fields that the consumer
-needs to customize.
+Start from the default appearance and chain the fields that the consumer needs
+to customize.
 
 ```rust
 use gpui::px;
 
-let picker_appearance = ColorPickerAppearance {
-    area_height: px(240.0),
-    hue_width: px(28.0),
-    ..ColorPickerAppearance::default()
-};
+let picker_appearance = ColorPickerAppearance::default()
+    .area_height(px(240.0))
+    .hue_width(px(28.0));
 
-let alpha_appearance = AlphaSliderAppearance {
-    marker: rgb(0xffffff).into(),
-    ..AlphaSliderAppearance::default()
-};
+let alpha_appearance = AlphaSliderAppearance::default()
+    .marker(rgb(0xffffff).into());
 
 div()
     .child(

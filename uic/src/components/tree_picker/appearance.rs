@@ -2,7 +2,7 @@ use gpui::{Hsla, Pixels, SharedString, hsla, px};
 
 use crate::components::input::InputAppearance;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, uic_macros::Chainable)]
 pub struct TreePickerAppearance {
     pub muted: Hsla,
     pub hover: Hsla,

@@ -27,7 +27,7 @@ pub enum ToastPlacement {
     Bottom,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct ToastColors {
     pub info: Hsla,
     pub success: Hsla,
@@ -48,11 +48,13 @@ impl ToastColors {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, uic_macros::Chainable)]
 pub struct ToastAppearance {
     pub colors: ToastColors,
     pub gap: Pixels,
+    #[chain(skip)]
     style: StyleRefinement,
+    #[chain(skip)]
     viewport_margin: Pixels,
 }
 

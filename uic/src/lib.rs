@@ -1,5 +1,5 @@
 #![allow(clippy::module_inception)]
-pub use uic_macros::file_enum;
+pub use uic_macros::{Chainable, file_enum};
 
 pub mod assets;
 pub mod components;

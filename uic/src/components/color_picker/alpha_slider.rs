@@ -10,7 +10,7 @@ use super::{
     interaction::{ColorInteraction, InteractionPhase},
 };
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct AlphaSliderAppearance {
     pub checker: Hsla,
     pub marker: Hsla,

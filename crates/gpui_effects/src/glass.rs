@@ -36,7 +36,7 @@ impl FrostedGlassShape {
 ///
 /// Layout, foreground color, opacity, borders, shadows, and typography use the
 /// normal [`Styled`] API on [`FrostedGlass`] itself.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct FrostedGlassAppearance {
     pub blur_radius: Pixels,
     pub saturation: f32,
@@ -268,6 +268,18 @@ mod tests {
             FrostedGlassAppearance::dark().tint,
             FrostedGlassAppearance::light().tint
         );
+    }
+
+    #[test]
+    fn appearance_fields_support_chainable_construction() {
+        let appearance = FrostedGlassAppearance::dark()
+            .blur_radius(px(12.0))
+            .saturation(1.2)
+            .merge_distance(px(52.0));
+
+        assert_eq!(appearance.blur_radius, px(12.0));
+        assert_eq!(appearance.saturation, 1.2);
+        assert_eq!(appearance.merge_distance, px(52.0));
     }
 
     #[test]

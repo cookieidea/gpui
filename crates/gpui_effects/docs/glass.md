@@ -7,10 +7,14 @@ labels and icons stay sharp.
 For a normal panel, size and round it with the standard GPUI style API:
 
 ```rust,ignore
-use gpui::{px, rgb};
+use gpui::{hsla, px, rgb};
 use gpui_effects::{FrostedGlass, FrostedGlassAppearance};
 
-FrostedGlass::with_appearance(FrostedGlassAppearance::dark())
+FrostedGlass::with_appearance(
+    FrostedGlassAppearance::dark()
+        .blur_radius(px(12.0))
+        .tint(hsla(0.61, 0.30, 0.12, 0.38)),
+)
     .w(px(420.0))
     .p_4()
     .rounded(px(24.0))

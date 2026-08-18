@@ -380,13 +380,11 @@ impl Render for ColorPickerExample {
 }
 
 fn example_input_appearance() -> InputAppearance {
-    InputAppearance {
-        placeholder: hsla(0.0, 0.0, 0.48, 1.0),
-        focus_border: hsla(0.52, 0.85, 0.48, 1.0),
-        caret: hsla(0.52, 0.85, 0.48, 1.0),
-        selection: hsla(0.52, 0.85, 0.48, 0.24),
-        ..InputAppearance::default()
-    }
+    InputAppearance::default()
+        .placeholder(hsla(0.0, 0.0, 0.48, 1.0))
+        .focus_border(hsla(0.52, 0.85, 0.48, 1.0))
+        .caret(hsla(0.52, 0.85, 0.48, 1.0))
+        .selection(hsla(0.52, 0.85, 0.48, 0.24))
 }
 
 fn format_hex(color: Rgba) -> String {

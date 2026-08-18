@@ -10,6 +10,7 @@ readme = "README.md"
 accesskit.workspace = true
 gpui.workspace = true
 refineable.workspace = true
+uic_macros.workspace = true
 
 [lints]
 workspace = true

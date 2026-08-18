@@ -46,10 +46,7 @@ impl Render for ModalExample {
                             .ok_text(|_, _| div().flex().gap_2().child("✓").child("Save"))
                             .cancel_label("Back")
                             .border(px(0.))
-                            .appearance(ModalAppearance {
-                                section_borders: false,
-                                ..ModalAppearance::default()
-                            })
+                            .appearance(ModalAppearance::default().section_borders(false))
                             .on_ok(|_, _| true),
                             window,
                             cx,

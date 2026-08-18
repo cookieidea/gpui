@@ -1,7 +1,7 @@
 use gpui::{Hsla, Pixels, hsla, px};
 
 /// Semantic focus color used by the picker controls.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct ColorPickerAppearance {
     pub accent: Hsla,
     pub marker: Hsla,

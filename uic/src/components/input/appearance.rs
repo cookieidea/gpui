@@ -1,7 +1,7 @@
 use gpui::{Hsla, Pixels, hsla, px};
 
 /// Semantic colors and caret geometry unique to editable inputs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, uic_macros::Chainable)]
 pub struct InputAppearance {
     pub placeholder: Hsla,
     pub focus_border: Hsla,

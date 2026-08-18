@@ -2955,6 +2955,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "refineable",
+ "uic-macros",
 ]
 
 [[package]]
