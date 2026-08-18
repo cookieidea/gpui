@@ -2,8 +2,8 @@ mod appearance;
 mod modal;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Global, KeyDownEvent, MouseButton, Render,
-    Window, WindowId, deferred, div, prelude::*,
+    AnyElement, App, Context, Entity, FocusHandle, Global, KeyDownEvent, MouseButton,
+    Refineable as _, Render, Window, WindowId, deferred, div, prelude::*,
 };
 
 pub use appearance::{ModalAppearance, ModalButtonAppearance};
@@ -115,9 +115,7 @@ impl Render for ModalLayer {
         let ok_on_enter = modal.ok_on_enter && matches!(&modal.footer, ModalFooter::Default);
         let styled = modal.styled;
         let placement = modal.placement;
-        let width = modal.width;
-        let max_width = modal.max_width;
-        let max_height = modal.max_height;
+        let panel_style = modal.style.clone();
         let title = modal.title.as_ref().map(|slot| slot(window, cx));
         let close_button = modal.close_button.as_ref().map(|slot| slot(window, cx));
         let content = (modal.content)(window, cx);
@@ -125,66 +123,52 @@ impl Render for ModalLayer {
         let mut panel = div()
             .id("global-modal-content")
             .relative()
-            .w(width)
-            .max_w(max_width)
-            .max_h(max_height)
             .flex()
             .flex_col()
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
         if styled {
-            panel = panel
-                .rounded(appearance.radius)
-                .bg(appearance.background)
-                .text_color(appearance.foreground)
-                .shadow_lg();
-            if appearance.show_border {
-                panel = panel
-                    .border(appearance.border_width)
-                    .border_color(appearance.border);
-            }
+            panel.style().refine(&panel_style);
         }
 
         if title.is_some() || close_button.is_some() {
-            panel = panel.child(
-                div()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(appearance.header_padding_x)
-                    .py(appearance.header_padding_y)
-                    .when(styled && appearance.show_border, |this| {
-                        this.border_b_1().border_color(appearance.section_border)
-                    })
-                    .children(title)
-                    .when_some(close_button, |this, button| {
-                        this.child(
-                            div()
-                                .id("global-modal-close")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|layer, _, window, cx| {
-                                    layer.dismiss(window, cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child(button),
-                        )
-                    }),
-            );
+            let header = div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(appearance.header_padding_x)
+                .py(appearance.header_padding_y)
+                .when(styled && appearance.section_borders, |this| {
+                    this.border_b_1().border_color(appearance.section_border)
+                })
+                .children(title)
+                .when_some(close_button, |this, button| {
+                    this.child(
+                        div()
+                            .id("global-modal-close")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|layer, _, window, cx| {
+                                layer.dismiss(window, cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(button),
+                    )
+                });
+            panel = panel.child(header);
         }
 
-        panel = panel.child(
-            div()
-                .id("global-modal-body")
-                .flex_1()
-                .overflow_y_scroll()
-                .when(styled, |this| {
-                    this.px(appearance.body_padding_x)
-                        .py(appearance.body_padding_y)
-                })
-                .child(content),
-        );
+        let body = div()
+            .id("global-modal-body")
+            .flex_1()
+            .overflow_y_scroll()
+            .when(styled, |this| {
+                this.px(appearance.body_padding_x)
+                    .py(appearance.body_padding_y)
+            })
+            .child(content);
+        panel = panel.child(body);
 
         panel = match &modal.footer {
             ModalFooter::Hidden => panel,
@@ -208,41 +192,40 @@ impl Render for ModalLayer {
                 };
                 let on_cancel = modal.on_cancel.clone();
 
-                panel.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(appearance.footer_gap)
-                        .px(appearance.footer_padding_x)
-                        .py(appearance.footer_padding_y)
-                        .when(styled && appearance.show_border, |this| {
-                            this.border_t_1().border_color(appearance.section_border)
-                        })
-                        .child(
-                            div()
-                                .id("global-modal-cancel")
-                                .on_click(cx.listener(move |layer, _, window, cx| {
-                                    let should_close = on_cancel
-                                        .as_ref()
-                                        .is_none_or(|callback| callback(window, cx));
-                                    if should_close {
-                                        layer.dismiss(window, cx);
-                                    }
-                                    cx.stop_propagation();
-                                }))
-                                .child(cancel),
-                        )
-                        .child(
-                            div()
-                                .id("global-modal-ok")
-                                .on_click(cx.listener(move |layer, _, window, cx| {
-                                    layer.execute_ok(window, cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child(ok),
-                        ),
-                )
+                let footer = div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(appearance.footer_gap)
+                    .px(appearance.footer_padding_x)
+                    .py(appearance.footer_padding_y)
+                    .when(styled && appearance.section_borders, |this| {
+                        this.border_t_1().border_color(appearance.section_border)
+                    })
+                    .child(
+                        div()
+                            .id("global-modal-cancel")
+                            .on_click(cx.listener(move |layer, _, window, cx| {
+                                let should_close = on_cancel
+                                    .as_ref()
+                                    .is_none_or(|callback| callback(window, cx));
+                                if should_close {
+                                    layer.dismiss(window, cx);
+                                }
+                                cx.stop_propagation();
+                            }))
+                            .child(cancel),
+                    )
+                    .child(
+                        div()
+                            .id("global-modal-ok")
+                            .on_click(cx.listener(move |layer, _, window, cx| {
+                                layer.execute_ok(window, cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(ok),
+                    );
+                panel.child(footer)
             }
         };
 

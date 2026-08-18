@@ -1,23 +1,8 @@
 macro_rules! input_appearance {
     ($ty:ty) => {
         impl $ty {
-            pub fn background(mut self, background: gpui::Hsla) -> Self {
-                self.appearance.background = background;
-                self
-            }
-
-            pub fn foreground(mut self, foreground: gpui::Hsla) -> Self {
-                self.appearance.foreground = foreground;
-                self
-            }
-
             pub fn placeholder(mut self, placeholder: gpui::Hsla) -> Self {
                 self.appearance.placeholder = placeholder;
-                self
-            }
-
-            pub fn border(mut self, border: gpui::Hsla) -> Self {
-                self.appearance.border = border;
                 self
             }
 
@@ -46,65 +31,11 @@ macro_rules! input_appearance {
                 self
             }
 
-            pub fn height(mut self, height: gpui::Pixels) -> Self {
-                self.appearance.height = height;
-                self.appearance.multiline_height = height;
-                self.rows = None;
-                self
-            }
-
-            pub fn multiline_height(mut self, height: gpui::Pixels) -> Self {
-                self.appearance.multiline_height = height;
-                self.rows = None;
-                self
-            }
-
             /// Sets the number of visible rows for a multi-line input.
             ///
-            /// The final height is derived from the effective line height, vertical padding,
-            /// and border width at render time, so the order of these builder calls does not
-            /// matter.
+            /// An explicit Styled height overrides the derived row height.
             pub fn rows(mut self, rows: usize) -> Self {
                 self.rows = Some(rows.max(1));
-                self
-            }
-
-            pub fn line_height(mut self, line_height: gpui::Pixels) -> Self {
-                self.appearance.line_height = line_height;
-                self.line_height_explicit = true;
-                self
-            }
-
-            pub fn radius(mut self, radius: gpui::Pixels) -> Self {
-                self.appearance.radius = radius;
-                self
-            }
-
-            pub fn border_width(mut self, border_width: gpui::Pixels) -> Self {
-                self.appearance.border_width = border_width;
-                self
-            }
-
-            pub fn padding_x(mut self, padding_x: gpui::Pixels) -> Self {
-                self.appearance.padding_x = padding_x;
-                self
-            }
-
-            pub fn padding_y(mut self, padding_y: gpui::Pixels) -> Self {
-                self.appearance.padding_y = padding_y;
-                self
-            }
-
-            pub fn gap(mut self, gap: gpui::Pixels) -> Self {
-                self.appearance.gap = gap;
-                self
-            }
-
-            pub fn font_size(mut self, font_size: gpui::Pixels) -> Self {
-                self.appearance.font_size = font_size;
-                if !self.line_height_explicit {
-                    self.appearance.line_height = font_size * 1.5;
-                }
                 self
             }
         }
@@ -120,6 +51,44 @@ mod read_only;
 mod state;
 
 use gpui::SharedString;
+
+pub(crate) fn row_height(
+    style: &gpui::StyleRefinement,
+    rows: usize,
+    rem_size: gpui::Pixels,
+) -> gpui::Pixels {
+    let font_size = style
+        .text
+        .font_size
+        .unwrap_or_else(|| gpui::px(16.).into())
+        .to_pixels(rem_size);
+    let line_height = style
+        .text
+        .line_height
+        .unwrap_or_else(|| gpui::px(24.).into())
+        .to_pixels(font_size.into(), rem_size);
+    let padding_top = style
+        .padding
+        .top
+        .unwrap_or_else(|| gpui::px(10.).into())
+        .to_pixels(font_size.into(), rem_size);
+    let padding_bottom = style
+        .padding
+        .bottom
+        .unwrap_or_else(|| gpui::px(10.).into())
+        .to_pixels(font_size.into(), rem_size);
+    let border_top = style
+        .border_widths
+        .top
+        .unwrap_or_else(|| gpui::px(1.).into())
+        .to_pixels(rem_size);
+    let border_bottom = style
+        .border_widths
+        .bottom
+        .unwrap_or_else(|| gpui::px(1.).into())
+        .to_pixels(rem_size);
+    line_height * rows.max(1) as f32 + padding_top + padding_bottom + border_top + border_bottom
+}
 
 pub(crate) use actions::Submit;
 pub use actions::init;

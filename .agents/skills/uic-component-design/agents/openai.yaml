@@ -1,0 +1,4 @@
+interface:
+  display_name: "UIC Component Design"
+  short_description: "Design public UIC APIs around GPUI Styled"
+  default_prompt: "Use $uic-component-design to design or refactor this UIC component public API."

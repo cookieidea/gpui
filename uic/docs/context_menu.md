@@ -5,6 +5,7 @@ UIC context menus are window-level overlays with one shared session for the root
 Initialize UIC, mount the context-menu layer as the last child of the window root, then attach a menu to any interactive element:
 
 ```rust,ignore
+use gpui::{FontWeight, prelude::*, px};
 use uic::components::context_menu::{self, ContextMenu, ContextMenuExt};
 
 div()
@@ -12,6 +13,12 @@ div()
         div()
             .context_menu(|_, _| {
                 ContextMenu::new()
+                    .w(px(260.0))
+                    .p_2()
+                    .rounded(px(12.0))
+                    .font_family("Inter")
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_size(px(15.0))
                     .action_with_shortcut("Open", "Enter", |_, _| {})
                     .submenu("Open With", |menu| {
                         menu.action("Text Editor", |_, _| {})
@@ -25,7 +32,7 @@ div()
     .child(context_menu::layer(cx))
 ```
 
-The layer should normally be a sibling of the application content rather than a child of the right-click target.
+The layer should normally be a sibling of the application content rather than a child of the right-click target. `ContextMenu` uses the standard GPUI `Styled` API for its menu surface, including size, padding, background, border, radius, opacity, and typography. These refinements are inherited by every submenu. `ContextMenuAppearance` describes menu-specific states and row details such as selected, muted, danger, item height, and separator color. Custom label elements can override inherited styles locally.
 
 ## Surfaces
 
@@ -42,19 +49,13 @@ The common root/submenu split can use the convenience methods:
 ```rust,ignore
 ContextMenu::new()
     .root_surface(|state, content, _, _| {
-        GlassPanel::liquid()
+        FrostedGlass::with_appearance(FrostedGlassAppearance::dark())
             .id(("root-menu", state.session_id))
-            .material(GlassMaterial::Thick)
-            .tint(rgba(0x0a1222e8))
-            .optics([6.0, 0.15, 0.12, 1.02])
-            .deformation(0.18)
             .child(content)
     })
     .submenu_surface(|state, content, _, _| {
-        GlassPanel::frosted()
+        FrostedGlass::with_appearance(FrostedGlassAppearance::light())
             .id(("submenu", state.session_id * 10 + state.depth as u64))
-            .material(GlassMaterial::Thick)
-            .tint(rgba(0x111a2aee))
             .child(content)
     })
 ```
@@ -63,8 +64,8 @@ Use `surface_for_depth` when all three levels need different styling:
 
 ```rust,ignore
 ContextMenu::new()
-    .surface_for_depth(0, liquid_surface)
-    .surface_for_depth(1, frosted_surface)
+    .surface_for_depth(0, dark_frosted_surface)
+    .surface_for_depth(1, light_frosted_surface)
     .surface_for_depth(2, plain_div_surface)
 ```
 

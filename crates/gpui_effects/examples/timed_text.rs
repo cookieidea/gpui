@@ -5,7 +5,7 @@ use gpui::{
     WindowBounds, WindowOptions, div, linear_color_stop, multi_linear_gradient, prelude::*, px,
     rgb, rgba, size,
 };
-use gpui_effects::{GlassMaterial, GlassPanel, TimedText, TimedTextUnit};
+use gpui_effects::{FrostedGlass, FrostedGlassAppearance, TimedText, TimedTextUnit};
 use gpui_platform::application;
 
 type Piece = (&'static str, u64, u64, usize);
@@ -114,20 +114,21 @@ impl Render for TimedTextExample {
                 linear_color_stop(rgb(0xf9a8d4), 1.0),
             ],
         );
+        let mut glass = FrostedGlassAppearance::dark();
+        glass.tint = rgba(0x11182a80).into();
 
         div()
             .size_full()
+            .text_color(rgb(0xe7edf8))
             .flex()
             .items_center()
             .justify_center()
             .bg(rgb(0x090d18))
             .child(
-                GlassPanel::new()
-                    .material(GlassMaterial::Regular)
-                    .radius(px(28.))
-                    .tint(rgba(0x11182a80))
-                    .glass_opacity(0.76)
+                FrostedGlass::with_appearance(glass)
+                    .opacity(0.76)
                     .w(px(900.))
+                    .rounded(px(28.))
                     .px(px(42.))
                     .py(px(48.))
                     .flex()

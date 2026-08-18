@@ -84,14 +84,11 @@ impl Element for TextElement {
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), appearance.placeholder)
         } else if input.mode == InputMode::Password {
-            ("*".repeat(content.len()).into(), appearance.foreground)
+            ("*".repeat(content.len()).into(), style.color)
         } else if multiline {
-            (content.clone(), appearance.foreground)
+            (content.clone(), style.color)
         } else {
-            (
-                content.replace(['\r', '\n'], " ").into(),
-                appearance.foreground,
-            )
+            (content.replace(['\r', '\n'], " ").into(), style.color)
         };
 
         let run = TextRun {

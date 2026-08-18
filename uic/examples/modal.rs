@@ -45,7 +45,11 @@ impl Render for ModalExample {
                             })
                             .ok_text(|_, _| div().flex().gap_2().child("✓").child("Save"))
                             .cancel_label("Back")
-                            .appearance(ModalAppearance::default().border(false))
+                            .border(px(0.))
+                            .appearance(ModalAppearance {
+                                section_borders: false,
+                                ..ModalAppearance::default()
+                            })
                             .on_ok(|_, _| true),
                             window,
                             cx,
@@ -80,13 +84,7 @@ impl Render for ModalExample {
 
 fn main() {
     gpui_platform::application().run(|cx| {
-        modal::init_with_appearance(
-            ModalAppearance {
-                radius: px(16.),
-                ..ModalAppearance::default()
-            },
-            cx,
-        );
+        modal::init(cx);
 
         cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| ModalExample))
             .expect("failed to open modal example window");

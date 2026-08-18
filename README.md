@@ -13,8 +13,6 @@ media playback, UI components, and desktop integration.
 
 ### `gpui_effects`
 
-![Liquid Glass material demo](docs/images/gpui-effects-liquid-glass.png)
-
 [`gpui_effects`](crates/gpui_effects) extends GPUI with reusable GPU-backed
 visual components:
 
@@ -23,8 +21,8 @@ visual components:
 - Built-in Aurora, Plasma, Color Orbs, Album Glow, and Album Ripples effects.
 - Shader effects and gradient fills masked by arbitrary elements, including
   ready-to-use text and SVG helpers.
-- `GlassPanel` materials including Frosted, Gel, and Liquid Glass, with the
-  same layout behavior as a regular `div()` and configurable glass optics.
+- `FrostedGlass` panels with strong backdrop blur, light/dark appearances,
+  normal `div()` layout behavior, and mergeable rounded surfaces.
 - A page-flip component with rigid, soft, and curl styles, single- or
   double-page layouts, lazy content providers, and preloading.
 - `MotionLayer` for coordinated movement along linear, curved, or custom paths.

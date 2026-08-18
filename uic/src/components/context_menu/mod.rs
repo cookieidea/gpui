@@ -7,7 +7,7 @@ use gpui::{
     Anchor, AnchoredPositionMode, AnyElement, App, Bounds, Context, Entity, FocusHandle, Global,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
     Render, Subscription, Task, Window, WindowId, anchored, canvas, deferred, div, point,
-    prelude::*, px,
+    prelude::*,
 };
 
 pub use appearance::ContextMenuAppearance;
@@ -133,6 +133,9 @@ struct ActiveContextMenu {
     previous_focus: Option<FocusHandle>,
     levels: Vec<ContextMenuLevel>,
     appearance: ContextMenuAppearance,
+    style: gpui::StyleRefinement,
+    viewport_margin: Pixels,
+    submenu_gap: Pixels,
     surfaces: ContextMenuSurfaces,
     viewport_width: Pixels,
 }
@@ -175,13 +178,16 @@ impl ContextMenuLayer {
 
         let viewport_width = window.viewport_size().width;
         let appearance = menu.appearance.unwrap_or(self.appearance);
-        let opens_left = position.x + appearance.width + appearance.window_margin > viewport_width;
+        let style = menu.style.clone();
+        let opens_left = position.x > viewport_width * 0.5;
         let anchor = if opens_left {
             Anchor::TopRight
         } else {
             Anchor::TopLeft
         };
         let surfaces = menu.surfaces.clone();
+        let viewport_margin = menu.viewport_margin;
+        let submenu_gap = menu.submenu_gap;
         let level = ContextMenuLevel::new(menu, position, anchor, ContextMenuPlacement::Root);
         let session_id = self.next_session_id;
         self.next_session_id += 1;
@@ -191,6 +197,9 @@ impl ContextMenuLayer {
             previous_focus: window.focused(cx),
             levels: vec![level],
             appearance,
+            style,
+            viewport_margin,
+            submenu_gap,
             surfaces,
             viewport_width,
         });
@@ -313,10 +322,14 @@ impl ContextMenuLayer {
             return;
         };
 
-        let right_position = item_bounds.right() + active.appearance.submenu_gap;
+        let right_position = item_bounds.right() + active.submenu_gap;
+        let estimated_width = parent_level
+            .bounds
+            .get()
+            .map(|bounds| bounds.size.width)
+            .unwrap_or(item_bounds.size.width);
         let room_on_right =
-            right_position + active.appearance.width + active.appearance.window_margin
-                <= active.viewport_width;
+            right_position + estimated_width + active.viewport_margin <= active.viewport_width;
         let (position, anchor, placement) = if room_on_right {
             (
                 point(right_position, item_bounds.top()),
@@ -325,10 +338,7 @@ impl ContextMenuLayer {
             )
         } else {
             (
-                point(
-                    item_bounds.left() - active.appearance.submenu_gap,
-                    item_bounds.top(),
-                ),
+                point(item_bounds.left() - active.submenu_gap, item_bounds.top()),
                 Anchor::TopRight,
                 ContextMenuPlacement::Left,
             )
@@ -476,7 +486,7 @@ impl ContextMenuLayer {
             .enumerate()
             .map(|(index, entry)| match entry {
                 ContextMenuEntry::Separator => div()
-                    .h(px(1.))
+                    .h(gpui::px(1.))
                     .my(appearance.separator_margin)
                     .bg(appearance.separator)
                     .into_any_element(),
@@ -485,18 +495,18 @@ impl ContextMenuLayer {
                     let selected = level.selected_index == Some(index);
                     let has_submenu = matches!(item.kind, ContextMenuItemKind::Submenu(_));
                     let foreground = if disabled {
-                        appearance.muted_foreground
+                        Some(appearance.muted_foreground)
                     } else if selected {
-                        appearance.selected_foreground
+                        Some(appearance.selected_foreground)
                     } else if item.danger {
-                        appearance.danger_foreground
+                        Some(appearance.danger_foreground)
                     } else {
-                        appearance.foreground
+                        None
                     };
                     let tracker = level.item_bounds[index].clone();
                     let label = (item.label)(window, cx);
                     let shortcut = item.shortcut.clone();
-                    div()
+                    let row = div()
                         .id((
                             "context-menu-item",
                             active.session_id as usize * 1_000 + depth * 100 + index,
@@ -508,60 +518,58 @@ impl ContextMenuLayer {
                         .items_center()
                         .gap_3()
                         .rounded(appearance.item_radius)
-                        .text_color(foreground)
-                        .when(selected && !disabled, |this| {
-                            this.bg(appearance.selected_background)
-                        })
-                        .when(!disabled, |this| {
-                            this.cursor_pointer()
-                                .on_hover(cx.listener(move |layer, hovered, window, cx| {
-                                    if *hovered {
-                                        layer.hover_item(depth, index, window, cx);
-                                    }
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |layer, _, window, cx| {
-                                        layer.activate_item(depth, index, window, cx);
-                                        cx.stop_propagation();
-                                    }),
-                                )
-                        })
-                        .child(div().flex_1().min_w_0().child(label))
-                        .when_some(shortcut, |this, shortcut| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(appearance.muted_foreground)
-                                    .child(shortcut),
+                        .when_some(foreground, |this, foreground| this.text_color(foreground));
+                    row.when(selected && !disabled, |this| {
+                        this.bg(appearance.selected_background)
+                    })
+                    .when(!disabled, |this| {
+                        this.cursor_pointer()
+                            .on_hover(cx.listener(move |layer, hovered, window, cx| {
+                                if *hovered {
+                                    layer.hover_item(depth, index, window, cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |layer, _, window, cx| {
+                                    layer.activate_item(depth, index, window, cx);
+                                    cx.stop_propagation();
+                                }),
                             )
-                        })
-                        .when(has_submenu, |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(appearance.muted_foreground)
-                                    .child("›"),
-                            )
-                        })
-                        .child(bounds_tracker(tracker))
-                        .into_any_element()
+                    })
+                    .child(div().flex_1().min_w_0().child(label))
+                    .when_some(shortcut, |this, shortcut| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_color(appearance.muted_foreground)
+                                .child(shortcut),
+                        )
+                    })
+                    .when(has_submenu, |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_color(appearance.muted_foreground)
+                                .child("›"),
+                        )
+                    })
+                    .child(bounds_tracker(tracker))
+                    .into_any_element()
                 }
             });
 
-        let content = div()
+        let mut content = div()
             .id((
                 "context-menu-scroll",
                 active.session_id as usize * MAX_CONTEXT_MENU_DEPTH + depth,
             ))
-            .w(appearance.width)
-            .max_h(appearance.max_height)
             .overflow_y_scroll()
-            .p(appearance.padding)
             .flex()
             .flex_col()
-            .children(items)
-            .into_any_element();
+            .children(items);
+        gpui::Refineable::refine(content.style(), &active.style);
+        let content = content.into_any_element();
         let state = ContextMenuSurfaceState {
             session_id: active.session_id,
             depth,
@@ -570,15 +578,7 @@ impl ContextMenuLayer {
         };
         let surface = match active.surfaces.by_depth[depth].as_ref() {
             Some(surface) => (surface.0)(state, content, window, cx),
-            None => div()
-                .rounded(appearance.radius)
-                .border(appearance.border_width)
-                .border_color(appearance.border)
-                .bg(appearance.background)
-                .text_color(appearance.foreground)
-                .shadow_lg()
-                .child(content)
-                .into_any_element(),
+            None => div().shadow_lg().child(content).into_any_element(),
         };
         let bounds = level.bounds.clone();
         let mut wrapper = div()
@@ -610,7 +610,7 @@ impl ContextMenuLayer {
                 .anchor(level.anchor)
                 .position(level.position)
                 .position_mode(AnchoredPositionMode::Window)
-                .snap_to_window_with_margin(appearance.window_margin)
+                .snap_to_window_with_margin(active.viewport_margin)
                 .child(wrapper),
         )
         .with_priority(CONTEXT_MENU_PRIORITY + depth)

@@ -740,11 +740,6 @@ impl EntityInputHandler for TextInput {
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let multiline = self.mode == InputMode::Multiline;
-        let line_height = if multiline {
-            self.appearance.line_height
-        } else {
-            self.appearance.height
-        };
         let scroll_handle = self.scroll_handle.clone();
         div()
             .id(("uic-text-input", cx.entity_id()))
@@ -791,8 +786,6 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(line_height)
-            .text_size(self.appearance.font_size)
             .child(
                 div()
                     .w_full()

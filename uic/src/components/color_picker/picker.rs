@@ -1,8 +1,8 @@
 use gpui::{
     AccessibleAction, App, Background, ColorSpace, CursorStyle, Entity, FocusHandle, Hsla,
-    IntoElement, KeyDownEvent, Orientation, RenderOnce, Role, SharedString, Window, black, div,
-    hsla, linear_color_stop, linear_gradient, prelude::*, px, relative, transparent_black,
-    transparent_white, white,
+    IntoElement, KeyDownEvent, Orientation, Refineable as _, RenderOnce, Role, SharedString,
+    StyleRefinement, Styled, Window, black, div, hsla, linear_color_stop, linear_gradient,
+    prelude::*, px, relative, transparent_black, transparent_white, white,
 };
 
 use super::{
@@ -16,6 +16,7 @@ pub struct ColorPicker {
     appearance: ColorPickerAppearance,
     sv_label: Option<SharedString>,
     hue_label: Option<SharedString>,
+    style: StyleRefinement,
 }
 
 impl ColorPicker {
@@ -25,6 +26,14 @@ impl ColorPicker {
             appearance: ColorPickerAppearance::default(),
             sv_label: None,
             hue_label: None,
+            style: StyleRefinement::default()
+                .w_full()
+                .gap(px(14.))
+                .p(px(16.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(hsla(0.52, 0.08, 0.26, 1.0))
+                .bg(hsla(0.52, 0.12, 0.11, 1.0)),
         }
     }
 
@@ -56,7 +65,7 @@ impl ColorPicker {
         let hue = Hsva::new(hsva.h, 1.0, 1.0, 1.0).to_rgba();
         let marker_offset = appearance.marker_size * -0.5;
 
-        div()
+        let area = div()
             .id(("color-picker-sv-control", self.state.entity_id()))
             .relative()
             .debug_selector(|| "color-picker-sv".to_string())
@@ -114,7 +123,8 @@ impl ColorPicker {
                 })
                 .absolute()
                 .inset_0(),
-            )
+            );
+        area
     }
 
     fn hue_track(&self, hsva: Hsva, capture: CaptureToken, focus: FocusHandle) -> impl IntoElement {
@@ -197,7 +207,6 @@ impl ColorPicker {
 
 impl RenderOnce for ColorPicker {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let appearance = self.appearance;
         let (hsva, sv_capture, hue_capture, sv_focus, hue_focus) = {
             let state = self.state.read(cx);
             (
@@ -209,17 +218,18 @@ impl RenderOnce for ColorPicker {
             )
         };
 
-        div()
-            .w_full()
+        let mut element = div()
             .flex()
-            .gap(appearance.gap)
-            .p(appearance.padding)
-            .rounded(appearance.radius)
-            .border_1()
-            .border_color(appearance.border)
-            .bg(appearance.background)
             .child(self.color_area(hsva, sv_capture, sv_focus))
-            .child(self.hue_track(hsva, hue_capture, hue_focus))
+            .child(self.hue_track(hsva, hue_capture, hue_focus));
+        element.style().refine(&self.style);
+        element
+    }
+}
+
+impl Styled for ColorPicker {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 

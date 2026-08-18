@@ -137,26 +137,22 @@ fn backdrop_effect(input: BackdropInput, params: BackdropParams) -> vec4<f32> {
     }
 
     #[test]
-    fn glass_backdrop_shaders_are_valid_wgsl() {
-        for (name, shader) in [
-            ("frosted glass", gpui_effects::frosted_glass_shader()),
-            ("gel glass", gpui_effects::gel_glass_shader()),
-        ] {
-            let source = gpui::compose_backdrop_shader_wgsl(&shader);
-            let module = wgpu::naga::front::wgsl::parse_str(&source)
-                .unwrap_or_else(|error| panic!("{name} backdrop shader should parse: {error}"));
-            wgpu::naga::valid::Validator::new(
-                wgpu::naga::valid::ValidationFlags::all(),
-                wgpu::naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|error| panic!("{name} backdrop shader should validate: {error}"));
+    fn frosted_glass_backdrop_shader_is_valid_wgsl() {
+        let shader = gpui_effects::frosted_glass_shader();
+        let source = gpui::compose_backdrop_shader_wgsl(&shader);
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("frosted glass backdrop shader should parse: {error}"));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("frosted glass backdrop shader should validate: {error}"));
 
-            assert_eq!(
-                shader_struct_span(&module, "BackdropInstance") as usize,
-                std::mem::size_of::<super::wgpu_renderer::BackdropInstance>(),
-            );
-        }
+        assert_eq!(
+            shader_struct_span(&module, "BackdropInstance") as usize,
+            std::mem::size_of::<super::wgpu_renderer::BackdropInstance>(),
+        );
     }
 
     #[test]

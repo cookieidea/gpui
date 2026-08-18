@@ -1,6 +1,8 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, IntoElement, SharedString, Window};
+use gpui::{
+    AnyElement, App, IntoElement, Pixels, SharedString, StyleRefinement, Styled, Window, px, rgb,
+};
 
 pub(crate) type MenuAction = Rc<dyn Fn(&mut Window, &mut App)>;
 pub(crate) type MenuSlot = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
@@ -101,6 +103,9 @@ pub struct ContextMenu {
     pub(crate) entries: Vec<ContextMenuEntry>,
     pub(crate) appearance: Option<super::ContextMenuAppearance>,
     pub(crate) surfaces: super::ContextMenuSurfaces,
+    pub(crate) style: StyleRefinement,
+    pub(crate) viewport_margin: Pixels,
+    pub(crate) submenu_gap: Pixels,
 }
 
 impl Default for ContextMenu {
@@ -115,6 +120,17 @@ impl ContextMenu {
             entries: Vec::new(),
             appearance: None,
             surfaces: super::ContextMenuSurfaces::default(),
+            style: StyleRefinement::default()
+                .w(px(220.0))
+                .max_h(px(420.0))
+                .p(px(5.0))
+                .rounded(px(10.0))
+                .border(px(1.0))
+                .border_color(rgb(0x000000).opacity(0.12))
+                .bg(rgb(0xffffff))
+                .text_color(rgb(0x172033)),
+            viewport_margin: px(8.0),
+            submenu_gap: px(2.0),
         }
     }
 
@@ -179,6 +195,18 @@ impl ContextMenu {
 
     pub fn appearance(mut self, appearance: super::ContextMenuAppearance) -> Self {
         self.appearance = Some(appearance);
+        self
+    }
+
+    /// Sets the minimum distance kept between a menu and the window edge.
+    pub fn viewport_margin(mut self, margin: Pixels) -> Self {
+        self.viewport_margin = margin.max(px(0.0));
+        self
+    }
+
+    /// Sets the visual gap between a parent menu and its submenu.
+    pub fn submenu_gap(mut self, gap: Pixels) -> Self {
+        self.submenu_gap = gap.max(px(0.0));
         self
     }
 
@@ -247,9 +275,33 @@ impl ContextMenu {
     }
 }
 
+impl Styled for ContextMenu {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use gpui::{FontWeight, px};
+
     use super::*;
+
+    #[test]
+    fn common_visual_properties_use_styled() {
+        let menu = ContextMenu::new()
+            .font_family("UIC Test Family")
+            .font_weight(FontWeight::MEDIUM)
+            .text_size(px(15.0))
+            .line_height(px(22.0))
+            .opacity(0.8);
+
+        assert_eq!(menu.style.opacity, Some(0.8));
+        assert!(menu.style.text.font_family.is_some());
+        assert_eq!(menu.style.text.font_weight, Some(FontWeight::MEDIUM));
+        assert!(menu.style.text.font_size.is_some());
+        assert!(menu.style.text.line_height.is_some());
+    }
 
     #[test]
     fn accepts_three_levels() {

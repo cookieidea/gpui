@@ -242,10 +242,12 @@ impl ColorPickerExample {
                 ColorFormat::Hsv => format_hsv(hsva),
                 ColorFormat::Hsl => format_hsl(hsva),
             };
-            let mut appearance = example_input_appearance();
-            if self.invalid_format == Some(format) {
-                appearance.border = hsla(0.0, 0.75, 0.55, 1.0);
-            }
+            let appearance = example_input_appearance();
+            let border = if self.invalid_format == Some(format) {
+                hsla(0.0, 0.75, 0.55, 1.0)
+            } else {
+                hsla(0.52, 0.08, 0.26, 1.0)
+            };
             fields = fields.child(
                 div()
                     .min_w(px(205.0))
@@ -264,7 +266,16 @@ impl ColorPickerExample {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(Input::new(&input).appearance(appearance))
+                            .child(
+                                Input::new(&input)
+                                    .appearance(appearance)
+                                    .h(px(40.0))
+                                    .rounded(px(9.0))
+                                    .border_color(border)
+                                    .bg(hsla(0.52, 0.12, 0.09, 1.0))
+                                    .text_color(hsla(0.0, 0.0, 0.9, 1.0))
+                                    .text_size(px(15.0)),
+                            )
                             .child(
                                 div()
                                     .id(SharedString::from(format!(
@@ -370,16 +381,10 @@ impl Render for ColorPickerExample {
 
 fn example_input_appearance() -> InputAppearance {
     InputAppearance {
-        background: hsla(0.52, 0.12, 0.09, 1.0),
-        foreground: hsla(0.0, 0.0, 0.9, 1.0),
         placeholder: hsla(0.0, 0.0, 0.48, 1.0),
-        border: hsla(0.52, 0.08, 0.26, 1.0),
         focus_border: hsla(0.52, 0.85, 0.48, 1.0),
         caret: hsla(0.52, 0.85, 0.48, 1.0),
         selection: hsla(0.52, 0.85, 0.48, 0.24),
-        height: px(40.0),
-        radius: px(9.0),
-        font_size: px(15.0),
         ..InputAppearance::default()
     }
 }

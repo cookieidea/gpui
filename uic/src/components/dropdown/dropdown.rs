@@ -1,18 +1,19 @@
 use gpui::{
-    AnyElement, App, CursorStyle, Entity, Focusable, IntoElement, MouseButton, RenderOnce, Window,
-    deferred, div, prelude::*,
+    AnyElement, App, CursorStyle, Entity, Focusable, IntoElement, MouseButton, Pixels,
+    Refineable as _, RenderOnce, StyleRefinement, Styled, Window, deferred, div, prelude::*, px,
 };
 
-use super::{DropdownAppearance, DropdownPlacement, DropdownState};
+use super::{DropdownPlacement, DropdownState};
 
 #[derive(IntoElement)]
 pub struct Dropdown {
     state: Entity<DropdownState>,
     trigger: Option<AnyElement>,
     menu: Option<AnyElement>,
-    appearance: DropdownAppearance,
     placement: DropdownPlacement,
+    menu_gap: Pixels,
     priority: usize,
+    style: StyleRefinement,
 }
 
 pub fn dropdown(state: &Entity<DropdownState>) -> Dropdown {
@@ -25,9 +26,17 @@ impl Dropdown {
             state: state.clone(),
             trigger: None,
             menu: None,
-            appearance: DropdownAppearance::default(),
             placement: DropdownPlacement::default(),
+            menu_gap: px(6.),
             priority: 100,
+            style: StyleRefinement::default()
+                .min_w(px(160.))
+                .max_h(px(320.))
+                .p(px(6.))
+                .rounded(px(8.))
+                .border(px(1.))
+                .border_color(gpui::black().opacity(0.12))
+                .bg(gpui::white()),
         }
     }
 
@@ -41,13 +50,13 @@ impl Dropdown {
         self
     }
 
-    pub fn appearance(mut self, appearance: DropdownAppearance) -> Self {
-        self.appearance = appearance;
+    pub fn placement(mut self, placement: DropdownPlacement) -> Self {
+        self.placement = placement;
         self
     }
 
-    pub fn placement(mut self, placement: DropdownPlacement) -> Self {
-        self.placement = placement;
+    pub fn menu_gap(mut self, gap: Pixels) -> Self {
+        self.menu_gap = gap.max(px(0.));
         self
     }
 
@@ -64,7 +73,8 @@ impl RenderOnce for Dropdown {
         let focus_handle = self.state.focus_handle(cx);
         let toggle_state = self.state.clone();
         let escape_state = self.state.clone();
-        let appearance = self.appearance;
+        let menu_style = self.style.clone();
+        let menu_gap = self.menu_gap;
 
         let menu = open.then(|| {
             let positioned = match self.placement {
@@ -74,34 +84,22 @@ impl RenderOnce for Dropdown {
                 DropdownPlacement::TopEnd => div().absolute().bottom_full().right_0(),
             };
 
-            deferred(
-                positioned
-                    .id(("dropdown-menu", state_id))
-                    .mt(match self.placement {
-                        DropdownPlacement::BottomStart | DropdownPlacement::BottomEnd => {
-                            appearance.gap
-                        }
-                        DropdownPlacement::TopStart | DropdownPlacement::TopEnd => gpui::px(0.),
-                    })
-                    .mb(match self.placement {
-                        DropdownPlacement::TopStart | DropdownPlacement::TopEnd => appearance.gap,
-                        DropdownPlacement::BottomStart | DropdownPlacement::BottomEnd => {
-                            gpui::px(0.)
-                        }
-                    })
-                    .min_w(appearance.min_width)
-                    .max_h(appearance.max_height)
-                    .overflow_y_scroll()
-                    .p(appearance.padding)
-                    .rounded(appearance.radius)
-                    .border(appearance.border_width)
-                    .border_color(appearance.border)
-                    .bg(appearance.background)
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .children(self.menu),
-            )
-            .with_priority(self.priority)
+            let mut positioned = positioned
+                .id(("dropdown-menu", state_id))
+                .mt(match self.placement {
+                    DropdownPlacement::BottomStart | DropdownPlacement::BottomEnd => menu_gap,
+                    DropdownPlacement::TopStart | DropdownPlacement::TopEnd => gpui::px(0.),
+                })
+                .mb(match self.placement {
+                    DropdownPlacement::TopStart | DropdownPlacement::TopEnd => menu_gap,
+                    DropdownPlacement::BottomStart | DropdownPlacement::BottomEnd => gpui::px(0.),
+                })
+                .overflow_y_scroll()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(self.menu);
+            positioned.style().refine(&menu_style);
+            deferred(positioned).with_priority(self.priority)
         });
 
         div()
@@ -124,5 +122,11 @@ impl RenderOnce for Dropdown {
                     .children(self.trigger),
             )
             .children(menu)
+    }
+}
+
+impl Styled for Dropdown {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }

@@ -5,74 +5,15 @@ use gpui::{
     StyleRefinement, Styled, Window,
 };
 
-/// Uniform slot containing refraction, dispersion, raw-detail mix, and saturation.
-pub const GLASS_OPTICS_SLOT: usize = 0;
-/// Uniform slot containing edge width, highlight, pointer response, and a style parameter.
-pub const GLASS_SURFACE_SLOT: usize = 1;
-/// Uniform slot containing tint RGB and tint strength.
-pub const GLASS_TINT_SLOT: usize = 2;
-/// Uniform slot containing overscan, corner radius, optical thickness, and magnification.
-pub const GLASS_GEOMETRY_SLOT: usize = 3;
-/// Uniform slot containing pressure, pointer velocity, and normalized speed.
-pub const GLASS_INTERACTION_SLOT: usize = 4;
-/// Uniform slot containing the edge-light RGB color and intensity.
-pub const GLASS_LIGHT_SLOT: usize = 5;
-
 /// Constructs a styled element that composites a custom shader over scene
 /// content already painted behind it.
 pub fn backdrop_effect(shader: BackdropShader) -> BackdropEffect {
     BackdropEffect::new(shader)
 }
 
-/// Constructs a stable frosted-glass material with diffuse backdrop scattering.
-pub fn frosted_glass() -> BackdropEffect {
-    backdrop_effect(frosted_glass_shader())
-        .blur_radius(gpui::px(14.0))
-        .uniform(GLASS_OPTICS_SLOT, [0.0, 0.0, 0.18, 1.02])
-        .uniform(GLASS_SURFACE_SLOT, [0.16, 0.42, 0.0, 0.0])
-        .uniform(GLASS_TINT_SLOT, [0.88, 0.94, 1.0, 0.10])
-        .uniform(GLASS_GEOMETRY_SLOT, [0.0, 16.0, 18.0, 0.0])
-        .uniform(GLASS_INTERACTION_SLOT, [0.0; 4])
-        .uniform(GLASS_LIGHT_SLOT, [1.0, 1.0, 1.0, 0.58])
-}
-
-/// Constructs the elastic gel-glass material retained for playful surfaces.
-pub fn gel_glass() -> BackdropEffect {
-    backdrop_effect(gel_glass_shader())
-        .blur_radius(gpui::px(14.0))
-        .uniform(GLASS_OPTICS_SLOT, [15.0, 1.8, 0.56, 1.12])
-        .uniform(GLASS_SURFACE_SLOT, [0.18, 0.52, 0.76, 1.0])
-        .uniform(GLASS_TINT_SLOT, [0.88, 0.94, 1.0, 0.055])
-        .uniform(GLASS_GEOMETRY_SLOT, [0.0, 16.0, 18.0, 0.092])
-        .uniform(GLASS_INTERACTION_SLOT, [0.0; 4])
-        .uniform(GLASS_LIGHT_SLOT, [1.0, 1.0, 1.0, 0.72])
-}
-
-/// Constructs a clear liquid-glass material with rounded lens refraction.
-pub fn liquid_glass() -> BackdropEffect {
-    backdrop_effect(liquid_glass_shader())
-        .blur_radius(gpui::px(2.0))
-        .uniform(GLASS_OPTICS_SLOT, [18.0, 0.55, 0.94, 1.10])
-        .uniform(GLASS_SURFACE_SLOT, [0.16, 0.34, 0.0, 1.20])
-        .uniform(GLASS_TINT_SLOT, [0.82, 0.93, 1.0, 0.055])
-        .uniform(GLASS_GEOMETRY_SLOT, [0.0, 16.0, 18.0, 0.092])
-        .uniform(GLASS_INTERACTION_SLOT, [0.0; 4])
-        .uniform(GLASS_LIGHT_SLOT, [0.88, 0.96, 1.0, 0.72])
-}
-
-/// Returns the portable shader used by [`frosted_glass`].
+/// Returns the shader used by [`crate::FrostedGlass`].
 pub fn frosted_glass_shader() -> BackdropShader {
     BackdropShader::wgsl(include_str!("shaders/frosted_glass.wgsl"))
-}
-
-/// Returns the portable shader used by [`gel_glass`].
-pub fn gel_glass_shader() -> BackdropShader {
-    BackdropShader::wgsl(include_str!("shaders/gel_glass.wgsl"))
-}
-
-/// Returns the portable shader used by [`liquid_glass`].
-pub fn liquid_glass_shader() -> BackdropShader {
-    BackdropShader::wgsl(include_str!("shaders/liquid_glass.wgsl"))
 }
 
 /// A styled leaf element that samples both raw and blurred scene content.
@@ -231,12 +172,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optical_shader_identities_are_stable_and_distinct() {
+    fn frosted_shader_identity_is_stable() {
         assert_eq!(frosted_glass_shader().id(), frosted_glass_shader().id());
-        assert_eq!(gel_glass_shader().id(), gel_glass_shader().id());
-        assert_eq!(liquid_glass_shader().id(), liquid_glass_shader().id());
-        assert_ne!(frosted_glass_shader().id(), gel_glass_shader().id());
-        assert_ne!(frosted_glass_shader().id(), liquid_glass_shader().id());
-        assert_ne!(gel_glass_shader().id(), liquid_glass_shader().id());
     }
 }

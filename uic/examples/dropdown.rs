@@ -2,7 +2,7 @@ use gpui::{
     AppContext, Context, Entity, IntoElement, Render, SharedString, Window, WindowOptions, div,
     prelude::*, px, rgb,
 };
-use uic::components::dropdown::{DropdownAppearance, DropdownPlacement, DropdownState, dropdown};
+use uic::components::dropdown::{DropdownPlacement, DropdownState, dropdown};
 
 struct DropdownExample {
     actions: Entity<DropdownState>,
@@ -46,17 +46,6 @@ impl DropdownExample {
 
 impl Render for DropdownExample {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let custom_appearance = DropdownAppearance {
-            background: rgb(0x111c2f).into(),
-            border: rgb(0x334155).into(),
-            border_width: px(1.),
-            radius: px(10.),
-            padding: px(6.),
-            gap: px(8.),
-            min_width: px(180.),
-            max_height: px(260.),
-        };
-
         div()
             .size_full()
             .flex()
@@ -94,7 +83,14 @@ impl Render for DropdownExample {
             .child(
                 dropdown(&self.placement)
                     .placement(DropdownPlacement::TopEnd)
-                    .appearance(custom_appearance)
+                    .menu_gap(px(8.))
+                    .min_w(px(180.))
+                    .max_h(px(260.))
+                    .p(px(6.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgb(0x334155))
+                    .bg(rgb(0x111c2f))
                     .trigger(
                         div()
                             .px_4()

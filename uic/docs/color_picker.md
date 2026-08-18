@@ -85,14 +85,19 @@ receive events.
 
 ### Color surface and hue
 
-`ColorPicker` renders the saturation/value surface and the hue track. It fills
-the available width; its height and internal spacing come from
-`ColorPickerAppearance`.
+`ColorPicker` renders the saturation/value surface and the hue track. Style its
+outer surface with the normal GPUI `Styled` methods. Track dimensions and
+marker geometry remain picker-specific appearance values.
 
 ```rust
 div()
     .w_full()
-    .child(ColorPicker::new(&picker))
+    .child(
+        ColorPicker::new(&picker)
+            .p_3()
+            .rounded_lg()
+            .bg(rgb(0x111827)),
+    )
 ```
 
 Accessibility names are supplied by the caller when needed:
@@ -219,29 +224,34 @@ let picker_appearance = ColorPickerAppearance {
 };
 
 let alpha_appearance = AlphaSliderAppearance {
-    height: px(20.0),
+    marker: rgb(0xffffff).into(),
     ..AlphaSliderAppearance::default()
 };
 
 div()
-    .child(ColorPicker::new(&picker).appearance(picker_appearance))
-    .child(AlphaSlider::new(&picker).appearance(alpha_appearance))
+    .child(
+        ColorPicker::new(&picker)
+            .appearance(picker_appearance)
+            .p_3()
+            .rounded_lg(),
+    )
+    .child(
+        AlphaSlider::new(&picker)
+            .appearance(alpha_appearance)
+            .h(px(20.0))
+            .rounded(px(10.0)),
+    )
 ```
 
 ### `ColorPickerAppearance`
 
 | Field | Controls |
 | --- | --- |
-| `background` | Container background |
-| `border` | Container border color |
 | `accent` | Keyboard focus indicator |
 | `marker` | SV and hue markers |
 | `area_height` | SV surface and hue track height |
 | `hue_width` | Hue track width |
 | `marker_size` | SV marker diameter |
-| `radius` | Container corner radius |
-| `padding` | Container padding |
-| `gap` | Space between the SV surface and hue track |
 
 ### `AlphaSliderAppearance`
 
@@ -249,13 +259,11 @@ div()
 | --- | --- |
 | `checker` | Checkerboard color under the alpha gradient |
 | `marker` | Slider marker color |
-| `border` | Track border color |
 | `focus_border` | Keyboard focus indicator |
-| `height` | Track height |
-| `radius` | Track corner radius |
 
-The surrounding container controls width, margins, labels, previews, and
-responsive layout.
+`ColorPicker` and `AlphaSlider` both implement `Styled`. Their outer width,
+height, margin, padding, gap, background, border, radius, opacity, and text
+style use the same API as a GPUI `div`.
 
 ## Interaction
 

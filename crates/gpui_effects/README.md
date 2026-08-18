@@ -6,20 +6,16 @@ pipeline and `gpui_effects` providing higher-level components and presets.
 
 ## Guides
 
-- [Glass](docs/glass.md): Frosted, Gel, and Liquid materials for `GlassPanel`.
+- [Frosted glass](docs/glass.md): strongly blurred panels and mergeable rounded surfaces.
 - [Timed text](docs/timed_text.md): arbitrary character/word timings, gradient
   reveal, grouped lift/scale emphasis, and playback-clock integration.
 
 ## Examples
 
-Run the `GlassPanel` examples from the workspace root:
+Run the frosted-glass example from the workspace root:
 
 ```sh
-# Frosted and Gel
-cargo run -p gpui_effects --example glass
-
-# Liquid
-cargo run -p gpui_effects --example liquid_glass
+cargo run -p gpui_effects --example frosted_glass
 ```
 
 Other examples in `examples/` demonstrate gradients, masked effects, motion

@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, CursorStyle, Entity, IntoElement, MouseButton, RenderOnce, Window, div,
-    prelude::*,
+    AnyElement, App, CursorStyle, Entity, IntoElement, MouseButton, Refineable as _, RenderOnce,
+    StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
 use super::{InputAppearance, TextInput};
@@ -12,7 +12,7 @@ pub struct Input {
     suffix: Option<AnyElement>,
     appearance: InputAppearance,
     rows: Option<usize>,
-    line_height_explicit: bool,
+    style: StyleRefinement,
 }
 
 input_appearance!(Input);
@@ -25,7 +25,7 @@ impl Input {
             suffix: None,
             appearance: InputAppearance::default(),
             rows: None,
-            line_height_explicit: false,
+            style: StyleRefinement::default(),
         }
     }
 
@@ -41,17 +41,13 @@ impl Input {
 
     pub fn appearance(mut self, appearance: InputAppearance) -> Self {
         self.appearance = appearance;
-        self.line_height_explicit = true;
         self
     }
 }
 
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let mut appearance = self.appearance;
-        if let Some(rows) = self.rows {
-            appearance.multiline_height = appearance.height_for_rows(rows);
-        }
+        let appearance = self.appearance;
         self.state
             .update(cx, |state, _cx| state.appearance = appearance);
 
@@ -65,29 +61,33 @@ impl RenderOnce for Input {
             )
         };
 
-        let height = if multiline {
-            appearance.multiline_height
-        } else {
-            appearance.height
-        };
+        let row_height = self
+            .rows
+            .map(|rows| super::row_height(&self.style, rows, window.rem_size()));
 
-        div()
+        let mut element = div()
             .flex()
             .when(multiline, |this| this.items_start())
             .when(!multiline, |this| this.items_center())
             .w_full()
-            .h(height)
-            .px(appearance.padding_x)
-            .when(multiline, |this| this.py(appearance.padding_y))
-            .gap(appearance.gap)
-            .rounded(appearance.radius)
-            .border(appearance.border_width)
+            .h(px(44.))
+            .when_some(row_height.filter(|_| multiline), |this, height| {
+                this.h(height)
+            })
+            .px(px(14.))
+            .when(multiline, |this| this.py(px(10.)))
+            .gap(px(10.))
+            .text_size(px(16.))
+            .line_height(px(24.))
+            .text_color(gpui::hsla(0., 0., 0.08, 1.))
+            .rounded(px(10.))
+            .border(px(1.))
             .border_color(if focused && !disabled {
                 appearance.focus_border
             } else {
-                appearance.border
+                gpui::hsla(0., 0., 0.75, 1.)
             })
-            .bg(appearance.background)
+            .bg(gpui::hsla(0., 0., 1., 1.))
             .opacity(if disabled { 0.6 } else { 1.0 })
             .cursor(if disabled {
                 CursorStyle::Arrow
@@ -101,6 +101,14 @@ impl RenderOnce for Input {
             })
             .children(self.prefix)
             .child(self.state)
-            .children(self.suffix)
+            .children(self.suffix);
+        element.style().refine(&self.style);
+        element
+    }
+}
+
+impl Styled for Input {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }

@@ -1,21 +1,22 @@
 use gpui::{
     Context, Entity, IntoElement, Render, Window, WindowOptions, div, prelude::*, px, rgb, rgba,
+    transparent_black,
 };
-use gpui_effects::{GlassMaterial, GlassPanel};
+use gpui_effects::{FrostedGlass, FrostedGlassAppearance};
 use uic::components::context_menu::{self, ContextMenu, ContextMenuAppearance, ContextMenuExt};
 
 #[derive(Clone, Copy)]
 enum MenuMaterial {
-    Liquid,
-    Frosted,
+    DarkFrosted,
+    LightFrosted,
     Plain,
 }
 
 impl MenuMaterial {
     fn label(self) -> &'static str {
         match self {
-            Self::Liquid => "Liquid glass",
-            Self::Frosted => "Frosted glass",
+            Self::DarkFrosted => "Dark frosted",
+            Self::LightFrosted => "Light frosted",
             Self::Plain => "Plain div",
         }
     }
@@ -43,31 +44,39 @@ impl ContextMenuExample {
 
     fn menu(entity: Entity<Self>, cx: &gpui::App) -> ContextMenu {
         let material = entity.read(cx).material;
-        let liquid_entity = entity.clone();
-        let frosted_entity = entity.clone();
+        let dark_entity = entity.clone();
+        let light_entity = entity.clone();
         let plain_entity = entity.clone();
         let rename_entity = entity.clone();
         let archive_entity = entity.clone();
 
         ContextMenu::new()
             .appearance(ContextMenuAppearance {
-                background: rgb(0x111827).into(),
-                foreground: rgb(0xf8fafc).into(),
                 muted_foreground: rgb(0x94a3b8).into(),
                 danger_foreground: rgb(0xfb7185).into(),
-                selected_background: rgb(0x334155).into(),
+                selected_background: rgba(0x94a3b829).into(),
                 selected_foreground: rgb(0xffffff).into(),
-                border: rgb(0x64748b).into(),
+                item_height: px(34.0),
+                item_padding_x: px(10.0),
+                item_radius: px(8.0),
                 separator: rgb(0x64748b).into(),
-                ..ContextMenuAppearance::default()
+                separator_margin: px(5.0),
             })
+            .w(px(220.0))
+            .max_h(px(420.0))
+            .p(px(8.0))
+            .rounded(px(16.0))
+            .border(px(0.0))
+            .bg(transparent_black())
+            .text_color(rgb(0xf8fafc))
+            .font_family(".SystemUIFont")
             .action_with_shortcut("Open", "Enter", |_, _| {})
             .submenu("Material", move |menu| {
-                menu.action("Liquid glass", move |window, cx| {
-                    Self::set_material(&liquid_entity, MenuMaterial::Liquid, window, cx);
+                menu.action("Dark frosted", move |window, cx| {
+                    Self::set_material(&dark_entity, MenuMaterial::DarkFrosted, window, cx);
                 })
-                .action("Frosted glass", move |window, cx| {
-                    Self::set_material(&frosted_entity, MenuMaterial::Frosted, window, cx);
+                .action("Light frosted", move |window, cx| {
+                    Self::set_material(&light_entity, MenuMaterial::LightFrosted, window, cx);
                 })
                 .submenu("More", move |menu| {
                     menu.action("Plain div", move |window, cx| {
@@ -93,27 +102,22 @@ impl ContextMenuExample {
                 .danger(),
             )
             .root_surface(move |state, content, _, _| match material {
-                MenuMaterial::Liquid => GlassPanel::liquid()
-                    .id(("context-menu-liquid", state.session_id))
-                    .material(GlassMaterial::Thick)
-                    .tint(rgba(0x0a1222a8))
-                    .optics([6.0, 0.15, 0.12, 1.02])
-                    .surface([0.08, 0.14, 0.0, 1.0])
-                    .deformation(0.18)
-                    .edge_color(rgba(0xffffff28))
-                    .rounded(px(16.))
-                    .shadow_lg()
-                    .child(content)
-                    .into_any_element(),
-                MenuMaterial::Frosted => GlassPanel::frosted()
-                    .id(("context-menu-frosted", state.session_id))
-                    .material(GlassMaterial::Thick)
-                    .tint(rgba(0x101827a8))
-                    .edge_color(rgba(0xffffff20))
-                    .rounded(px(14.))
-                    .shadow_lg()
-                    .child(content)
-                    .into_any_element(),
+                MenuMaterial::DarkFrosted => {
+                    FrostedGlass::with_appearance(FrostedGlassAppearance::dark())
+                        .id(("context-menu-dark-frosted", state.session_id))
+                        .rounded(px(16.))
+                        .shadow_lg()
+                        .child(content)
+                        .into_any_element()
+                }
+                MenuMaterial::LightFrosted => {
+                    FrostedGlass::with_appearance(FrostedGlassAppearance::light())
+                        .id(("context-menu-light-frosted", state.session_id))
+                        .rounded(px(14.))
+                        .shadow_lg()
+                        .child(content)
+                        .into_any_element()
+                }
                 MenuMaterial::Plain => div()
                     .rounded(px(12.))
                     .border_1()
@@ -124,14 +128,11 @@ impl ContextMenuExample {
                     .into_any_element(),
             })
             .submenu_surface(|state, content, _, _| {
-                GlassPanel::frosted()
+                FrostedGlass::with_appearance(FrostedGlassAppearance::dark())
                     .id((
                         "context-submenu-frosted",
                         state.session_id * 10 + state.depth as u64,
                     ))
-                    .material(GlassMaterial::Thick)
-                    .tint(rgba(0x111a2aee))
-                    .edge_color(rgba(0xffffff20))
                     .rounded(px(13.))
                     .shadow_lg()
                     .child(content)
@@ -141,7 +142,7 @@ impl ContextMenuExample {
                     .rounded(px(11.))
                     .border_1()
                     .border_color(rgb(0x475569))
-                    .bg(rgb(0x1e293b))
+                    .bg(rgb(0x1e294b))
                     .shadow_lg()
                     .child(content)
             })
@@ -189,7 +190,7 @@ fn main() {
         uic::init(cx);
         cx.open_window(WindowOptions::default(), |_, cx| {
             cx.new(|_| ContextMenuExample {
-                material: MenuMaterial::Liquid,
+                material: MenuMaterial::DarkFrosted,
                 last_action: "None",
             })
         })

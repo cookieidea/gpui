@@ -1,6 +1,9 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Entity, IntoElement, Length, Pixels, Render, Window, px, relative};
+use gpui::{
+    AnyElement, App, Entity, IntoElement, Pixels, Render, StyleRefinement, Styled, Window, hsla,
+    px, relative,
+};
 
 use super::ModalAppearance;
 
@@ -36,13 +39,11 @@ pub struct Modal {
     pub(crate) on_cancel: Option<ModalCallback>,
     pub(crate) appearance: Option<ModalAppearance>,
     pub(crate) placement: ModalPlacement,
-    pub(crate) width: Length,
-    pub(crate) max_width: Length,
-    pub(crate) max_height: Length,
     pub(crate) close_on_escape: bool,
     pub(crate) close_on_backdrop: bool,
     pub(crate) ok_on_enter: bool,
     pub(crate) styled: bool,
+    pub(crate) style: StyleRefinement,
 }
 
 impl Modal {
@@ -65,13 +66,20 @@ impl Modal {
             on_cancel: None,
             appearance: None,
             placement: ModalPlacement::Center,
-            width: px(520.).into(),
-            max_width: relative(0.9).into(),
-            max_height: relative(0.85).into(),
             close_on_escape: true,
             close_on_backdrop: true,
             ok_on_enter: true,
             styled: true,
+            style: StyleRefinement::default()
+                .w(px(520.))
+                .max_w(relative(0.9))
+                .max_h(relative(0.85))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(hsla(0., 0., 0., 0.12))
+                .bg(hsla(0., 0., 1., 1.))
+                .text_color(hsla(0., 0., 0.08, 1.))
+                .shadow_lg(),
         }
     }
 
@@ -204,21 +212,6 @@ impl Modal {
         self
     }
 
-    pub fn width(mut self, width: impl Into<Length>) -> Self {
-        self.width = width.into();
-        self
-    }
-
-    pub fn max_width(mut self, width: impl Into<Length>) -> Self {
-        self.max_width = width.into();
-        self
-    }
-
-    pub fn max_height(mut self, height: impl Into<Length>) -> Self {
-        self.max_height = height.into();
-        self
-    }
-
     pub fn close_on_escape(mut self, close: bool) -> Self {
         self.close_on_escape = close;
         self
@@ -241,5 +234,11 @@ impl Modal {
     pub fn unstyled(mut self) -> Self {
         self.styled = false;
         self
+    }
+}
+
+impl Styled for Modal {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }

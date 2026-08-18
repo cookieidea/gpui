@@ -1,7 +1,8 @@
 use gpui::{
     AccessibleAction, App, Background, ColorSpace, CursorStyle, Entity, Hsla, IntoElement,
-    KeyDownEvent, Orientation, RenderOnce, Rgba, Role, Window, black, checkerboard, div, hsla,
-    linear_color_stop, linear_gradient, prelude::*, px, relative,
+    KeyDownEvent, Orientation, Refineable as _, RenderOnce, Rgba, Role, StyleRefinement, Styled,
+    Window, black, checkerboard, div, hsla, linear_color_stop, linear_gradient, prelude::*, px,
+    relative,
 };
 
 use super::{
@@ -13,10 +14,7 @@ use super::{
 pub struct AlphaSliderAppearance {
     pub checker: Hsla,
     pub marker: Hsla,
-    pub border: Hsla,
     pub focus_border: Hsla,
-    pub height: gpui::Pixels,
-    pub radius: gpui::Pixels,
 }
 
 impl Default for AlphaSliderAppearance {
@@ -24,10 +22,7 @@ impl Default for AlphaSliderAppearance {
         Self {
             checker: hsla(0.0, 0.0, 0.45, 0.45),
             marker: hsla(0.0, 0.0, 1.0, 1.0),
-            border: hsla(0.0, 0.0, 0.0, 0.0),
             focus_border: hsla(0.52, 0.85, 0.48, 1.0),
-            height: px(18.0),
-            radius: px(9.0),
         }
     }
 }
@@ -36,6 +31,7 @@ impl Default for AlphaSliderAppearance {
 pub struct AlphaSlider {
     state: Entity<ColorPickerState>,
     appearance: AlphaSliderAppearance,
+    style: StyleRefinement,
 }
 
 impl AlphaSlider {
@@ -43,6 +39,12 @@ impl AlphaSlider {
         Self {
             state: state.clone(),
             appearance: AlphaSliderAppearance::default(),
+            style: StyleRefinement::default()
+                .w_full()
+                .h(px(18.))
+                .rounded(px(9.))
+                .border_1()
+                .border_color(hsla(0., 0., 0., 0.)),
         }
     }
 
@@ -66,7 +68,7 @@ impl RenderOnce for AlphaSlider {
         let increment_state = self.state.clone();
         let decrement_state = self.state.clone();
 
-        div()
+        let mut element = div()
             .id(("color-picker-alpha", self.state.entity_id()))
             .relative()
             .debug_selector(|| "color-picker-alpha".to_string())
@@ -87,12 +89,7 @@ impl RenderOnce for AlphaSlider {
             .on_a11y_action(AccessibleAction::Decrement, move |_, _, cx| {
                 adjust_alpha(&decrement_state, -0.01, cx);
             })
-            .w_full()
-            .h(appearance.height)
             .overflow_hidden()
-            .rounded(appearance.radius)
-            .border_1()
-            .border_color(appearance.border)
             .cursor(CursorStyle::ResizeLeftRight)
             .bg(checkerboard(appearance.checker, 6.0))
             .focus_visible(move |style| style.border_2().border_color(appearance.focus_border))
@@ -100,7 +97,6 @@ impl RenderOnce for AlphaSlider {
                 div()
                     .absolute()
                     .inset_0()
-                    .rounded(appearance.radius)
                     .bg(two_stop_gradient(90.0, transparent, opaque)),
             )
             .child(
@@ -124,7 +120,15 @@ impl RenderOnce for AlphaSlider {
                 })
                 .absolute()
                 .inset_0(),
-            )
+            );
+        element.style().refine(&self.style);
+        element
+    }
+}
+
+impl Styled for AlphaSlider {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 
