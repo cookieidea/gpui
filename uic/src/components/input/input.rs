@@ -103,6 +103,9 @@ impl RenderOnce for Input {
             .child(self.state)
             .children(self.suffix);
         element.style().refine(&self.style);
+        if focused && !disabled {
+            element = element.border_color(appearance.focus_border);
+        }
         element
     }
 }
