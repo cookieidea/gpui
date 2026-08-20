@@ -97,6 +97,7 @@ impl TextLayout {
 pub struct TextInput {
     pub(super) focus_handle: FocusHandle,
     pub(super) content: SharedString,
+    pub(super) committed_content: SharedString,
     pub(super) placeholder: SharedString,
     pub(super) selected_range: Range<usize>,
     pub(super) selection_reversed: bool,
@@ -119,6 +120,7 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
+            committed_content: "".into(),
             placeholder: "".into(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -189,6 +191,7 @@ impl TextInput {
 
     pub fn initial_value(mut self, value: impl Into<SharedString>) -> Self {
         self.content = value.into();
+        self.committed_content = self.content.clone();
         self.selected_range = self.content.len()..self.content.len();
         self
     }
@@ -204,6 +207,7 @@ impl TextInput {
 
     pub fn set_value(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = value.into();
+        self.committed_content = self.content.clone();
         self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
         self.scroll_cursor_pending = true;
@@ -570,8 +574,17 @@ impl TextInput {
         }
     }
 
+    fn emit_committed_change(&mut self, cx: &mut Context<Self>) {
+        if self.content == self.committed_content {
+            return;
+        }
+        self.committed_content = self.content.clone();
+        cx.emit(InputEvent::Change(self.content.clone()));
+    }
+
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.content = "".into();
+        self.committed_content = "".into();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -620,8 +633,11 @@ impl EntityInputHandler for TextInput {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let had_marked_text = self.marked_range.take().is_some();
+        if had_marked_text {
+            self.emit_committed_change(cx);
+        }
     }
 
     fn replace_text_in_range(
@@ -649,7 +665,7 @@ impl EntityInputHandler for TextInput {
         self.marked_range.take();
         self.preferred_x = None;
         self.scroll_cursor_pending = true;
-        cx.emit(InputEvent::Change(self.content.clone()));
+        self.emit_committed_change(cx);
         cx.notify();
     }
 
@@ -688,7 +704,6 @@ impl EntityInputHandler for TextInput {
         self.preferred_x = None;
         self.scroll_cursor_pending = true;
 
-        cx.emit(InputEvent::Change(self.content.clone()));
         cx.notify();
     }
 
@@ -804,8 +819,11 @@ impl Focusable for TextInput {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use gpui::{
-        Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window, px, size,
+        Context, Entity, EntityInputHandler, IntoElement, Render, SharedString, Subscription,
+        TestAppContext, VisualTestContext, Window, px, size,
     };
 
     use super::*;
@@ -814,6 +832,8 @@ mod tests {
     struct TestInput {
         state: Entity<TextInput>,
         rows: Option<usize>,
+        changes: Rc<RefCell<Vec<SharedString>>>,
+        _subscription: Subscription,
     }
 
     impl Render for TestInput {
@@ -827,9 +847,21 @@ mod tests {
         build: impl FnOnce(&mut Context<TextInput>) -> TextInput + 'static,
     ) -> gpui::WindowHandle<TestInput> {
         cx.update(crate::components::input::init);
-        cx.open_window(size(px(220.), px(180.)), move |_, cx| TestInput {
-            state: cx.new(build),
-            rows: None,
+        cx.open_window(size(px(220.), px(180.)), move |_, cx| {
+            let state = cx.new(build);
+            let changes = Rc::new(RefCell::new(Vec::new()));
+            let changes_for_subscription = changes.clone();
+            let subscription = cx.subscribe(&state, move |_, _, event, _| {
+                if let InputEvent::Change(value) = event {
+                    changes_for_subscription.borrow_mut().push(value.clone());
+                }
+            });
+            TestInput {
+                state,
+                rows: None,
+                changes,
+                _subscription: subscription,
+            }
         })
     }
 
@@ -839,9 +871,21 @@ mod tests {
         build: impl FnOnce(&mut Context<TextInput>) -> TextInput + 'static,
     ) -> gpui::WindowHandle<TestInput> {
         cx.update(crate::components::input::init);
-        cx.open_window(size(px(220.), px(180.)), move |_, cx| TestInput {
-            state: cx.new(build),
-            rows: Some(rows),
+        cx.open_window(size(px(220.), px(180.)), move |_, cx| {
+            let state = cx.new(build);
+            let changes = Rc::new(RefCell::new(Vec::new()));
+            let changes_for_subscription = changes.clone();
+            let subscription = cx.subscribe(&state, move |_, _, event, _| {
+                if let InputEvent::Change(value) = event {
+                    changes_for_subscription.borrow_mut().push(value.clone());
+                }
+            });
+            TestInput {
+                state,
+                rows: Some(rows),
+                changes,
+                _subscription: subscription,
+            }
         })
     }
 
@@ -1057,6 +1101,114 @@ mod tests {
         window
             .update(&mut visual.cx, |view, _, cx| {
                 assert_eq!(view.state.read(cx).value().as_ref(), "first");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ime_preedit_is_visible_without_emitting_change(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| TextInput::new(cx).initial_value("prefix "));
+        let mut visual = draw_and_focus(&window, cx);
+
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                view.state.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                    input.replace_and_mark_text_in_range(None, "你", None, window, cx);
+                });
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                let input = view.state.read(cx);
+                assert_eq!(input.value().as_ref(), "prefix 你");
+                assert_eq!(input.marked_range, Some(7..10));
+                assert!(view.changes.borrow().is_empty());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ime_candidate_commit_emits_one_change(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| TextInput::new(cx).initial_value("prefix "));
+        let mut visual = draw_and_focus(&window, cx);
+
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                view.state.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                    input.replace_and_mark_text_in_range(None, "你", None, window, cx);
+                    input.replace_text_in_range(None, "你", window, cx);
+                    input.unmark_text(window, cx);
+                });
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, _| {
+                assert_eq!(
+                    view.changes.borrow().as_slice(),
+                    &[SharedString::from("prefix 你")]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn ime_unmark_commits_when_the_platform_does_not_insert_again(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| TextInput::new(cx).initial_value("prefix "));
+        let mut visual = draw_and_focus(&window, cx);
+
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                view.state.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "かな", None, window, cx);
+                    input.unmark_text(window, cx);
+                });
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, _| {
+                assert_eq!(
+                    view.changes.borrow().as_slice(),
+                    &[SharedString::from("prefix かな")]
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn cancelling_ime_preedit_does_not_emit_a_change(cx: &mut TestAppContext) {
+        let window = open_input(cx, |cx| TextInput::new(cx).initial_value("prefix "));
+        let mut visual = draw_and_focus(&window, cx);
+
+        window
+            .update(&mut visual.cx, |view, window, cx| {
+                view.state.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                    input.replace_text_in_range(None, "", window, cx);
+                });
+            })
+            .unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear();
+        });
+
+        window
+            .update(&mut visual.cx, |view, _, cx| {
+                assert_eq!(view.state.read(cx).value().as_ref(), "prefix ");
+                assert!(view.changes.borrow().is_empty());
             })
             .unwrap();
     }

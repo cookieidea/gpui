@@ -110,6 +110,10 @@ pub enum InputMode {
 
 #[derive(Clone, Debug)]
 pub enum InputEvent {
+    /// The committed value changed.
+    ///
+    /// IME pre-edit updates are rendered by [`TextInput`] but do not emit this
+    /// event until the composition is committed.
     Change(SharedString),
     Submit(SharedString),
 }
