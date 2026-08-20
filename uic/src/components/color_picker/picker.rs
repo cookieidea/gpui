@@ -65,7 +65,7 @@ impl ColorPicker {
         let hue = Hsva::new(hsva.h, 1.0, 1.0, 1.0).to_rgba();
         let marker_offset = appearance.marker_size * -0.5;
 
-        let area = div()
+        div()
             .id(("color-picker-sv-control", self.state.entity_id()))
             .relative()
             .debug_selector(|| "color-picker-sv".to_string())
@@ -123,8 +123,7 @@ impl ColorPicker {
                 })
                 .absolute()
                 .inset_0(),
-            );
-        area
+            )
     }
 
     fn hue_track(&self, hsva: Hsva, capture: CaptureToken, focus: FocusHandle) -> impl IntoElement {
