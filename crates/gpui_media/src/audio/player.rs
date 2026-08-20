@@ -147,6 +147,11 @@ impl AudioPlayer {
                             cx,
                         );
                     }
+                    AudioWorkerEvent::Paused => {
+                        player.play_when_ready = false;
+                        player.refresh_timeline(cx);
+                        player.set_state(PlaybackState::Paused, cx);
+                    }
                     AudioWorkerEvent::Ended => {
                         player.play_when_ready = false;
                         player.refresh_timeline(cx);

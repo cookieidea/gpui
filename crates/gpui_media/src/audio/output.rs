@@ -8,7 +8,8 @@ use std::{
 };
 
 use cpal::{
-    FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig,
+    FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, StreamError,
+    SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 
@@ -162,21 +163,27 @@ impl PcmOutput {
         self.shared.buffered_samples.load(Ordering::Acquire) == 0
     }
 
-    pub(super) fn check_error(&self) -> MediaResult<()> {
+    pub(super) fn take_status(&self) -> MediaResult<OutputStatus> {
         let error = self
             .shared
             .stream_error
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clone();
+            .take();
         match error {
-            Some(error) => Err(audio_output_message(
+            None => Ok(OutputStatus::Ok),
+            Some(OutputFailure::Interrupted) => Ok(OutputStatus::Interrupted),
+            Some(OutputFailure::Fatal(error)) => Err(audio_output_message(
                 format!("the audio output stream failed: {error}"),
                 MediaRecovery::Retry,
             )),
-            None => Ok(()),
         }
     }
+}
+
+pub(super) enum OutputStatus {
+    Ok,
+    Interrupted,
 }
 
 struct AudioQueue {
@@ -187,7 +194,7 @@ struct AudioQueue {
     volume_bits: AtomicU32,
     muted: AtomicBool,
     playing: AtomicBool,
-    stream_error: Mutex<Option<String>>,
+    stream_error: Mutex<Option<OutputFailure>>,
 }
 
 impl AudioQueue {
@@ -403,11 +410,29 @@ where
             config,
             move |output: &mut [T], _| shared.write(output),
             move |error| {
-                log::error!("gpui_media audio output stream failed: {error}");
+                let message = error.to_string();
+                let failure = match classify_stream_error(error) {
+                    // CPAL's ALSA backend prepares or recovers the PCM stream after reporting an
+                    // xrun. Rebuilding it here loses buffered PCM and forces a decoder seek,
+                    // which is both unnecessary and harmful for codecs such as MP3 that need
+                    // preceding bit-reservoir frames.
+                    None => {
+                        log::warn!("audio output xrun recovered by the backend: {message}");
+                        return;
+                    }
+                    Some(OutputFailure::Interrupted) => {
+                        log::warn!("audio output interrupted: {message}");
+                        OutputFailure::Interrupted
+                    }
+                    Some(OutputFailure::Fatal(error)) => {
+                        log::error!("gpui_media audio output stream failed: {message}");
+                        OutputFailure::Fatal(error)
+                    }
+                };
                 *error_state
                     .stream_error
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(failure);
             },
             None,
         )
@@ -434,6 +459,21 @@ fn audio_output_error(
     )
 }
 
+enum OutputFailure {
+    Interrupted,
+    Fatal(String),
+}
+
+fn classify_stream_error(error: StreamError) -> Option<OutputFailure> {
+    match error {
+        StreamError::BufferUnderrun => None,
+        StreamError::DeviceNotAvailable | StreamError::StreamInvalidated => {
+            Some(OutputFailure::Interrupted)
+        }
+        StreamError::BackendSpecific { .. } => Some(OutputFailure::Fatal(error.to_string())),
+    }
+}
+
 fn audio_output_message(
     message: impl Into<gpui::SharedString>,
     recovery: MediaRecovery,
@@ -445,7 +485,9 @@ fn audio_output_message(
 mod tests {
     use std::{sync::atomic::Ordering, time::Duration};
 
-    use super::{AudioQueue, InterleavedResampler};
+    use cpal::StreamError;
+
+    use super::{AudioQueue, InterleavedResampler, OutputFailure, classify_stream_error};
 
     #[test]
     fn paused_callback_does_not_consume_pcm() {
@@ -467,5 +509,18 @@ mod tests {
         let mut output = resampler.push(&vec![0.0; 44_100]);
         output.extend(resampler.flush());
         assert_eq!(output.len(), 48_000 * 2);
+    }
+
+    #[test]
+    fn recovered_xrun_does_not_invalidate_the_output_stream() {
+        assert!(classify_stream_error(StreamError::BufferUnderrun).is_none());
+        assert!(matches!(
+            classify_stream_error(StreamError::DeviceNotAvailable),
+            Some(OutputFailure::Interrupted)
+        ));
+        assert!(matches!(
+            classify_stream_error(StreamError::StreamInvalidated),
+            Some(OutputFailure::Interrupted)
+        ));
     }
 }

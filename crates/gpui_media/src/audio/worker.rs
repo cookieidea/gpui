@@ -19,7 +19,7 @@ use symphonia::core::{
 };
 
 use super::{
-    output::{PcmOutput, PcmOutputControl},
+    output::{OutputStatus, PcmOutput, PcmOutputControl},
     player::AudioInfo,
     source::AudioSource,
 };
@@ -31,6 +31,7 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 pub(super) enum AudioWorkerEvent {
     Ready(AudioInfo),
+    Paused,
     Ended,
     Error(Arc<MediaError>),
 }
@@ -249,6 +250,9 @@ fn playback_worker(
     let mut samples = Vec::new();
     let mut end_of_stream = false;
     let mut ended_emitted = false;
+    let mut last_format = None::<(u16, u32)>;
+    let mut reopen_output = false;
+    let mut resume_after_interrupt = None::<Duration>;
     loop {
         if desired.shutdown.load(Ordering::Acquire) {
             return Ok(());
@@ -272,6 +276,9 @@ fn playback_worker(
                         .lock()
                         .unwrap_or_else(|error| error.into_inner()) =
                         PlaybackTimeline::new(position, duration, opened.seekable);
+                    if reopen_output {
+                        resume_after_interrupt = Some(position);
+                    }
                     end_of_stream = false;
                     ended_emitted = false;
                 }
@@ -279,14 +286,90 @@ fn playback_worker(
             }
         }
 
-        if let Some(output) = output.as_ref() {
-            output.check_error()?;
-            update_timeline(
-                output.position(),
-                duration,
-                opened.seekable,
-                shared_timeline,
-            );
+        if let Some(current) = output.as_ref() {
+            match current.take_status()? {
+                OutputStatus::Ok => {
+                    update_timeline(
+                        current.position(),
+                        duration,
+                        opened.seekable,
+                        shared_timeline,
+                    );
+                }
+                OutputStatus::Interrupted => {
+                    let position = current.position();
+                    resume_after_interrupt = Some(position);
+                    reopen_output = true;
+                    current.control().set_playing(false);
+                    update_timeline(position, duration, opened.seekable, shared_timeline);
+                    if desired.playing.swap(false, Ordering::AcqRel) {
+                        let _ = events.send_blocking(AudioWorkerEvent::Paused);
+                    }
+                }
+            }
+        }
+
+        if reopen_output {
+            output = None;
+            *shared_output
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            if !desired.playing.load(Ordering::Acquire) {
+                match commands.recv_timeout(WORKER_POLL_INTERVAL) {
+                    Ok(AudioCommand::Seek(position, mode)) => {
+                        seek(&mut *format, &mut *decoder, None, position, mode, track_id)?;
+                        desired.ready.store(false, Ordering::Release);
+                        resume_after_interrupt = Some(position);
+                        *shared_timeline
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) =
+                            PlaybackTimeline::new(position, duration, opened.seekable);
+                        end_of_stream = false;
+                        ended_emitted = false;
+                    }
+                    Ok(AudioCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Ok(());
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                continue;
+            }
+            if let Some((channels, sample_rate)) = last_format {
+                let resume_at = resume_after_interrupt.unwrap_or_else(|| {
+                    shared_timeline
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .position()
+                });
+                match reopen_pcm_output(channels, sample_rate, desired, shared_output) {
+                    Ok(mut opened_output) => {
+                        opened_output.control().set_playing(false);
+                        if let Err(error) = seek(
+                            &mut *format,
+                            &mut *decoder,
+                            Some(&mut opened_output),
+                            resume_at,
+                            SeekMode::Accurate,
+                            track_id,
+                        ) {
+                            log::warn!("unable to restore audio position after interrupt: {error}");
+                            opened_output.reset(resume_at);
+                        }
+                        desired.ready.store(false, Ordering::Release);
+                        opened_output.control().set_playing(true);
+                        output = Some(opened_output);
+                        reopen_output = false;
+                        resume_after_interrupt = None;
+                        end_of_stream = false;
+                        ended_emitted = false;
+                    }
+                    Err(error) => {
+                        log::warn!("unable to reopen audio output after interrupt: {error}");
+                        desired.playing.store(false, Ordering::Release);
+                        let _ = events.send_blocking(AudioWorkerEvent::Paused);
+                    }
+                }
+            }
         }
 
         if end_of_stream {
@@ -390,6 +473,7 @@ fn playback_worker(
             )
         })?;
         let sample_rate = decoded.spec().rate();
+        last_format = Some((channels, sample_rate));
         if let Some(output) = output.as_ref()
             && !output.matches_format(channels, sample_rate)
         {
@@ -400,14 +484,9 @@ fn playback_worker(
             ));
         }
         if output.is_none() {
-            let opened_output = PcmOutput::open(channels, sample_rate)?;
-            opened_output.set_volume(f64::from_bits(desired.volume.load(Ordering::Acquire)));
-            opened_output.set_muted(desired.muted.load(Ordering::Acquire));
-            opened_output.start()?;
-            *shared_output
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(opened_output.control());
+            let opened_output = reopen_pcm_output(channels, sample_rate, desired, shared_output)?;
             output = Some(opened_output);
+            reopen_output = false;
         }
         samples.resize(decoded.samples_interleaved(), f32::MID);
         decoded.copy_to_slice_interleaved(&mut samples);
@@ -446,6 +525,25 @@ fn seek(
         output.reset(position);
     }
     Ok(())
+}
+
+fn reopen_pcm_output(
+    channels: u16,
+    sample_rate: u32,
+    desired: &DesiredState,
+    shared_output: &Arc<Mutex<Option<PcmOutputControl>>>,
+) -> MediaResult<PcmOutput> {
+    let opened = PcmOutput::open(channels, sample_rate)?;
+    opened.set_volume(f64::from_bits(desired.volume.load(Ordering::Acquire)));
+    opened.set_muted(desired.muted.load(Ordering::Acquire));
+    opened.start()?;
+    opened.control().set_playing(
+        desired.ready.load(Ordering::Acquire) && desired.playing.load(Ordering::Acquire),
+    );
+    *shared_output
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(opened.control());
+    Ok(opened)
 }
 
 fn apply_desired_output(output: &PcmOutput, desired: &DesiredState) {

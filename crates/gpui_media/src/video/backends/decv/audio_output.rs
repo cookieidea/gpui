@@ -6,16 +6,19 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cpal::{
-    FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig,
+    FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig, StreamError,
+    SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use decv::{AudioFormat, DecodedAudioFrame, MediaTime};
 
 use crate::{MediaError, MediaErrorKind, MediaRecovery, MediaResult};
+
+const OUTPUT_REOPEN_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(super) struct AudioOutput {
     stream: Stream,
@@ -24,6 +27,8 @@ pub(super) struct AudioOutput {
     device_channels: u16,
     device_sample_rate: u32,
     resampler: InterleavedResampler,
+    interrupted: bool,
+    reopen_after: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -53,21 +58,8 @@ impl AudioOutput {
                 MediaRecovery::None,
             )
         })?;
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or_else(|| {
-            audio_output_message(
-                "the default audio host does not expose an output device",
-                MediaRecovery::Retry,
-            )
-        })?;
-        let supported = device.default_output_config().map_err(|error| {
-            audio_output_error("failed to query the default audio output format", error)
-        })?;
-        let config: StreamConfig = supported.clone().into();
-        let device_channels = config.channels;
-        let device_sample_rate = config.sample_rate;
         let shared = Arc::new(AudioQueue::new());
-        let stream = build_stream(&device, &supported, &config, shared.clone())?;
+        let (stream, device_channels, device_sample_rate) = open_default_stream(shared.clone())?;
         let resampler = InterleavedResampler::new(
             format.channel_layout.channels(),
             format.sample_rate,
@@ -81,11 +73,20 @@ impl AudioOutput {
             device_channels,
             device_sample_rate,
             resampler,
+            interrupted: false,
+            reopen_after: None,
         })
     }
 
-    pub(super) fn play(&self) -> MediaResult<()> {
+    pub(super) fn play(&mut self) -> MediaResult<()> {
         self.shared.playing.store(true, Ordering::Release);
+        if let Err(error) = self.check_error() {
+            self.shared.playing.store(false, Ordering::Release);
+            return Err(error);
+        }
+        if self.interrupted {
+            return Ok(());
+        }
         if let Err(error) = self.stream.play() {
             self.shared.playing.store(false, Ordering::Release);
             return Err(audio_output_error("failed to resume audio output", error));
@@ -93,8 +94,12 @@ impl AudioOutput {
         Ok(())
     }
 
-    pub(super) fn pause(&self) -> MediaResult<()> {
+    pub(super) fn pause(&mut self) -> MediaResult<()> {
         self.shared.playing.store(false, Ordering::Release);
+        self.check_error()?;
+        if self.interrupted {
+            return Ok(());
+        }
         self.stream
             .pause()
             .map_err(|error| audio_output_error("failed to pause audio output", error))
@@ -194,20 +199,70 @@ impl AudioOutput {
         self.shared.buffered_samples.load(Ordering::Acquire) == 0
     }
 
-    pub(super) fn check_error(&self) -> MediaResult<()> {
-        let error = self
+    pub(super) fn check_error(&mut self) -> MediaResult<()> {
+        let failure = self
             .shared
             .stream_error
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        match error {
-            Some(error) => Err(audio_output_message(
+            .take();
+        match failure {
+            Some(OutputFailure::Interrupted) => self.interrupted = true,
+            Some(OutputFailure::Fatal(error)) => Err(audio_output_message(
                 format!("the audio output stream failed: {error}"),
                 MediaRecovery::Retry,
-            )),
-            None => Ok(()),
+            ))?,
+            None => {}
         }
+        if !self.interrupted
+            || self
+                .reopen_after
+                .is_some_and(|retry_at| Instant::now() < retry_at)
+        {
+            return Ok(());
+        }
+        match self.reopen_stream() {
+            Ok(()) => {
+                self.interrupted = false;
+                self.reopen_after = None;
+                Ok(())
+            }
+            Err(ReopenError::Retry(error)) => {
+                log::warn!("unable to reopen decv audio output yet: {error}");
+                self.reopen_after = Some(Instant::now() + OUTPUT_REOPEN_RETRY_INTERVAL);
+                Ok(())
+            }
+            Err(ReopenError::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn reopen_stream(&mut self) -> Result<(), ReopenError> {
+        let (stream, device_channels, device_sample_rate) =
+            open_default_stream(self.shared.clone()).map_err(ReopenError::Retry)?;
+        if device_channels != self.device_channels || device_sample_rate != self.device_sample_rate
+        {
+            return Err(ReopenError::Fatal(audio_output_message(
+                format!(
+                    "the default audio output format changed from {} Hz/{} channels to {} Hz/{} channels",
+                    self.device_sample_rate,
+                    self.device_channels,
+                    device_sample_rate,
+                    device_channels,
+                ),
+                MediaRecovery::Retry,
+            )));
+        }
+        if self.shared.playing.load(Ordering::Acquire) {
+            stream
+                .play()
+                .map_err(|error| {
+                    audio_output_error("failed to resume reopened audio output", error)
+                })
+                .map_err(ReopenError::Retry)?;
+        }
+        self.stream = stream;
+        log::info!("reopened the decv audio output after device interruption");
+        Ok(())
     }
 }
 
@@ -219,7 +274,7 @@ struct AudioQueue {
     volume_bits: AtomicU32,
     muted: AtomicBool,
     playing: AtomicBool,
-    stream_error: Mutex<Option<String>>,
+    stream_error: Mutex<Option<OutputFailure>>,
 }
 
 impl AudioQueue {
@@ -433,6 +488,24 @@ fn build_stream(
     }
 }
 
+fn open_default_stream(shared: Arc<AudioQueue>) -> MediaResult<(Stream, u16, u32)> {
+    let host = cpal::default_host();
+    let device = host.default_output_device().ok_or_else(|| {
+        audio_output_message(
+            "the default audio host does not expose an output device",
+            MediaRecovery::Retry,
+        )
+    })?;
+    let supported = device.default_output_config().map_err(|error| {
+        audio_output_error("failed to query the default audio output format", error)
+    })?;
+    let config: StreamConfig = supported.clone().into();
+    let channels = config.channels;
+    let sample_rate = config.sample_rate;
+    let stream = build_stream(&device, &supported, &config, shared)?;
+    Ok((stream, channels, sample_rate))
+}
+
 fn build_typed_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -447,15 +520,50 @@ where
             config,
             move |output: &mut [T], _| shared.write(output),
             move |error| {
-                log::error!("gpui_media decv audio output stream failed: {error}");
+                let message = error.to_string();
+                let failure = match classify_stream_error(error) {
+                    None => {
+                        // CPAL's ALSA backend has already recovered the stream at this point.
+                        log::warn!("decv audio output xrun recovered by the backend: {message}");
+                        return;
+                    }
+                    Some(OutputFailure::Interrupted) => {
+                        log::warn!("decv audio output interrupted: {message}");
+                        OutputFailure::Interrupted
+                    }
+                    Some(OutputFailure::Fatal(error)) => {
+                        log::error!("gpui_media decv audio output stream failed: {message}");
+                        OutputFailure::Fatal(error)
+                    }
+                };
                 *error_state
                     .stream_error
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(failure);
             },
             None,
         )
         .map_err(|error| audio_output_error("failed to build the audio output stream", error))
+}
+
+enum OutputFailure {
+    Interrupted,
+    Fatal(String),
+}
+
+enum ReopenError {
+    Retry(MediaError),
+    Fatal(MediaError),
+}
+
+fn classify_stream_error(error: StreamError) -> Option<OutputFailure> {
+    match error {
+        StreamError::BufferUnderrun => None,
+        StreamError::DeviceNotAvailable | StreamError::StreamInvalidated => {
+            Some(OutputFailure::Interrupted)
+        }
+        StreamError::BackendSpecific { .. } => Some(OutputFailure::Fatal(error.to_string())),
+    }
 }
 
 fn frames_before_minimum(
@@ -516,8 +624,11 @@ fn audio_output_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioQueue, InterleavedResampler};
     use std::{sync::atomic::Ordering, time::Duration};
+
+    use cpal::StreamError;
+
+    use super::{AudioQueue, InterleavedResampler, OutputFailure, classify_stream_error};
 
     #[test]
     fn callback_clock_advances_only_for_real_pcm() {
@@ -532,6 +643,19 @@ mod tests {
         queue.reset(Duration::from_secs(3));
         assert_eq!(queue.consumed_samples.load(Ordering::Acquire), 0);
         assert_eq!(queue.buffered_samples.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn recovered_xrun_does_not_stop_video_playback() {
+        assert!(classify_stream_error(StreamError::BufferUnderrun).is_none());
+        assert!(matches!(
+            classify_stream_error(StreamError::DeviceNotAvailable),
+            Some(OutputFailure::Interrupted)
+        ));
+        assert!(matches!(
+            classify_stream_error(StreamError::StreamInvalidated),
+            Some(OutputFailure::Interrupted)
+        ));
     }
 
     #[test]

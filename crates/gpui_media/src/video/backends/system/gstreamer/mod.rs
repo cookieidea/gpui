@@ -56,6 +56,7 @@ pub(crate) struct GstreamerPlayback {
     appsink: gst_app::AppSink,
     bus: gst::Bus,
     bus_shutdown: Arc<AtomicBool>,
+    play_requested: Arc<AtomicBool>,
     bus_thread: Option<JoinHandle<()>>,
     container_duration: Option<Duration>,
     output: MediaOutputSink,
@@ -183,6 +184,8 @@ impl GstreamerPlayback {
         let playbin_for_bus = playbin.clone();
         let bus_shutdown = Arc::new(AtomicBool::new(false));
         let bus_shutdown_for_thread = bus_shutdown.clone();
+        let play_requested = Arc::new(AtomicBool::new(false));
+        let play_requested_for_bus = play_requested.clone();
         #[cfg(target_os = "linux")]
         let producer_drm_device_for_bus = producer_drm_device;
         let output_for_bus = output.clone();
@@ -248,10 +251,27 @@ impl GstreamerPlayback {
                             replace_selected_subtitle(&selected_subtitle_for_bus, &info);
                             Some(MediaBackendEvent::MediaInfoChanged(info))
                         }
-                        gst::MessageView::Eos(..) => Some(MediaBackendEvent::Ended),
-                        gst::MessageView::Error(error) => Some(MediaBackendEvent::Error(Arc::new(
-                            media_error_from_gstreamer_message(error, &source_for_bus),
-                        ))),
+                        gst::MessageView::Eos(..) => {
+                            play_requested_for_bus.store(false, Ordering::Release);
+                            Some(MediaBackendEvent::Ended)
+                        }
+                        gst::MessageView::ClockLost(..)
+                            if play_requested_for_bus.load(Ordering::Acquire) =>
+                        {
+                            match recover_lost_clock(&playbin_for_bus) {
+                                Ok(()) => None,
+                                Err(error) => {
+                                    play_requested_for_bus.store(false, Ordering::Release);
+                                    Some(MediaBackendEvent::Error(Arc::new(error)))
+                                }
+                            }
+                        }
+                        gst::MessageView::Error(error) => {
+                            play_requested_for_bus.store(false, Ordering::Release);
+                            Some(MediaBackendEvent::Error(Arc::new(
+                                media_error_from_gstreamer_message(error, &source_for_bus),
+                            )))
+                        }
                         _ => None,
                     };
 
@@ -270,6 +290,7 @@ impl GstreamerPlayback {
             appsink,
             bus,
             bus_shutdown,
+            play_requested,
             bus_thread: Some(bus_thread),
             container_duration,
             output,
@@ -280,13 +301,20 @@ impl GstreamerPlayback {
     }
 
     pub fn play(&self) -> MediaResult<()> {
-        self.playbin
+        self.play_requested.store(true, Ordering::Release);
+        let result = self
+            .playbin
             .set_state(gst::State::Playing)
             .map(|_| ())
-            .map_err(|error| gst_backend_error("failed to start playback", error))
+            .map_err(|error| gst_backend_error("failed to start playback", error));
+        if result.is_err() {
+            self.play_requested.store(false, Ordering::Release);
+        }
+        result
     }
 
     pub fn pause(&self) -> MediaResult<()> {
+        self.play_requested.store(false, Ordering::Release);
         self.playbin
             .set_state(gst::State::Paused)
             .map(|_| ())
@@ -294,6 +322,7 @@ impl GstreamerPlayback {
     }
 
     pub fn reload(&self, autoplay: bool) -> MediaResult<()> {
+        self.play_requested.store(false, Ordering::Release);
         self.playbin
             .set_state(gst::State::Null)
             .map_err(|error| gst_backend_error("failed to reset playback pipeline", error))?;
@@ -302,10 +331,15 @@ impl GstreamerPlayback {
         } else {
             gst::State::Paused
         };
-        self.playbin
+        let result = self
+            .playbin
             .set_state(target)
             .map(|_| ())
-            .map_err(|error| gst_backend_error("failed to reload playback pipeline", error))
+            .map_err(|error| gst_backend_error("failed to reload playback pipeline", error));
+        if result.is_ok() {
+            self.play_requested.store(autoplay, Ordering::Release);
+        }
+        result
     }
 
     pub fn timeline(&self) -> PlaybackTimeline {
@@ -486,6 +520,17 @@ impl GstreamerPlayback {
         }
         result
     }
+}
+
+fn recover_lost_clock(playbin: &gst::Element) -> MediaResult<()> {
+    log::warn!("GStreamer playback clock was lost; selecting a new clock");
+    playbin.set_state(gst::State::Paused).map_err(|error| {
+        gst_backend_error("failed to pause after losing the playback clock", error)
+    })?;
+    playbin
+        .set_state(gst::State::Playing)
+        .map(|_| ())
+        .map_err(|error| gst_backend_error("failed to resume with a new playback clock", error))
 }
 
 fn replace_media_info(target: &RwLock<Option<Arc<MediaInfo>>>, info: Arc<MediaInfo>) {
@@ -954,6 +999,7 @@ fn buffering_percent(percent: i32) -> u8 {
 
 impl Drop for GstreamerPlayback {
     fn drop(&mut self) {
+        self.play_requested.store(false, Ordering::Release);
         self.bus_shutdown.store(true, Ordering::Release);
         self.bus.set_flushing(true);
         let _ = self.playbin.set_state(gst::State::Null);

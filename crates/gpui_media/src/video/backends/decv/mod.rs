@@ -1099,7 +1099,7 @@ fn playback_worker(
                     audio_clock,
                     Instant::now(),
                 );
-                if playing && let Some(audio) = audio.as_ref() {
+                if playing && let Some(audio) = audio.as_mut() {
                     audio.play()?;
                 }
                 output.emit(MediaBackendEvent::Ready);
@@ -1274,7 +1274,7 @@ fn playback_worker(
             }
             if !ended {
                 ended = true;
-                if let Some(audio) = audio.as_ref() {
+                if let Some(audio) = audio.as_mut() {
                     audio.pause()?;
                 }
                 playing = false;
@@ -1431,7 +1431,7 @@ fn playback_worker(
                 audio_clock,
                 Instant::now(),
             );
-            if playing && let Some(audio) = audio.as_ref() {
+            if playing && let Some(audio) = audio.as_mut() {
                 audio.play()?;
             }
             output.emit(MediaBackendEvent::Ready);
@@ -1974,11 +1974,11 @@ impl<'demuxer> DecvAudioPlayback<'demuxer> {
         Ok(())
     }
 
-    fn play(&self) -> MediaResult<()> {
+    fn play(&mut self) -> MediaResult<()> {
         self.output.play()
     }
 
-    fn pause(&self) -> MediaResult<()> {
+    fn pause(&mut self) -> MediaResult<()> {
         self.output.pause()
     }
 
