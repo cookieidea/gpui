@@ -6059,6 +6059,14 @@ impl Window {
         self.platform_window.minimize();
     }
 
+    /// Hide or show this window without destroying it.
+    ///
+    /// `false` unmaps the platform surface so the window leaves the screen.
+    /// `true` maps it again. Unlike minimize, this does not keep a taskbar tile.
+    pub fn set_mapped(&self, mapped: bool) -> anyhow::Result<()> {
+        self.platform_window.set_mapped(mapped)
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();

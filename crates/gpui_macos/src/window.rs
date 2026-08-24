@@ -1616,6 +1616,18 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn set_mapped(&self, mapped: bool) -> anyhow::Result<()> {
+        let window = self.0.lock().native_window;
+        unsafe {
+            if mapped {
+                window.makeKeyAndOrderFront_(nil);
+            } else {
+                let _: () = msg_send![window, orderOut: nil];
+            }
+        }
+        Ok(())
+    }
+
     fn zoom(&self) {
         let this = self.0.lock();
         let window = this.native_window;
