@@ -1,13 +1,18 @@
 mod cosmic_text_system;
+mod offscreen_renderer;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;
 
 pub use cosmic_text_system::*;
+pub use offscreen_renderer::*;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;
-pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+pub use wgpu_renderer::{
+    GpuContext, WgpuExternalRenderTarget, WgpuExternalRendererConfig, WgpuRenderer,
+    WgpuSurfaceConfig,
+};
 
 #[cfg(test)]
 mod tests {

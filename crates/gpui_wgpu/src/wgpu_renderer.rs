@@ -399,7 +399,7 @@ struct WgpuResources {
     instance: wgpu::Instance,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     pipelines: WgpuPipelines,
     effect_pipelines: HashMap<u64, wgpu::RenderPipeline>,
     failed_effect_pipelines: HashSet<u64>,
@@ -478,6 +478,20 @@ pub struct WgpuRenderer {
     needs_redraw: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct WgpuExternalRendererConfig {
+    pub size: Size<DevicePixels>,
+    pub format: wgpu::TextureFormat,
+    pub alpha_mode: wgpu::CompositeAlphaMode,
+    pub target_usage: wgpu::TextureUsages,
+}
+
+pub struct WgpuExternalRenderTarget<'a> {
+    pub texture: &'a wgpu::Texture,
+    pub view: &'a wgpu::TextureView,
+    pub command_encoder: &'a mut wgpu::CommandEncoder,
+}
+
 impl WgpuRenderer {
     fn resources(&self) -> &WgpuResources {
         self.resources
@@ -489,6 +503,48 @@ impl WgpuRenderer {
         self.resources
             .as_mut()
             .expect("GPU resources not available")
+    }
+
+    pub fn new_external(
+        context: &WgpuContext,
+        config: WgpuExternalRendererConfig,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config
+                .target_usage
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT),
+            "external GPUI target must support RENDER_ATTACHMENT"
+        );
+        let max_texture_size = context.device.limits().max_texture_dimension_2d;
+        let width = (config.size.width.0.max(1) as u32).min(max_texture_size);
+        let height = (config.size.height.0.max(1) as u32).min(max_texture_size);
+        // Backdrop copies currently assume a surface-local texture origin. Keep them
+        // disabled for embedded viewports until copy origins are carried through the
+        // backdrop pipeline as well.
+        let backdrop_blur_supported = false;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: config.target_usage,
+            format: config.format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: config.alpha_mode,
+            view_formats: Vec::new(),
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let atlas = Arc::new(WgpuAtlas::from_context(context));
+        Self::new_for_target(
+            None,
+            context,
+            None,
+            surface_config,
+            None,
+            atlas,
+            config.alpha_mode,
+            config.alpha_mode,
+            backdrop_blur_supported,
+        )
     }
 
     /// Creates a new WgpuRenderer from raw window handles.
@@ -678,8 +734,7 @@ impl WgpuRenderer {
             opaque_alpha_mode
         };
 
-        let device = Arc::clone(&context.device);
-        let max_texture_size = device.limits().max_texture_dimension_2d;
+        let max_texture_size = context.device.limits().max_texture_dimension_2d;
 
         let requested_width = config.size.width.0 as u32;
         let requested_height = config.size.height.0 as u32;
@@ -718,6 +773,34 @@ impl WgpuRenderer {
         // that this adapter can successfully configure this surface.
         surface.configure(&context.device, &surface_config);
 
+        Self::new_for_target(
+            gpu_context,
+            context,
+            Some(surface),
+            surface_config,
+            compositor_gpu,
+            atlas,
+            transparent_alpha_mode,
+            opaque_alpha_mode,
+            backdrop_blur_supported,
+        )
+    }
+
+    fn new_for_target(
+        gpu_context: Option<GpuContext>,
+        context: &WgpuContext,
+        surface: Option<wgpu::Surface<'static>>,
+        surface_config: wgpu::SurfaceConfiguration,
+        compositor_gpu: Option<CompositorGpuHint>,
+        atlas: Arc<WgpuAtlas>,
+        transparent_alpha_mode: wgpu::CompositeAlphaMode,
+        opaque_alpha_mode: wgpu::CompositeAlphaMode,
+        backdrop_blur_supported: bool,
+    ) -> anyhow::Result<Self> {
+        let surface_format = surface_config.format;
+        let alpha_mode = surface_config.alpha_mode;
+        let device = Arc::clone(&context.device);
+        let max_texture_size = device.limits().max_texture_dimension_2d;
         let queue = Arc::clone(&context.queue);
         let dual_source_blending = context.supports_dual_source_blending();
         let dma_buf_import = context.supports_dma_buf_import();
@@ -1777,9 +1860,9 @@ impl WgpuRenderer {
                 texture.destroy();
             }
 
-            resources
-                .surface
-                .configure(&resources.device, &surface_config);
+            if let Some(surface) = &resources.surface {
+                surface.configure(&resources.device, &surface_config);
+            }
 
             // Invalidate intermediate textures - they will be lazily recreated
             // in draw() after we confirm the surface is healthy. This avoids
@@ -1877,9 +1960,9 @@ impl WgpuRenderer {
             let Some(resources) = self.resources.as_mut() else {
                 return;
             };
-            resources
-                .surface
-                .configure(&resources.device, &surface_config);
+            if let Some(surface) = &resources.surface {
+                surface.configure(&resources.device, &surface_config);
+            }
             resources.pipelines = Self::create_pipelines(
                 &resources.device,
                 &resources.bind_group_layouts,
@@ -1977,7 +2060,13 @@ impl WgpuRenderer {
         self.ensure_effect_pipelines(scene);
         self.ensure_backdrop_effect_pipelines(scene);
 
-        let frame = match self.resources().surface.get_current_texture() {
+        let frame = match self
+            .resources()
+            .surface
+            .as_ref()
+            .expect("draw() requires a surface-backed renderer; use encode_external()")
+            .get_current_texture()
+        {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 // Textures must be destroyed before the surface can be reconfigured.
@@ -1986,6 +2075,8 @@ impl WgpuRenderer {
                 let resources = self.resources_mut();
                 resources
                     .surface
+                    .as_ref()
+                    .expect("surface-backed renderer")
                     .configure(&resources.device, &surface_config);
                 return false;
             }
@@ -1994,6 +2085,8 @@ impl WgpuRenderer {
                 let resources = self.resources_mut();
                 resources
                     .surface
+                    .as_ref()
+                    .expect("surface-backed renderer")
                     .configure(&resources.device, &surface_config);
                 return false;
             }
@@ -2030,6 +2123,80 @@ impl WgpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        loop {
+            let mut encoder =
+                self.resources()
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("main_encoder"),
+                    });
+            if !self.encode_scene(
+                scene,
+                &frame.texture,
+                &frame_view,
+                &mut encoder,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            ) {
+                drop(encoder);
+                if self.instance_buffer_capacity >= self.max_buffer_size {
+                    log::error!(
+                        "instance buffer size grew too large: {}",
+                        self.instance_buffer_capacity
+                    );
+                    self.resources().queue.present(frame);
+                    return true;
+                }
+                self.grow_instance_buffer();
+                continue;
+            }
+
+            let resources = self.resources();
+            resources.queue.submit(std::iter::once(encoder.finish()));
+            #[cfg(target_os = "linux")]
+            if !dma_buf_leases.is_empty() {
+                resources
+                    .queue
+                    .on_submitted_work_done(move || drop(dma_buf_leases));
+            }
+            resources.queue.present(frame);
+            return true;
+        }
+    }
+
+    pub fn encode_external(&mut self, scene: &Scene, target: WgpuExternalRenderTarget<'_>) -> bool {
+        assert!(
+            self.resources().surface.is_none(),
+            "encode_external() requires an external renderer"
+        );
+
+        self.atlas.before_frame();
+        self.ensure_effect_pipelines(scene);
+        self.ensure_backdrop_effect_pipelines(scene);
+        self.ensure_intermediate_textures(false);
+        self.prepare_surfaces(scene);
+
+        let encoded = self.encode_scene(
+            scene,
+            target.texture,
+            target.view,
+            target.command_encoder,
+            wgpu::LoadOp::Load,
+        );
+        if !encoded && self.instance_buffer_capacity < self.max_buffer_size {
+            self.grow_instance_buffer();
+            self.needs_redraw = true;
+        }
+        encoded
+    }
+
+    fn encode_scene(
+        &mut self,
+        scene: &Scene,
+        target_texture: &wgpu::Texture,
+        target_view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> bool {
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
@@ -2077,95 +2244,43 @@ impl WgpuRenderer {
             );
         }
 
-        loop {
-            let mut instance_offset: u64 = 0;
-            let mut overflow = false;
+        let mut instance_offset: u64 = 0;
+        let mut overflow = false;
 
-            let mut encoder =
-                self.resources()
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("main_encoder"),
-                    });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
 
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("main_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-
-                for batch in scene.batches() {
-                    let ok = match batch {
-                        PrimitiveBatch::BackdropBlurs(range) => {
-                            if !self.backdrop_blur_supported {
-                                true
-                            } else {
-                                drop(pass);
-                                let did_draw = self.draw_backdrop_blurs(
-                                    &scene.backdrop_blurs[range],
-                                    &frame.texture,
-                                    &frame_view,
-                                    &mut encoder,
-                                    &mut instance_offset,
-                                );
-                                pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("main_pass_after_backdrop"),
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: &frame_view,
-                                        resolve_target: None,
-                                        ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        },
-                                        depth_slice: None,
-                                    })],
-                                    depth_stencil_attachment: None,
-                                    ..Default::default()
-                                });
-                                did_draw
-                            }
-                        }
-                        PrimitiveBatch::Quads(range) => {
-                            self.draw_quads(&scene.quads[range], &mut instance_offset, &mut pass)
-                        }
-                        PrimitiveBatch::Effects(range) => self.draw_effects(
-                            &scene.effects[range],
-                            &mut instance_offset,
-                            &mut pass,
-                        ),
-                        PrimitiveBatch::Shadows(range) => self.draw_shadows(
-                            &scene.shadows[range],
-                            &mut instance_offset,
-                            &mut pass,
-                        ),
-                        PrimitiveBatch::Paths(range) => {
-                            let paths = &scene.paths[range];
-                            if paths.is_empty() {
-                                continue;
-                            }
-
+            for batch in scene.batches() {
+                let ok = match batch {
+                    PrimitiveBatch::BackdropBlurs(range) => {
+                        if !self.backdrop_blur_supported {
+                            true
+                        } else {
                             drop(pass);
-
-                            let did_draw = self.draw_paths_to_intermediate(
-                                &mut encoder,
-                                paths,
+                            let did_draw = self.draw_backdrop_blurs(
+                                &scene.backdrop_blurs[range],
+                                target_texture,
+                                target_view,
+                                encoder,
                                 &mut instance_offset,
                             );
-
                             pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("main_pass_continued"),
+                                label: Some("main_pass_after_backdrop"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &frame_view,
+                                    view: target_view,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
                                         load: wgpu::LoadOp::Load,
@@ -2176,81 +2291,92 @@ impl WgpuRenderer {
                                 depth_stencil_attachment: None,
                                 ..Default::default()
                             });
-
-                            if did_draw {
-                                self.draw_paths_from_intermediate(
-                                    paths,
-                                    &mut instance_offset,
-                                    &mut pass,
-                                )
-                            } else {
-                                false
-                            }
+                            did_draw
                         }
-                        PrimitiveBatch::Underlines(range) => self.draw_underlines(
-                            &scene.underlines[range],
-                            &mut instance_offset,
-                            &mut pass,
-                        ),
-                        PrimitiveBatch::MonochromeSprites { texture_id, range } => self
-                            .draw_monochrome_sprites(
-                                &scene.monochrome_sprites[range],
-                                texture_id,
-                                &mut instance_offset,
-                                &mut pass,
-                            ),
-                        PrimitiveBatch::SubpixelSprites { texture_id, range } => self
-                            .draw_subpixel_sprites(
-                                &scene.subpixel_sprites[range],
-                                texture_id,
-                                &mut instance_offset,
-                                &mut pass,
-                            ),
-                        PrimitiveBatch::PolychromeSprites { texture_id, range } => self
-                            .draw_polychrome_sprites(
-                                &scene.polychrome_sprites[range],
-                                texture_id,
-                                &mut instance_offset,
-                                &mut pass,
-                            ),
-                        PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
-                            &scene.surfaces[range],
-                            &mut instance_offset,
-                            &mut pass,
-                        ),
-                    };
-                    if !ok {
-                        overflow = true;
-                        break;
                     }
+                    PrimitiveBatch::Quads(range) => {
+                        self.draw_quads(&scene.quads[range], &mut instance_offset, &mut pass)
+                    }
+                    PrimitiveBatch::Effects(range) => {
+                        self.draw_effects(&scene.effects[range], &mut instance_offset, &mut pass)
+                    }
+                    PrimitiveBatch::Shadows(range) => {
+                        self.draw_shadows(&scene.shadows[range], &mut instance_offset, &mut pass)
+                    }
+                    PrimitiveBatch::Paths(range) => {
+                        let paths = &scene.paths[range];
+                        if paths.is_empty() {
+                            continue;
+                        }
+
+                        drop(pass);
+
+                        let did_draw =
+                            self.draw_paths_to_intermediate(encoder, paths, &mut instance_offset);
+
+                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("main_pass_continued"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: None,
+                            ..Default::default()
+                        });
+
+                        if did_draw {
+                            self.draw_paths_from_intermediate(
+                                paths,
+                                &mut instance_offset,
+                                &mut pass,
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                    PrimitiveBatch::Underlines(range) => self.draw_underlines(
+                        &scene.underlines[range],
+                        &mut instance_offset,
+                        &mut pass,
+                    ),
+                    PrimitiveBatch::MonochromeSprites { texture_id, range } => self
+                        .draw_monochrome_sprites(
+                            &scene.monochrome_sprites[range],
+                            texture_id,
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
+                    PrimitiveBatch::SubpixelSprites { texture_id, range } => self
+                        .draw_subpixel_sprites(
+                            &scene.subpixel_sprites[range],
+                            texture_id,
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
+                    PrimitiveBatch::PolychromeSprites { texture_id, range } => self
+                        .draw_polychrome_sprites(
+                            &scene.polychrome_sprites[range],
+                            texture_id,
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
+                    PrimitiveBatch::Surfaces(range) => {
+                        self.draw_surfaces(&scene.surfaces[range], &mut instance_offset, &mut pass)
+                    }
+                };
+                if !ok {
+                    overflow = true;
+                    break;
                 }
             }
-
-            if overflow {
-                drop(encoder);
-                if self.instance_buffer_capacity >= self.max_buffer_size {
-                    log::error!(
-                        "instance buffer size grew too large: {}",
-                        self.instance_buffer_capacity
-                    );
-                    self.resources().queue.present(frame);
-                    return true;
-                }
-                self.grow_instance_buffer();
-                continue;
-            }
-
-            let resources = self.resources();
-            resources.queue.submit(std::iter::once(encoder.finish()));
-            #[cfg(target_os = "linux")]
-            if !dma_buf_leases.is_empty() {
-                resources
-                    .queue
-                    .on_submitted_work_done(move || drop(dma_buf_leases));
-            }
-            resources.queue.present(frame);
-            return true;
         }
+
+        !overflow
     }
 
     fn prepare_surfaces(&mut self, scene: &Scene) {
@@ -3916,7 +4042,7 @@ impl WgpuRenderer {
                 .as_mut()
                 .expect("GPU resources not available");
             surface.configure(&res.device, &self.surface_config);
-            res.surface = surface;
+            res.surface = Some(surface);
 
             // Invalidate intermediate textures — they'll be recreated lazily.
             res.invalidate_intermediate_textures();

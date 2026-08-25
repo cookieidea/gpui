@@ -11,11 +11,23 @@ use gpui::{
     PlatformWindow, WindowParams,
 };
 
+/// Creates virtual windows for applications driven by a non-compositor host.
+pub trait HeadlessWindowFactory {
+    /// Creates the platform window for a GPUI window handle.
+    fn open_window(
+        &self,
+        handle: AnyWindowHandle,
+        params: WindowParams,
+        display: Rc<dyn PlatformDisplay>,
+    ) -> anyhow::Result<Box<dyn PlatformWindow>>;
+}
+
 pub struct HeadlessClientState {
     pub(crate) _loop_handle: LoopHandle<'static, HeadlessClient>,
     pub(crate) event_loop: Option<calloop::EventLoop<'static, HeadlessClient>>,
     pub(crate) common: LinuxCommon,
     pub(crate) display: Rc<dyn PlatformDisplay>,
+    pub(crate) window_factory: Option<Rc<dyn HeadlessWindowFactory>>,
 }
 
 #[derive(Clone)]
@@ -23,6 +35,12 @@ pub(crate) struct HeadlessClient(Rc<RefCell<HeadlessClientState>>);
 
 impl HeadlessClient {
     pub(crate) fn new() -> Self {
+        Self::with_window_factory(None)
+    }
+
+    pub(crate) fn with_window_factory(
+        window_factory: Option<Rc<dyn HeadlessWindowFactory>>,
+    ) -> Self {
         let event_loop = EventLoop::try_new().unwrap();
 
         let (common, main_receiver, wake_receiver, tray_receiver) =
@@ -59,6 +77,7 @@ impl HeadlessClient {
             _loop_handle: handle,
             common,
             display: Rc::new(HeadlessDisplay::new()),
+            window_factory,
         })))
     }
 }
@@ -108,13 +127,14 @@ impl LinuxClient for HeadlessClient {
 
     fn open_window(
         &self,
-        _handle: AnyWindowHandle,
+        handle: AnyWindowHandle,
         params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
-        Ok(Box::new(HeadlessWindow::new(
-            params,
-            self.0.borrow().display.clone(),
-        )))
+        let state = self.0.borrow();
+        if let Some(factory) = &state.window_factory {
+            return factory.open_window(handle, params, state.display.clone());
+        }
+        Ok(Box::new(HeadlessWindow::new(params, state.display.clone())))
     }
 
     fn compositor_name(&self) -> &'static str {

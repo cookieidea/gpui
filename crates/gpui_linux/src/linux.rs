@@ -14,6 +14,7 @@ mod x11;
 mod xdg_desktop_portal;
 
 pub use dispatcher::*;
+pub use headless::HeadlessWindowFactory;
 pub(crate) use headless::*;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
@@ -58,4 +59,13 @@ pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
             r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#
         ),
     }
+}
+
+/// Returns a headless platform whose windows are supplied by an external host.
+pub fn headless_platform_with_window_factory(
+    factory: Rc<dyn HeadlessWindowFactory>,
+) -> Rc<dyn gpui::Platform> {
+    Rc::new(LinuxPlatform {
+        inner: HeadlessClient::with_window_factory(Some(factory)),
+    })
 }
