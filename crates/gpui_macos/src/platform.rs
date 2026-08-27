@@ -497,7 +497,8 @@ impl MacPlatform {
 
         if let Some((status_item, menu)) = menu_handles {
             unsafe {
-                if menu.numberOfItems() > 0 {
+                let item_count: NSInteger = msg_send![menu, numberOfItems];
+                if item_count > 0 {
                     let _: () = msg_send![status_item, popUpStatusItemMenu: menu];
                 }
             }
