@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # GPUI
 
 This is an independently maintained GPUI repository extracted from [Zed](https://github.com/zed-industries/zed).

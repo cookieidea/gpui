@@ -757,6 +757,7 @@ pub struct App {
     /// Whether the app was created by [`Application::new_inaccessible`]. No
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
+    reduce_motion: bool,
     flushing_effects: bool,
     pending_updates: usize,
     quit_mode: QuitMode,
@@ -852,6 +853,7 @@ impl App {
                 trays: FxHashSet::default(),
                 cursor_hide_mode: CursorHideMode::default(),
                 accessibility_force_disabled: false,
+                reduce_motion: false,
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
